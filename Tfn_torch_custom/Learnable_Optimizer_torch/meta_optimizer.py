@@ -7,9 +7,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.autograd import Variable
 import math
-from Tfn_torch_custom.Learnable_Optimizer_torch.utils import preprocess_gradients
-from Tfn_torch_custom.Learnable_Optimizer_torch.layer_norm_lstm import LayerNormLSTMCell
-from Tfn_torch_custom.Learnable_Optimizer_torch.layer_norm import LayerNorm1D
+from .utils import preprocess_gradients
+from .layer_norm_lstm import LayerNormLSTMCell
+from .layer_norm import LayerNorm1D
 
 class MetaOptimizer(nn.Module):
 

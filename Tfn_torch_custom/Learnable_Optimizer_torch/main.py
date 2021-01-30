@@ -6,9 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from Tfn_torch_custom.Learnable_Optimizer_torch.data import get_batch
-from Tfn_torch_custom.Learnable_Optimizer_torch.meta_optimizer import MetaModel, MetaOptimizer, FastMetaOptimizer
-from Tfn_torch_custom.Learnable_Optimizer_torch.model import Model
+from .data import get_batch
+from .meta_optimizer import MetaModel, MetaOptimizer, FastMetaOptimizer
+from .model import Model
 from torch.autograd import Variable
 from torchvision import datasets, transforms
 

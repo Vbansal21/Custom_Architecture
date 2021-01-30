@@ -9,7 +9,7 @@ from functools import partial
 from contextlib import contextmanager
 
 from local_attention import LocalAttention
-from Tfn_torch_custom.performer_pytorch.reversible import ReversibleSequence, SequentialSequence
+from .reversible import ReversibleSequence, SequentialSequence
 
 try:
     from apex import amp
@@ -292,7 +292,7 @@ class FeedForward(nn.Module):
         return x
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim, causal = False, heads = 8, dim_head = 64, local_heads = 0, local_window_size = 256, nb_features = None, feature_redraw_interval = 1000, generalized_attention = False, kernel_fn = nn.ReLU(), qr_uniform_q = False, dropout = 0., no_projection = False):
+    def __init__(self, dim, causal = False, heads = 16, dim_head = 64, local_heads = 0, local_window_size = 256, nb_features = None, feature_redraw_interval = 1000, generalized_attention = False, kernel_fn = nn.ReLU(), qr_uniform_q = False, dropout = 0., no_projection = False):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
@@ -309,7 +309,7 @@ class SelfAttention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, context = None, mask = None, context_mask = None, **kwargs):
+    def forward(self, x, context=None, mask = None, context_mask = None, **kwargs):
         b, n, _, h, gh = *x.shape, self.heads, self.global_heads
 
         cross_attend = exists(context)

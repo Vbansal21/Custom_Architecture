@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from Tfn_torch_custom.Learnable_Optimizer_torch.layer_norm import LayerNorm1D
+from .layer_norm import LayerNorm1D
 
 
 class LayerNormLSTMCell(nn.Module):

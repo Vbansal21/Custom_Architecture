@@ -46,6 +46,7 @@ in this tutorial) can be easily adapted/composed.
 
 import math
 import torch
+#from torch._C import int64
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -68,6 +69,8 @@ from torch.nn.init import xavier_normal_
 from torch.nn.parameter import Parameter
 
 from torch.utils.checkpoint import checkpoint as ckpt
+
+from pytorch_model_summary import summary
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -263,7 +266,9 @@ class TransformerEncoderLayer(Module):
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu"):
         super(TransformerEncoderLayer, self).__init__()
-        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
+        #self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
+        from performer_torch import SelfAttention
+        self.self_attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
         # Implementation of Feedforward model
         self.linear1 = Linear(d_model, dim_feedforward)
         self.dropout = Dropout(dropout)
@@ -292,8 +297,7 @@ class TransformerEncoderLayer(Module):
         Shape:
             see the docs in Transformer class.
         """
-        src2 = ckpt(self.self_attn,src, src, src, src_mask,
-                              src_key_padding_mask)[0]
+        src2 = ckpt(self.self_attn,src)[0]
         src = src + self.dropout1(src2)
         src = self.norm1(src)
         src2 = ckpt(self.dropout,ckpt(self.activation,ckpt(self.linear1,src)))
@@ -322,7 +326,7 @@ class TransformerEncoder(Module):
         super(TransformerEncoder, self).__init__()
         self.layers = _get_clones(encoder_layer, 1)
         d_model = d_model
-        self.num_parallel_layers = 5
+        self.num_parallel_layers = 1
         norm = LayerNorm(d_model)
         self.linear1 = [Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)]
         self.linear2 = [Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)]
@@ -403,7 +407,9 @@ class TransformerModel(nn.Module):
         self.decoder.bias.data.zero_()
         self.decoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, src, src_mask):
+    def forward(self, src, src_mask=None):
+        if src_mask is None:
+            src_mask = self.generate_square_subsequent_mask(src.size(1)).to(device)
         src = ckpt(self.encoder,src) * math.sqrt(self.ninp)
         output = self.pos_encoder(src)
         for i in range(self.nlayers):
@@ -431,11 +437,11 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+        pe = pe.unsqueeze(0)#.transpose(0, 1)
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
+        x = x + self.pe[:, :x.size(1)]
         return self.dropout(x)
 
 
@@ -504,10 +510,10 @@ def batchify(data, bsz):
     # Trim off any extra elements that wouldn't cleanly fit (remainders).
     data = data.narrow(0, 0, nbatch * bsz)
     # Evenly divide the data across the bsz batches.
-    data = data.view(bsz, -1).t().contiguous()
+    data = data.view(bsz, -1).t().contiguous().transpose(0, 1)
     return data.to(device)
 
-batch_size = 1000
+batch_size = 1
 eval_batch_size = batch_size
 train_data = batchify(train_data, batch_size)
 val_data = batchify(val_data, eval_batch_size)
@@ -534,11 +540,11 @@ test_data = batchify(test_data, eval_batch_size)
 # ``N`` is along dimension 1.
 #
 
-bptt = 1
+bptt = 100*4
 def get_batch(source, i):
-    seq_len = min(bptt, len(source) - 1 - i)
-    data = source[i:i+seq_len]
-    target = source[i+1:i+1+seq_len].reshape(-1)
+    seq_len = min(bptt, source.size(1) - 1 - i)
+    data = source[:,i:i+seq_len]
+    target = source[:,i+1:i+1+seq_len].reshape(-1)
     return data, target
 
 
@@ -560,6 +566,9 @@ nlayers = 1 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
 nhead = 16 # the number of heads in the multiheadattention models
 dropout = 0.2 # the dropout value
 model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
+#print(ntokens)
+print(sum(p.numel() for p in model.parameters() if p.requires_grad))
+#print(summary(model, torch.zeros([100,1],dtype=torch.long).to(device)))
 
 
 ######################################################################
@@ -591,11 +600,11 @@ def train():
     total_loss = 0.
     start_time = time.time()
     src_mask = model.generate_square_subsequent_mask(bptt).to(device)
-    for batch, i in enumerate(range(0, train_data.size(0) - 1, bptt)):
+    for batch, i in enumerate(range(0, train_data.size(1) - 1, bptt)):
         data, targets = get_batch(train_data, i)
         optimizer.zero_grad()
-        if data.size(0) != bptt:
-            src_mask = model.generate_square_subsequent_mask(data.size(0)).to(device)
+        if data.size(1) != bptt:
+            src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
         output = model(data, src_mask)
         loss = criterion(output.view(-1, ntokens), targets)
         loss.backward()
@@ -610,7 +619,7 @@ def train():
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
                   'lr {:02.2f} | ms/batch {:5.2f} | '
                   'loss {:5.2f} | ppl {:8.2f}'.format(
-                    epoch, batch, len(train_data) // bptt, scheduler.get_lr()[0],
+                    epoch, batch, train_data.size(1) // bptt, scheduler.get_lr()[0],
                     elapsed * 1000 / log_interval,
                     cur_loss, math.exp(cur_loss)))
             total_loss = 0
@@ -621,14 +630,14 @@ def evaluate(eval_model, data_source):
     total_loss = 0.
     src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     with torch.no_grad():
-        for i in range(0, data_source.size(0) - 1, bptt):
+        for i in range(0, data_source.size(1) - 1, bptt):
             data, targets = get_batch(data_source, i)
-            if data.size(0) != bptt:
-                src_mask = model.generate_square_subsequent_mask(data.size(0)).to(device)
+            if data.size(1) != bptt:
+                src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
             output = eval_model(data, src_mask)
             output_flat = output.view(-1, ntokens)
-            total_loss += len(data) * criterion(output_flat, targets).item()
-    return total_loss / (len(data_source) - 1)
+            total_loss += data.size(1) * criterion(output_flat, targets).item()
+    return total_loss / (data_source.size(1) - 1)
 
 ######################################################################
 # Loop over epochs. Save the model if the validation loss is the best

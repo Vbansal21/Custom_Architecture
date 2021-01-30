@@ -9,7 +9,7 @@ from collections import namedtuple
 from einops import rearrange, repeat, reduce
 from entmax import entmax15
 
-from ..x_transformers.autoregressive_wrapper import AutoregressiveWrapper
+from .autoregressive_wrapper import AutoregressiveWrapper
 
 # constants
 

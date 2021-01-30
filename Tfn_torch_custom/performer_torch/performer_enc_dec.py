@@ -1,8 +1,8 @@
 import re
 import torch
 from torch import nn
-from Tfn_torch_custom.performer_pytorch.performer_pytorch import PerformerLM
-from Tfn_torch_custom.performer_pytorch.autoregressive_wrapper import AutoregressiveWrapper
+from .performer_pytorch import PerformerLM
+from .autoregressive_wrapper import AutoregressiveWrapper
 
 ENC_PREFIX = 'enc_'
 DEC_PREFIX = 'dec_'
