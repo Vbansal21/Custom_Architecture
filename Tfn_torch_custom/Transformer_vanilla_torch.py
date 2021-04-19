@@ -576,7 +576,7 @@ test_data = batchify(test_data, eval_batch_size)
 # ``N`` is along dimension 1.
 #
 
-bptt = 100*10
+bptt = 25*40
 def get_batch(source, i):
     seq_len = min(bptt, source.size(1) - 1 - i)
     data = source[:,i:i+seq_len]
@@ -600,12 +600,14 @@ emsize = 512 # embedding dimension
 nhid = emsize * 4 # the dimension of the feedforward network model in nn.TransformerEncoder
 nlayers = 24 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
 nhead = 16 # the number of heads in the multiheadattention models
-dropout = 0.2 # the dropout value
-model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
+dropout = 0.3 # the dropout value
+model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout)
 #print(ntokens)
 print(sum(p.numel() for p in model.parameters()))
-print(summary(model, torch.zeros([100,1],dtype=torch.long).to(device)))
-
+import time
+date_time = str(time.asctime().replace(" ","_")).replace(":","_")
+#path = "/models/"+date_time+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
+path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
 
 ######################################################################
 # Run the model
@@ -629,8 +631,30 @@ criterion = nn.CrossEntropyLoss()
 lr = 5.0 # learning rate
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
+epoch = 0
 
-import time
+
+try:
+    #model.load_state_dict(torch.load(path), strict=False)
+    checkpoint_ = torch.load(path)
+
+    epoch = checkpoint_['epoch']
+    try:
+        model.load_state_dict(checkpoint_['model_state_dict'],strict=False)
+    except:
+        model = checkpoint_['model']
+    optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
+    del(checkpoint_)
+    torch.cuda.empty_cache()
+except:
+    pass
+
+model.to(device)
+
+print(summary(model, torch.zeros([25,25],dtype=torch.long).to(device)))
+
+
 def train():
     model.train() # Turn on the train mode
     total_loss = 0.
@@ -687,7 +711,12 @@ best_val_loss = float("inf")
 epochs = 10 # The number of epochs
 best_model = None
 
-for epoch in range(1, epochs + 1):
+import copy
+
+while True:
+    if epoch >= epochs:
+        break
+    epoch +=1
     epoch_start_time = time.time()
     train()
     val_loss = evaluate(model, val_data)
@@ -700,6 +729,17 @@ for epoch in range(1, epochs + 1):
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         best_model = model
+        best_model_state = copy.deepcopy(best_model.state_dict())
+        torch.save(
+            {
+                'epoch': epoch,
+                'model_state_dict': best_model_state,
+                'model': best_model,
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+            },
+            path
+        )
 
     scheduler.step()
 
@@ -715,3 +755,22 @@ print('=' * 89)
 print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
     test_loss, math.exp(test_loss)))
 print('=' * 89)
+
+def inference(text,eval_model = best_model):
+    text_input = data_process(str(text)).unsqueeze(1).to(device)
+    mask = eval_model.generate_square_subsequent_mask(text_input.size(0)).to(device)
+    out = eval_model(text_input,mask).view(-1, ntokens)
+    out = torch.argmax(out,dim=-1)
+    def inner_function(inp):
+        tmp = []
+        for i in inp:
+            if len(list(i.size())) > 1:
+                tmp.append(inner_function(i))
+            else:
+                tmp.append(vocab.itos[i])
+        if len(list(inp.size())) == 1:
+            tmp = list(" ".join(tmp))
+        return tmp
+    return inner_function(out)
+
+print(inference("Hello World!!! This is inference function on the currently trained model"))
