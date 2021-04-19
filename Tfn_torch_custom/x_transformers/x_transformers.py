@@ -650,7 +650,7 @@ class TransformerWrapper(nn.Module):
 
         mem, x = x[:, :num_mem], x[:, num_mem:]
 
-        out = self.to_logits(x) if not return_embeddings else x
+        out  = self.to_logits(x) if not return_embeddings else x
 
         if return_mems:
             hiddens = intermediates.hiddens

@@ -68,13 +68,22 @@ from torch.nn.init import constant_
 from torch.nn.init import xavier_normal_
 from torch.nn.parameter import Parameter
 
-from torch.utils.checkpoint import checkpoint as ckpt
+from torch.utils.checkpoint import checkpoint #as ckpt
+
+checkpointed = True
+
+def ckpt(f,inp):
+    if checkpointed:
+        return checkpoint(f,inp)
+    else:
+        return f(inp)
 
 from pytorch_model_summary import summary
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 torch.autograd.set_detect_anomaly(True)
+scaler = torch.cuda.amp.GradScaler()
 
 class MultiheadAttention(Module):
     r"""Allows the model to jointly attend to information
@@ -271,15 +280,22 @@ class TransformerEncoderLayer(Module):
         self.self_attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
         # Implementation of Feedforward model
         self.linear1 = Linear(d_model, dim_feedforward)
-        self.dropout = Dropout(dropout)
+        self.dropout3 = Dropout(dropout)
         self.linear2 = Linear(dim_feedforward, d_model)
+
+        self.linear3 = Linear(d_model, dim_feedforward)
+        self.dropout4 = Dropout(dropout)
+        self.linear4 = Linear(dim_feedforward, d_model)
 
         self.norm1 = LayerNorm(d_model)
         self.norm2 = LayerNorm(d_model)
+        self.norm3 = LayerNorm(d_model)
         self.dropout1 = Dropout(dropout)
         self.dropout2 = Dropout(dropout)
+        self.dropout5 = Dropout(dropout)
 
-        self.activation = _get_activation_fn(activation)
+        self.activation1 = _get_activation_fn(activation)
+        self.activation2 = _get_activation_fn(activation)
 
     def __setstate__(self, state):
         if 'activation' not in state:
@@ -297,13 +313,27 @@ class TransformerEncoderLayer(Module):
         Shape:
             see the docs in Transformer class.
         """
-        src2 = ckpt(self.self_attn,src)[0]
-        src = src + self.dropout1(src2)
-        src = self.norm1(src)
-        src2 = ckpt(self.dropout,ckpt(self.activation,ckpt(self.linear1,src)))
+
+        src2 = ckpt(self.linear1,src)
+        src2 = ckpt(self.activation1,src2)
+        src2 = ckpt(self.dropout1,src2)
         src2 = ckpt(self.linear2,src2)
-        src = src + self.dropout2(src2)
+        src2 = src + self.dropout2(src2)
+
+        src = self.norm1(src2)
+
+        src2 = ckpt(self.self_attn,src)[0]
+        src = src + self.dropout3(src2)
         src = self.norm2(src)
+
+        src2 = ckpt(self.linear3,src)
+        src2 = ckpt(self.activation2,src2)
+        src2 = ckpt(self.dropout4,src2)
+        src2 = ckpt(self.linear4,src2)
+
+        src = src + self.dropout5(src2)
+
+        src = self.norm3(src)
         return src
 
 class TransformerEncoder(Module):
@@ -326,10 +356,10 @@ class TransformerEncoder(Module):
         super(TransformerEncoder, self).__init__()
         self.layers = _get_clones(encoder_layer, 1)
         d_model = d_model
-        self.num_parallel_layers = 1
+        self.num_parallel_layers = 0
         norm = LayerNorm(d_model)
-        self.linear1 = [Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)]
-        self.linear2 = [Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)]
+        self.linear1 = nn.ModuleList([Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)])
+        self.linear2 = nn.ModuleList([Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)])
         self.enc = encoder_layer
         self.num_layers = num_layers
         self.norm = norm
@@ -355,8 +385,11 @@ class TransformerEncoder(Module):
 
         out = []
 
-        for layer in self.linear1:
-            out.append(self.norm1(layer(output)+output))
+        if len(self.linear1) > 0:
+            for layer in self.linear1:
+               out.append(self.norm1(layer(output)+output))
+        else:
+            out = [src]
 
         for enc in self.layers:
             tmp = []
@@ -365,16 +398,19 @@ class TransformerEncoder(Module):
             out = tmp.copy()
 
         tmp = []
-        for i,layer in enumerate(self.linear2):
-            tmp.append(self.norm3(layer(out[i]) + out[i]))
-        out = tmp.copy()
-        tmp = None
-        for i in out:
-            if tmp is None:
-                tmp = i
-            else:
-                tmp += i
-        output = tmp
+        if len(self.linear2) > 0:
+            for i,layer in enumerate(self.linear2):
+                tmp.append(self.norm3(layer(out[i]) + out[i]))
+            out = tmp.copy()
+            tmp = None
+            for i in out:
+                if tmp is None:
+                    tmp = i
+                else:
+                    tmp += i
+            output = tmp
+        else:
+            output = out[0] + src
 
         if self.norm is not None:
             output = self.norm(output)
@@ -388,7 +424,7 @@ class TransformerModel(nn.Module):
         self.model_type = 'Transformer'
         self.pos_encoder = PositionalEncoding(ninp, dropout)
         encoder_layers = TransformerEncoderLayer(ninp, nhead, nhid, dropout)
-        self.transformer_encoder = [TransformerEncoder(encoder_layers, nlayers, ninp).to(device=device) for _ in range(nlayers)]
+        self.transformer_encoder = nn.ModuleList([TransformerEncoder(encoder_layers, nlayers, ninp).to(device=device) for _ in range(nlayers)])
         self.encoder = nn.Embedding(ntoken, ninp)
         self.ninp = ninp
         self.decoder = nn.Linear(ninp, ntoken)
@@ -540,7 +576,7 @@ test_data = batchify(test_data, eval_batch_size)
 # ``N`` is along dimension 1.
 #
 
-bptt = 100*4
+bptt = 100*10
 def get_batch(source, i):
     seq_len = min(bptt, source.size(1) - 1 - i)
     data = source[:,i:i+seq_len]
@@ -559,16 +595,16 @@ def get_batch(source, i):
 # equal to the length of the vocab object.
 #
 
-ntokens = len(vocab.stoi) # the size of vocabulary
-emsize = 2048 # embedding dimension
+ntokens = len(vocab.stoi)+2 # the size of vocabulary
+emsize = 512 # embedding dimension
 nhid = emsize * 4 # the dimension of the feedforward network model in nn.TransformerEncoder
-nlayers = 1 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
+nlayers = 24 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
 nhead = 16 # the number of heads in the multiheadattention models
 dropout = 0.2 # the dropout value
 model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
 #print(ntokens)
-print(sum(p.numel() for p in model.parameters() if p.requires_grad))
-#print(summary(model, torch.zeros([100,1],dtype=torch.long).to(device)))
+print(sum(p.numel() for p in model.parameters()))
+print(summary(model, torch.zeros([100,1],dtype=torch.long).to(device)))
 
 
 ######################################################################
@@ -606,10 +642,14 @@ def train():
         if data.size(1) != bptt:
             src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
         output = model(data, src_mask)
-        loss = criterion(output.view(-1, ntokens), targets)
-        loss.backward()
+        with torch.cuda.amp.autocast():
+            loss = criterion(output.view(-1, ntokens), targets)
+        scaler.scale(loss).backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        optimizer.step()
+        #optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
+    
 
         total_loss += loss.item()
         log_interval = 200
@@ -644,7 +684,7 @@ def evaluate(eval_model, data_source):
 # we've seen so far. Adjust the learning rate after each epoch.
 
 best_val_loss = float("inf")
-epochs = 3 # The number of epochs
+epochs = 10 # The number of epochs
 best_model = None
 
 for epoch in range(1, epochs + 1):
