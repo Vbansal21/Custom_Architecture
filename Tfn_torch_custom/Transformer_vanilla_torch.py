@@ -521,8 +521,8 @@ def train(resume_batch=None,step_scheduler=4096,save_intermediate_intervel=2000)
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr {:02.2f} | ms/batch {:5.2f} | '
-                  'loss {:5.2f} | ppl {:8.2f}'.format(
+                  'lr {:04.3f} | ms/batch {:08.3f} | '
+                  'loss {:5.3f} | ppl {:10.3f}'.format(
                     epoch, batch, train_data.size(1) // bptt, scheduler.get_lr()[0],
                     elapsed * 1000 / log_interval,
                     cur_loss, math.exp(cur_loss)))
@@ -572,8 +572,8 @@ while True:
     train(16001)
     val_loss = evaluate(model, val_data)
     print('-' * 89)
-    print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-          'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+    print('| end of epoch {:3d} | time: {:08.3f}s | valid loss {:5.3f} | '
+          'valid ppl {:10.3f}'.format(epoch, (time.time() - epoch_start_time),
                                      val_loss, math.exp(val_loss)))
     print('-' * 89)
 
@@ -600,7 +600,7 @@ model = best_model
 
 test_loss = evaluate(best_model, test_data)
 print('=' * 89)
-print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
+print('| End of training | test loss {:5.3f} | test ppl {:10.3f}'.format(
     test_loss, math.exp(test_loss)))
 print('=' * 89)
 
