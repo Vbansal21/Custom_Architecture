@@ -1,49 +1,3 @@
-"""
-Sequence-to-Sequence Modeling with nn.Transformer and TorchText
-===============================================================
-
-This is a tutorial on how to train a sequence-to-sequence model
-that uses the
-`nn.Transformer <https://pytorch.org/docs/master/nn.html?highlight=nn%20transformer#torch.nn.Transformer>`__ module.
-
-PyTorch 1.2 release includes a standard transformer module based on the
-paper `Attention is All You
-Need <https://arxiv.org/pdf/1706.03762.pdf>`__. The transformer model
-has been proved to be superior in quality for many sequence-to-sequence
-problems while being more parallelizable. The ``nn.Transformer`` module
-relies entirely on an attention mechanism (another module recently
-implemented as `nn.MultiheadAttention <https://pytorch.org/docs/master/nn.html?highlight=multiheadattention#torch.nn.MultiheadAttention>`__) to draw global dependencies
-between input and output. The ``nn.Transformer`` module is now highly
-modularized such that a single component (like `nn.TransformerEncoder <https://pytorch.org/docs/master/nn.html?highlight=nn%20transformerencoder#torch.nn.TransformerEncoder>`__
-in this tutorial) can be easily adapted/composed.
-
-.. image:: ../_static/img/transformer_architecture.jpg
-
-"""
-
-######################################################################
-# Define the model
-# ----------------
-#
-
-
-######################################################################
-# In this tutorial, we train ``nn.TransformerEncoder`` model on a
-# language modeling task. The language modeling task is to assign a
-# probability for the likelihood of a given word (or a sequence of words)
-# to follow a sequence of words. A sequence of tokens are passed to the embedding
-# layer first, followed by a positional encoding layer to account for the order
-# of the word (see the next paragraph for more details). The
-# ``nn.TransformerEncoder`` consists of multiple layers of
-# `nn.TransformerEncoderLayer <https://pytorch.org/docs/master/nn.html?highlight=transformerencoderlayer#torch.nn.TransformerEncoderLayer>`__. Along with the input sequence, a square
-# attention mask is required because the self-attention layers in
-# ``nn.TransformerEncoder`` are only allowed to attend the earlier positions in
-# the sequence. For the language modeling task, any tokens on the future
-# positions should be masked. To have the actual words, the output
-# of ``nn.TransformerEncoder`` model is sent to the final Linear
-# layer, which is followed by a log-Softmax function.
-#
-
 import math
 import torch
 #from torch._C import int64
@@ -83,7 +37,7 @@ from pytorch_model_summary import summary
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 torch.autograd.set_detect_anomaly(True)
-scaler = torch.cuda.amp.GradScaler()
+#scaler = torch.cuda.amp.GradScaler()
 
 class MultiheadAttention(Module):
     r"""Allows the model to jointly attend to information
@@ -253,24 +207,8 @@ def _get_activation_fn(activation):
     raise RuntimeError("activation should be relu/gelu, not {}".format(activation))
 
 class TransformerEncoderLayer(Module):
-    r"""TransformerEncoderLayer is made up of self-attn and feedforward network.
-    This standard encoder layer is based on the paper "Attention Is All You Need".
-    Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
-    Lukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. In Advances in
-    Neural Information Processing Systems, pages 6000-6010. Users may modify or implement
-    in a different way during application.
-
-    Args:
-        d_model: the number of expected features in the input (required).
-        nhead: the number of heads in the multiheadattention models (required).
-        dim_feedforward: the dimension of the feedforward network model (default=2048).
-        dropout: the dropout value (default=0.1).
-        activation: the activation function of intermediate layer, relu or gelu (default=relu).
-
-    Examples::
-        >>> encoder_layer = nn.TransformerEncoderLayer(d_model=512, nhead=8)
-        >>> src = torch.rand(10, 32, 512)
-        >>> out = encoder_layer(src)
+    r"""Advances in
+    Neural Information Processing Systems
     """
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu"):
@@ -278,7 +216,6 @@ class TransformerEncoderLayer(Module):
         #self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
         from performer_torch import SelfAttention
         self.self_attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
-        # Implementation of Feedforward model
         self.linear1 = Linear(d_model, dim_feedforward)
         self.dropout3 = Dropout(dropout)
         self.linear2 = Linear(dim_feedforward, d_model)
@@ -303,16 +240,6 @@ class TransformerEncoderLayer(Module):
         super(TransformerEncoderLayer, self).__setstate__(state)
 
     def forward(self, src: Tensor, src_mask: Optional[Tensor] = None, src_key_padding_mask: Optional[Tensor] = None) -> Tensor:
-        r"""Pass the input through the encoder layer.
-
-        Args:
-            src: the sequence to the encoder layer (required).
-            src_mask: the mask for the src sequence (optional).
-            src_key_padding_mask: the mask for the src keys per batch (optional).
-
-        Shape:
-            see the docs in Transformer class.
-        """
 
         src2 = ckpt(self.linear1,src)
         src2 = ckpt(self.activation1,src2)
@@ -336,48 +263,29 @@ class TransformerEncoderLayer(Module):
         src = self.norm3(src)
         return src
 
-class TransformerEncoder(Module):
-    r"""TransformerEncoder is a stack of N encoder layers
-
-    Args:
-        encoder_layer: an instance of the TransformerEncoderLayer() class (required).
-        num_layers: the number of sub-encoder-layers in the encoder (required).
-        norm: the layer normalization component (optional).
-
-    Examples::
-        >>> encoder_layer = nn.TransformerEncoderLayer(d_model=512, nhead=8)
-        >>> transformer_encoder = nn.TransformerEncodeNoner(encoder_layer, num_layers=6)
-        >>> src = torch.rand(10, 32, 512)
-        >>> out = transformer_encoder(src)
-    """
+class TransformerEncoder(ModuleList):
     __constants__ = ['norm']
 
     def __init__(self, encoder_layer, num_layers, d_model, norm=None):
         super(TransformerEncoder, self).__init__()
         self.layers = _get_clones(encoder_layer, 1)
         d_model = d_model
-        self.num_parallel_layers = 0
-        norm = LayerNorm(d_model)
+        self.num_parallel_layers = 3
         self.linear1 = nn.ModuleList([Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)])
         self.linear2 = nn.ModuleList([Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)])
-        self.enc = encoder_layer
+        #self.enc = encoder_layer
         self.num_layers = num_layers
-        self.norm = norm
-        self.norm1 = LayerNorm(d_model)
+        self.norm = LayerNorm(d_model)
         self.norm2 = LayerNorm(d_model)
-        self.norm3 = LayerNorm(d_model)
+        if self.num_parallel_layers != 0:
+            self.norm1 = LayerNorm(d_model)
+            self.norm3 = LayerNorm(d_model)
+        else:
+            self.norm1 = None
+            self.norm3 = None
+
 
     def forward(self, src: Tensor, mask: Optional[Tensor] = None, src_key_padding_mask: Optional[Tensor] = None) -> Tensor:
-        r"""Pass the input through the encoder layers in turn.
-
-        Args:
-            src: the sequence to the encoder (required).
-            mask: the mask for the src sequence (optional).
-            src_key_padding_mask: the mask for the src keys per batch (optional).
-
-        Shape:
-            see the docs in Transformer class.
-        """
         output = src
 
         #for mod in self.layers:
@@ -385,22 +293,22 @@ class TransformerEncoder(Module):
 
         out = []
 
-        if len(self.linear1) > 0:
+        if self.num_parallel_layers > 0:
             for layer in self.linear1:
-               out.append(self.norm1(layer(output)+output))
+               out.append(self.norm1(ckpt(layer,output)+output))
         else:
             out = [src]
 
         for enc in self.layers:
             tmp = []
             for i in out:
-                tmp.append(self.norm2(enc(i) + i))
+                tmp.append(self.norm2(ckpt(enc,i) + i))
             out = tmp.copy()
 
         tmp = []
-        if len(self.linear2) > 0:
+        if self.num_parallel_layers > 0:
             for i,layer in enumerate(self.linear2):
-                tmp.append(self.norm3(layer(out[i]) + out[i]))
+                tmp.append(self.norm3(ckpt(layer,out[i]) + out[i]))
             out = tmp.copy()
             tmp = None
             for i in out:
@@ -429,6 +337,13 @@ class TransformerModel(nn.Module):
         self.ninp = ninp
         self.decoder = nn.Linear(ninp, ntoken)
         self.nlayers = nlayers
+        self.ffd = nn.Sequential(
+            nn.Linear(ninp,nhid*2),
+            nn.ReLU(),
+            nn.Linear(nhid*2,ninp),
+            nn.ReLU()
+        )
+        self.norm = LayerNorm(ninp)
 
         self.init_weights()
 
@@ -450,17 +365,11 @@ class TransformerModel(nn.Module):
         output = self.pos_encoder(src)
         for i in range(self.nlayers):
             output = self.transformer_encoder[i](output, src_mask)
+        output2 = ckpt(self.ffd,output) + output
+        output = ckpt(self.norm,output2)
         output = ckpt(self.decoder,output)
         return output
 
-
-######################################################################
-# ``PositionalEncoding`` module injects some information about the
-# relative or absolute position of the tokens in the sequence. The
-# positional encodings have the same dimension as the embeddings so that
-# the two can be summed. Here, we use ``sine`` and ``cosine`` functions of
-# different frequencies.
-#
 
 class PositionalEncoding(nn.Module):
 
@@ -481,39 +390,6 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-######################################################################
-# Load and batch data
-# -------------------
-#
-
-
-######################################################################
-# This tutorial uses ``torchtext`` to generate Wikitext-2 dataset. The
-# vocab object is built based on the train dataset and is used to numericalize
-# tokens into tensors. Starting from sequential data, the ``batchify()``
-# function arranges the dataset into columns, trimming off any tokens remaining
-# after the data has been divided into batches of size ``batch_size``.
-# For instance, with the alphabet as the sequence (total length of 26)
-# and a batch size of 4, we would divide the alphabet into 4 sequences of
-# length 6:
-#
-# .. math::
-#   \begin{bmatrix}
-#   \text{A} & \text{B} & \text{C} & \ldots & \text{X} & \text{Y} & \text{Z}
-#   \end{bmatrix}
-#   \Rightarrow
-#   \begin{bmatrix}
-#   \begin{bmatrix}\text{A} \\ \text{B} \\ \text{C} \\ \text{D} \\ \text{E} \\ \text{F}\end{bmatrix} &
-#   \begin{bmatrix}\text{G} \\ \text{H} \\ \text{I} \\ \text{J} \\ \text{K} \\ \text{L}\end{bmatrix} &
-#   \begin{bmatrix}\text{M} \\ \text{N} \\ \text{O} \\ \text{P} \\ \text{Q} \\ \text{R}\end{bmatrix} &
-#   \begin{bmatrix}\text{S} \\ \text{T} \\ \text{U} \\ \text{V} \\ \text{W} \\ \text{X}\end{bmatrix}
-#   \end{bmatrix}
-#
-# These columns are treated as independent by the model, which means that
-# the dependence of ``G`` and ``F`` can not be learned, but allows more
-# efficient batch processing.
-#
-
 import io
 import torch
 from torchtext.utils import download_from_url, extract_archive
@@ -527,9 +403,70 @@ tokenizer = get_tokenizer('basic_english')
 vocab = build_vocab_from_iterator(map(tokenizer,iter(io.open(train_filepath, encoding="utf8"))))
 
 url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
-#test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
+test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 #tokenizer = get_tokenizer('basic_english')
 #vocab = build_vocab_from_iterator(map(tokenizer,iter(io.open(train_filepath, encoding="utf8"))))
+
+def batchify(data, bsz):
+    nbatch = data.size(0) // bsz
+    data = data.narrow(0, 0, nbatch * bsz)
+    data = data.view(bsz, -1).contiguous()
+    return data.to(device)
+
+batch_size = 1
+eval_batch_size = batch_size
+
+bptt = 128
+def get_batch(source, i):
+    seq_len = min(bptt, source.size(1) - 1 - i)
+    data = source[:,i:i+seq_len]
+    target = source[:,i+1:i+1+seq_len].reshape(-1)
+    return data, target
+
+ntokens = len(vocab.stoi)+2 
+emsize = 1024 
+nhid = emsize * 4 
+nlayers = 8 
+nhead = 64 
+dropout = 0.1 
+model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout)
+print(sum(p.numel() for p in model.parameters()))
+import time
+date_time = str(time.asctime().replace(" ","_")).replace(":","_")
+#path = "/models/"+date_time+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
+path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
+
+criterion = nn.CrossEntropyLoss()
+lr = 0.005 # learning rate
+optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
+epoch = 5
+best_val_loss = float("inf")
+best_model = None
+
+
+try:
+    #model.load_state_dict(torch.load(path), strict=False)
+    checkpoint_ = torch.load(path)
+
+    #epoch = checkpoint_['epoch']
+    best_val_loss = checkpoint_['best_val_loss']
+    try:
+        model.load_state_dict(checkpoint_['model_state_dict'],strict=False)
+    except:
+        try:
+            model = checkpoint_['model']
+        except:
+            pass
+    #optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
+    #scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
+    vocab = checkpoint_['vocab']
+    best_model = model
+    del(checkpoint_)
+    torch.cuda.empty_cache()
+except:
+    pass
+
 
 def data_process(raw_text_iter):
   data = [torch.tensor([vocab[token] for token in tokenizer(item)],
@@ -540,144 +477,47 @@ train_data = data_process(iter(io.open(train_filepath, encoding="utf8")))
 val_data = data_process(iter(io.open(valid_filepath, encoding="utf8")))
 test_data = data_process(iter(io.open(test_filepath, encoding="utf8")))
 
-def batchify(data, bsz):
-    # Divide the dataset into bsz parts.
-    nbatch = data.size(0) // bsz
-    # Trim off any extra elements that wouldn't cleanly fit (remainders).
-    data = data.narrow(0, 0, nbatch * bsz)
-    # Evenly divide the data across the bsz batches.
-    data = data.view(bsz, -1).t().contiguous().transpose(0, 1)
-    return data.to(device)
-
-batch_size = 1
-eval_batch_size = batch_size
 train_data = batchify(train_data, batch_size)
 val_data = batchify(val_data, eval_batch_size)
 test_data = batchify(test_data, eval_batch_size)
 
+torch.cuda.empty_cache()
 
-######################################################################
-# Functions to generate input and target sequence
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#
-
-
-######################################################################
-# ``get_batch()`` function generates the input and target sequence for
-# the transformer model. It subdivides the source data into chunks of
-# length ``bptt``. For the language modeling task, the model needs the
-# following words as ``Target``. For example, with a ``bptt`` value of 2,
-# we’d get the following two Variables for ``i`` = 0:
-#
-# .. image:: ../_static/img/transformer_input_target.png
-#
-# It should be noted that the chunks are along dimension 0, consistent
-# with the ``S`` dimension in the Transformer model. The batch dimension
-# ``N`` is along dimension 1.
-#
-
-bptt = 25*40
-def get_batch(source, i):
-    seq_len = min(bptt, source.size(1) - 1 - i)
-    data = source[:,i:i+seq_len]
-    target = source[:,i+1:i+1+seq_len].reshape(-1)
-    return data, target
-
-
-######################################################################
-# Initiate an instance
-# --------------------
-#
-
-
-######################################################################
-# The model is set up with the hyperparameter below. The vocab size is
-# equal to the length of the vocab object.
-#
-
-ntokens = len(vocab.stoi)+2 # the size of vocabulary
-emsize = 512 # embedding dimension
-nhid = emsize * 4 # the dimension of the feedforward network model in nn.TransformerEncoder
-nlayers = 24 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
-nhead = 16 # the number of heads in the multiheadattention models
-dropout = 0.3 # the dropout value
-model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout)
-#print(ntokens)
-print(sum(p.numel() for p in model.parameters()))
-import time
-date_time = str(time.asctime().replace(" ","_")).replace(":","_")
-#path = "/models/"+date_time+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
-path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
-
-######################################################################
-# Run the model
-# -------------
-#
-
-
-######################################################################
-# `CrossEntropyLoss <https://pytorch.org/docs/master/nn.html?highlight=crossentropyloss#torch.nn.CrossEntropyLoss>`__
-# is applied to track the loss and
-# `SGD <https://pytorch.org/docs/master/optim.html?highlight=sgd#torch.optim.SGD>`__
-# implements stochastic gradient descent method as the optimizer. The initial
-# learning rate is set to 5.0. `StepLR <https://pytorch.org/docs/master/optim.html?highlight=steplr#torch.optim.lr_scheduler.StepLR>`__ is
-# applied to adjust the learn rate through epochs. During the
-# training, we use
-# `nn.utils.clip_grad_norm\_ <https://pytorch.org/docs/master/nn.html?highlight=nn%20utils%20clip_grad_norm#torch.nn.utils.clip_grad_norm_>`__
-# function to scale all the gradient together to prevent exploding.
-#
-
-criterion = nn.CrossEntropyLoss()
-lr = 5.0 # learning rate
-optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
-epoch = 0
-
-
-try:
-    #model.load_state_dict(torch.load(path), strict=False)
-    checkpoint_ = torch.load(path)
-
-    epoch = checkpoint_['epoch']
-    try:
-        model.load_state_dict(checkpoint_['model_state_dict'],strict=False)
-    except:
-        model = checkpoint_['model']
-    optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
-    del(checkpoint_)
-    torch.cuda.empty_cache()
-except:
-    pass
 
 model.to(device)
 
-print(summary(model, torch.zeros([25,25],dtype=torch.long).to(device)))
+print(summary(model, torch.zeros([1,1],dtype=torch.long).to(device)))
 
 
-def train():
-    model.train() # Turn on the train mode
+def train(resume_batch=None,step_scheduler=4096,save_intermediate_intervel=2000):
+    model.train() 
     total_loss = 0.
     start_time = time.time()
     src_mask = model.generate_square_subsequent_mask(bptt).to(device)
+    optimizer.zero_grad()
     for batch, i in enumerate(range(0, train_data.size(1) - 1, bptt)):
+        if resume_batch != None:
+            if batch < resume_batch:
+                continue
         data, targets = get_batch(train_data, i)
-        optimizer.zero_grad()
+        
         if data.size(1) != bptt:
             src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
         output = model(data, src_mask)
-        with torch.cuda.amp.autocast():
-            loss = criterion(output.view(-1, ntokens), targets)
-        scaler.scale(loss).backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        #optimizer.step()
-        scaler.step(optimizer)
-        scaler.update()
+        #with torch.cuda.amp.autocast():
+        loss = criterion(output.view(-1, ntokens), targets)
+        #scaler.scale(loss).backward()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 4.0)
+        optimizer.step()
+        #scaler.step(optimizer)
+        #scaler.update()
     
 
         total_loss += loss.item()
         log_interval = 200
-        if batch % log_interval == 0 and batch > 0:
+        if batch % log_interval == 0 and batch > 0 and batch != save_intermediate_intervel:
+            optimizer.zero_grad()
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
@@ -688,9 +528,26 @@ def train():
                     cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
+        if batch % save_intermediate_intervel == 0 and batch > 0:
+
+            torch.save(
+            {
+                'epoch': epoch,
+                'model_state_dict': best_model.state_dict(),
+                #'model': best_model,
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_loss': best_val_loss,
+                'vocab': vocab,
+            },
+            path
+            )
+        if step_scheduler != None:
+            if batch % step_scheduler == 0 and batch > 0:
+                scheduler.step()
 
 def evaluate(eval_model, data_source):
-    eval_model.eval() # Turn on the evaluation mode
+    eval_model.eval()
     total_loss = 0.
     src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     with torch.no_grad():
@@ -703,13 +560,7 @@ def evaluate(eval_model, data_source):
             total_loss += data.size(1) * criterion(output_flat, targets).item()
     return total_loss / (data_source.size(1) - 1)
 
-######################################################################
-# Loop over epochs. Save the model if the validation loss is the best
-# we've seen so far. Adjust the learning rate after each epoch.
-
-best_val_loss = float("inf")
-epochs = 10 # The number of epochs
-best_model = None
+epochs = 6
 
 import copy
 
@@ -718,7 +569,7 @@ while True:
         break
     epoch +=1
     epoch_start_time = time.time()
-    train()
+    train(16001)
     val_loss = evaluate(model, val_data)
     print('-' * 89)
     print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
@@ -726,29 +577,26 @@ while True:
                                      val_loss, math.exp(val_loss)))
     print('-' * 89)
 
+    scheduler.step()
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         best_model = model
-        best_model_state = copy.deepcopy(best_model.state_dict())
+        #best_model = best_model.to(torch.device("cpu"))
+        #best_model_state = copy.deepcopy(best_model.state_dict())
         torch.save(
             {
                 'epoch': epoch,
-                'model_state_dict': best_model_state,
-                'model': best_model,
+                'model_state_dict': best_model.state_dict(),
+                #'model': best_model,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_loss': best_val_loss,
+                'vocab': vocab,
             },
             path
         )
-
-    scheduler.step()
-
-
-######################################################################
-# Evaluate the model with the test dataset
-# -------------------------------------
-#
-# Apply the best model to check the result with the test dataset.
+#best_model = best_model.to(device)
+model = best_model
 
 test_loss = evaluate(best_model, test_data)
 print('=' * 89)
@@ -756,21 +604,25 @@ print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
     test_loss, math.exp(test_loss)))
 print('=' * 89)
 
+
 def inference(text,eval_model = best_model):
-    text_input = data_process(str(text)).unsqueeze(1).to(device)
-    mask = eval_model.generate_square_subsequent_mask(text_input.size(0)).to(device)
+    text_input = data_process(text).unsqueeze(0).to(device)
+    mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
     out = eval_model(text_input,mask).view(-1, ntokens)
     out = torch.argmax(out,dim=-1)
     def inner_function(inp):
-        tmp = []
+        tmp = [""]
         for i in inp:
-            if len(list(i.size())) > 1:
-                tmp.append(inner_function(i))
-            else:
-                tmp.append(vocab.itos[i])
-        if len(list(inp.size())) == 1:
-            tmp = list(" ".join(tmp))
+            tmp[0] = tmp[0] + vocab.itos[i] + " "
         return tmp
-    return inner_function(out)
+    result = inner_function(out)
+    return [[text,result],[text_input,out]]
 
 print(inference("Hello World!!! This is inference function on the currently trained model"))
+
+while True:
+    i = int(input("enter 1 for inference, 0 for exiting:"))
+    if i == 0:
+        break
+    inp = input("input text, 1 string at a time, for inference:")
+    print(inference(inp))
