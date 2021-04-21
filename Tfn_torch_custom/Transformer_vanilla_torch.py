@@ -1,3 +1,4 @@
+from logging import exception
 import math
 import torch
 #from torch._C import int64
@@ -34,7 +35,8 @@ def ckpt(f,inp):
 
 from pytorch_model_summary import summary
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 torch.autograd.set_detect_anomaly(True)
 #scaler = torch.cuda.amp.GradScaler()
@@ -417,7 +419,7 @@ def batchify(data, bsz):
     data = data.view(bsz, -1).contiguous()
     return data.to(device)
 
-batch_size = 1
+batch_size = 4
 eval_batch_size = batch_size
 
 bptt = 1536
@@ -452,7 +454,7 @@ best_model = None
 
 try:
     #model.load_state_dict(torch.load(path), strict=False)
-    checkpoint_ = torch.load(path)
+    checkpoint_ = torch.load(path, map_location=device)
 
     epoch = checkpoint_['epoch']
     best_val_loss = checkpoint_['best_val_loss']
@@ -469,7 +471,8 @@ try:
     best_model = model
     del(checkpoint_)
     torch.cuda.empty_cache()
-except:
+except Exception as e:
+    print("Exception",e)
     pass
 
 
@@ -566,7 +569,7 @@ def evaluate(eval_model, data_source):
             total_loss += data.size(1) * criterion(output_flat, targets).item()
     return total_loss / (data_source.size(1) - 1)
 
-epochs = 2
+epochs = 1
 
 while True:
     if epoch >= epochs:
