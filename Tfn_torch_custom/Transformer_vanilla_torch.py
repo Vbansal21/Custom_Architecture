@@ -263,14 +263,14 @@ class TransformerEncoderLayer(Module):
         src = self.norm3(src)
         return src
 
-class TransformerEncoder(ModuleList):
+class TransformerEncoder(Module):
     __constants__ = ['norm']
 
-    def __init__(self, encoder_layer, num_layers, d_model, norm=None):
+    def __init__(self, encoder_layer, num_layers, d_model,num_parallel_layers = 3, norm=None):
         super(TransformerEncoder, self).__init__()
         self.layers = _get_clones(encoder_layer, 1)
         d_model = d_model
-        self.num_parallel_layers = 3
+        self.num_parallel_layers = num_parallel_layers
         self.linear1 = nn.ModuleList([Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)])
         self.linear2 = nn.ModuleList([Linear(d_model, d_model).to(device) for _ in range(self.num_parallel_layers)])
         #self.enc = encoder_layer
@@ -327,23 +327,25 @@ class TransformerEncoder(ModuleList):
 
 class TransformerModel(nn.Module):
 
-    def __init__(self, ntoken, ninp, nhead, nhid, nlayers, dropout=0.5):
+    def __init__(self, ntoken, ninp, nhead, nhid, nlayers,num_parallel_layers = 0, dropout=0.5):
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
         self.pos_encoder = PositionalEncoding(ninp, dropout)
         encoder_layers = TransformerEncoderLayer(ninp, nhead, nhid, dropout)
-        self.transformer_encoder = nn.ModuleList([TransformerEncoder(encoder_layers, nlayers, ninp).to(device=device) for _ in range(nlayers)])
+        self.transformer_encoder = nn.ModuleList([TransformerEncoder(encoder_layers, nlayers, ninp, num_parallel_layers).to(device=device) for _ in range(nlayers)])
         self.encoder = nn.Embedding(ntoken, ninp)
         self.ninp = ninp
         self.decoder = nn.Linear(ninp, ntoken)
         self.nlayers = nlayers
-        self.ffd = nn.Sequential(
+        self.ffd1 = nn.Sequential(
             nn.Linear(ninp,nhid*2),
             nn.ReLU(),
             nn.Linear(nhid*2,ninp),
             nn.ReLU()
         )
-        self.norm = LayerNorm(ninp)
+        self.ffd2 = copy.deepcopy(self.ffd1)
+        self.norm1 = LayerNorm(ninp)
+        self.norm2 = LayerNorm(ninp)
 
         self.init_weights()
 
@@ -363,10 +365,12 @@ class TransformerModel(nn.Module):
             src_mask = self.generate_square_subsequent_mask(src.size(1)).to(device)
         src = ckpt(self.encoder,src) * math.sqrt(self.ninp)
         output = self.pos_encoder(src)
+        output2 = ckpt(self.ffd1,output) + output
+        output = ckpt(self.norm1,output2)
         for i in range(self.nlayers):
             output = self.transformer_encoder[i](output, src_mask)
-        output2 = ckpt(self.ffd,output) + output
-        output = ckpt(self.norm,output2)
+        output2 = ckpt(self.ffd2,output) + output
+        output = ckpt(self.norm2,output2)
         output = ckpt(self.decoder,output)
         return output
 
@@ -403,7 +407,7 @@ tokenizer = get_tokenizer('basic_english')
 vocab = build_vocab_from_iterator(map(tokenizer,iter(io.open(train_filepath, encoding="utf8"))))
 
 url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
-test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
+#test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 #tokenizer = get_tokenizer('basic_english')
 #vocab = build_vocab_from_iterator(map(tokenizer,iter(io.open(train_filepath, encoding="utf8"))))
 
@@ -416,7 +420,7 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 128
+bptt = 1536
 def get_batch(source, i):
     seq_len = min(bptt, source.size(1) - 1 - i)
     data = source[:,i:i+seq_len]
@@ -424,23 +428,24 @@ def get_batch(source, i):
     return data, target
 
 ntokens = len(vocab.stoi)+2 
-emsize = 1024 
+emsize = 512 
 nhid = emsize * 4 
-nlayers = 8 
-nhead = 64 
-dropout = 0.1 
-model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout)
-print(sum(p.numel() for p in model.parameters()))
+nlayers = 24 
+nhead = 16 
+num_parallel_layers = 3
+dropout = 0.3 
+model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout)
+#print(sum(p.numel() for p in model.parameters()))
 import time
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
-#path = "/models/"+date_time+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
-path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
+#path = "/models/"+date_time+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
+path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.005 # learning rate
+lr = 0.01 # learning rate
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
-epoch = 5
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.80)
+epoch = 0
 best_val_loss = float("inf")
 best_model = None
 
@@ -449,7 +454,7 @@ try:
     #model.load_state_dict(torch.load(path), strict=False)
     checkpoint_ = torch.load(path)
 
-    #epoch = checkpoint_['epoch']
+    epoch = checkpoint_['epoch']
     best_val_loss = checkpoint_['best_val_loss']
     try:
         model.load_state_dict(checkpoint_['model_state_dict'],strict=False)
@@ -489,12 +494,12 @@ model.to(device)
 print(summary(model, torch.zeros([1,1],dtype=torch.long).to(device)))
 
 
-def train(resume_batch=None,step_scheduler=4096,save_intermediate_intervel=2000):
+def train(resume_batch=None,step_scheduler=1200,save_intermediate_intervel=4096):
     model.train() 
     total_loss = 0.
     start_time = time.time()
     src_mask = model.generate_square_subsequent_mask(bptt).to(device)
-    optimizer.zero_grad()
+    #optimizer.zero_grad()
     for batch, i in enumerate(range(0, train_data.size(1) - 1, bptt)):
         if resume_batch != None:
             if batch < resume_batch:
@@ -510,14 +515,15 @@ def train(resume_batch=None,step_scheduler=4096,save_intermediate_intervel=2000)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 4.0)
         optimizer.step()
+        optimizer.zero_grad()
+        #optimizer.step()
         #scaler.step(optimizer)
         #scaler.update()
     
 
         total_loss += loss.item()
-        log_interval = 200
-        if batch % log_interval == 0 and batch > 0 and batch != save_intermediate_intervel:
-            optimizer.zero_grad()
+        log_interval = 13
+        if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
@@ -560,24 +566,22 @@ def evaluate(eval_model, data_source):
             total_loss += data.size(1) * criterion(output_flat, targets).item()
     return total_loss / (data_source.size(1) - 1)
 
-epochs = 6
-
-import copy
+epochs = 2
 
 while True:
     if epoch >= epochs:
         break
     epoch +=1
     epoch_start_time = time.time()
-    train(16001)
+    train()
     val_loss = evaluate(model, val_data)
-    print('-' * 89)
+    print('-' * 95)
     print('| end of epoch {:3d} | time: {:08.3f}s | valid loss {:5.3f} | '
           'valid ppl {:10.3f}'.format(epoch, (time.time() - epoch_start_time),
                                      val_loss, math.exp(val_loss)))
-    print('-' * 89)
+    print('-' * 95)
 
-    scheduler.step()
+    #scheduler.step()
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         best_model = model
@@ -599,10 +603,10 @@ while True:
 model = best_model
 
 test_loss = evaluate(best_model, test_data)
-print('=' * 89)
+print('=' * 95)
 print('| End of training | test loss {:5.3f} | test ppl {:10.3f}'.format(
     test_loss, math.exp(test_loss)))
-print('=' * 89)
+print('=' * 95)
 
 
 def inference(text,eval_model = best_model):
