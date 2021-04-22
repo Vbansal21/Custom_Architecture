@@ -27,7 +27,7 @@ from torch.utils.checkpoint import checkpoint #as ckpt
 
 checkpointed = True
 
-def ckpt(f,inp):
+def ckpt(f,inp,checkpointed = checkpointed):
     if checkpointed:
         return checkpoint(f,inp)
     else:
@@ -307,17 +307,10 @@ class TransformerEncoder(Module):
                 tmp.append(self.norm2(ckpt(enc,i) + i))
             out = tmp.copy()
 
-        tmp = []
+        tmp = src
         if self.num_parallel_layers > 0:
-            for i,layer in enumerate(self.linear2):
-                tmp.append(self.norm3(ckpt(layer,out[i]) + out[i]))
-            out = tmp.copy()
-            tmp = None
-            for i in out:
-                if tmp is None:
-                    tmp = i
-                else:
-                    tmp += i
+            for i,layer in (out,self.linear2):
+                tmp += self.norm3(ckpt(layer,i) + i)
             output = tmp
         else:
             output = out[0] + src
@@ -423,7 +416,7 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 2000
+bptt = 1024
 import random
 def random_mask_encoder(data):
     rnd = random.randint
@@ -451,7 +444,7 @@ emsize = 512
 nhid = emsize * 4 
 nlayers = 24 
 nhead = 16 
-num_parallel_layers = 3
+num_parallel_layers = 5
 dropout = 0.3 
 model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout)
 #print(sum(p.numel() for p in model.parameters()))
@@ -461,7 +454,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1.0 # learning rate
+lr = 0.1 # learning rate
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.80)
 epoch = 0
@@ -542,7 +535,7 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096)
     
 
         total_loss += loss.item()
-        log_interval = 13
+        log_interval = 2
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
