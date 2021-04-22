@@ -35,8 +35,8 @@ def ckpt(f,inp):
 
 from pytorch_model_summary import summary
 
-#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#device = torch.device("cpu")
 
 torch.autograd.set_detect_anomaly(True)
 #scaler = torch.cuda.amp.GradScaler()
@@ -399,19 +399,20 @@ class PositionalEncoding(nn.Module):
 import io
 import torch
 from torchtext.utils import download_from_url, extract_archive
-from torchtext.data.utils import get_tokenizer
-from torchtext.vocab import build_vocab_from_iterator
+#from torchtext.data.utils import get_tokenizer
+#from torchtext.vocab import build_vocab_from_iterator
+from torchnlp.encoders.text import SubwordEncoder
 
 
 url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
+#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
-tokenizer = get_tokenizer('basic_english')
-vocab = build_vocab_from_iterator(map(tokenizer,iter(io.open(train_filepath, encoding="utf8"))))
-
-url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
-#test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 #tokenizer = get_tokenizer('basic_english')
-#vocab = build_vocab_from_iterator(map(tokenizer,iter(io.open(train_filepath, encoding="utf8"))))
+tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=50000,reserved_tokens=[
+    '<pad>','<unk>','</s>','<s>','<copy>','<mask>'
+])
+vocab = tokenizer.vocab
+
 
 def batchify(data, bsz):
     nbatch = data.size(0) // bsz
@@ -419,17 +420,33 @@ def batchify(data, bsz):
     data = data.view(bsz, -1).contiguous()
     return data.to(device)
 
-batch_size = 4
+batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 1536
-def get_batch(source, i):
+bptt = 2000
+import random
+def random_mask_encoder(data):
+    rnd = random.randint
+    for i in range(data.size(0)):
+        for j in range(data.size(1)):
+            if rnd(0,1):
+                data[i,j] = data[i,j]
+            else:
+                data[i,j] = 5
+    data = torch.tensor(data)
+    data.to(device)
+    return data
+
+
+def get_batch(source, i, mask_input = True):
     seq_len = min(bptt, source.size(1) - 1 - i)
     data = source[:,i:i+seq_len]
+    if mask_input:
+        data = random_mask_encoder(data) #torch.tensor.new_full(data.size(),tokenizer.encode("<mask>"))
     target = source[:,i+1:i+1+seq_len].reshape(-1)
     return data, target
 
-ntokens = len(vocab.stoi)+2 
+ntokens = tokenizer.vocab_size 
 emsize = 512 
 nhid = emsize * 4 
 nlayers = 24 
@@ -444,12 +461,12 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.01 # learning rate
+lr = 1.0 # learning rate
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.80)
 epoch = 0
 best_val_loss = float("inf")
-best_model = None
+best_model = model
 
 
 try:
@@ -465,9 +482,10 @@ try:
             model = checkpoint_['model']
         except:
             pass
-    #optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
-    #scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
+    optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
     vocab = checkpoint_['vocab']
+    tokenizer = checkpoint_['tokenizer']
     best_model = model
     del(checkpoint_)
     torch.cuda.empty_cache()
@@ -477,13 +495,12 @@ except Exception as e:
 
 
 def data_process(raw_text_iter):
-  data = [torch.tensor([vocab[token] for token in tokenizer(item)],
-                       dtype=torch.long) for item in raw_text_iter]
-  return torch.cat(tuple(filter(lambda t: t.numel() > 0, data)))
+  data = tokenizer.encode(raw_text_iter)
+  return torch.tensor(data) #torch.cat(tuple(filter(lambda t: t.numel() > 0, data)))
 
-train_data = data_process(iter(io.open(train_filepath, encoding="utf8")))
-val_data = data_process(iter(io.open(valid_filepath, encoding="utf8")))
-test_data = data_process(iter(io.open(test_filepath, encoding="utf8")))
+train_data = data_process(io.open(train_filepath, encoding="utf8").read())
+val_data = data_process(io.open(valid_filepath, encoding="utf8").read())
+test_data = data_process(io.open(test_filepath, encoding="utf8").read())
 
 train_data = batchify(train_data, batch_size)
 val_data = batchify(val_data, eval_batch_size)
@@ -497,7 +514,7 @@ model.to(device)
 print(summary(model, torch.zeros([1,1],dtype=torch.long).to(device)))
 
 
-def train(resume_batch=None,step_scheduler=1200,save_intermediate_intervel=4096):
+def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096):
     model.train() 
     total_loss = 0.
     start_time = time.time()
@@ -548,6 +565,7 @@ def train(resume_batch=None,step_scheduler=1200,save_intermediate_intervel=4096)
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
+                'tokenizer': tokenizer,
             },
             path
             )
@@ -561,7 +579,7 @@ def evaluate(eval_model, data_source):
     src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     with torch.no_grad():
         for i in range(0, data_source.size(1) - 1, bptt):
-            data, targets = get_batch(data_source, i)
+            data, targets = get_batch(data_source, i, mask_input = False)
             if data.size(1) != bptt:
                 src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
             output = eval_model(data, src_mask)
@@ -569,7 +587,7 @@ def evaluate(eval_model, data_source):
             total_loss += data.size(1) * criterion(output_flat, targets).item()
     return total_loss / (data_source.size(1) - 1)
 
-epochs = 1
+epochs = 10
 
 while True:
     if epoch >= epochs:
@@ -599,6 +617,7 @@ while True:
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
+                'tokenizer': tokenizer,
             },
             path
         )
@@ -617,12 +636,7 @@ def inference(text,eval_model = best_model):
     mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
     out = eval_model(text_input,mask).view(-1, ntokens)
     out = torch.argmax(out,dim=-1)
-    def inner_function(inp):
-        tmp = [""]
-        for i in inp:
-            tmp[0] = tmp[0] + vocab.itos[i] + " "
-        return tmp
-    result = inner_function(out)
+    result = tokenizer.decode(out)
     return [[text,result],[text_input,out]]
 
 print(inference("Hello World!!! This is inference function on the currently trained model"))

@@ -1,0 +1,17 @@
+torch
+torchtext
+torchnlp
+pytorch-nlp
+pytorch_model_summary
+einops
+local_attention
+apex
+pytorch-fast-transformers
+entmax
+torchvision
+inputimeout
+matplotlib 
+numpy
+mogrifier
+tqdm
+spacy

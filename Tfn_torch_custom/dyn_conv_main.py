@@ -6,9 +6,9 @@ import time
 import argparse
 import torchvision.models.vgg
 import torchvision.transforms as transforms
-from .dynamic_models.dy_vgg import vgg11 as dy_vgg11
-from .dynamic_models.raw_vgg import vgg11 as raw_vgg11
-from .dynamic_models.dy_resnet import resnet18 as dy_resnet18
+#from .dynamic_models.dy_vgg import vgg11 as dy_vgg11
+#from .dynamic_models.raw_vgg import vgg11 as raw_vgg11
+#from .dynamic_models.dy_resnet import resnet18 as dy_resnet18
 from torchvision.models.resnet import resnet18 as raw_resnet18
 
 parser = argparse.ArgumentParser(description='dynamic convolution')
