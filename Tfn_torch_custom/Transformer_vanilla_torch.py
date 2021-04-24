@@ -25,9 +25,7 @@ from torch.nn.parameter import Parameter
 
 from torch.utils.checkpoint import checkpoint #as ckpt
 
-checkpointed = True
-
-def ckpt(f,inp,checkpointed = checkpointed):
+def ckpt(f,inp,checkpointed = True):
     if checkpointed:
         return checkpoint(f,inp)
     else:
@@ -202,39 +200,52 @@ def _get_clones(module, N):
 
 def _get_activation_fn(activation):
     if activation == "relu":
-        return F.relu
+        return nn.ReLU()
     elif activation == "gelu":
-        return F.gelu
+        return nn.GELU()
 
     raise RuntimeError("activation should be relu/gelu, not {}".format(activation))
 
-class TransformerEncoderLayer(Module):
+class TransformerEncoderLayer(nn.ModuleList):
     r"""Advances in
     Neural Information Processing Systems
     """
 
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu"):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="gelu"):
         super(TransformerEncoderLayer, self).__init__()
         #self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
         from performer_torch import SelfAttention
-        self.self_attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
-        self.linear1 = Linear(d_model, dim_feedforward)
-        self.dropout3 = Dropout(dropout)
-        self.linear2 = Linear(dim_feedforward, d_model)
-
-        self.linear3 = Linear(d_model, dim_feedforward)
-        self.dropout4 = Dropout(dropout)
-        self.linear4 = Linear(dim_feedforward, d_model)
+        attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
+        from hopfield_modules import Hopfield
+        hopfield = Hopfield(
+            input_size=d_model,
+            num_heads=nhead
+            )
+        from product_key_memory import PKM
 
         self.norm1 = LayerNorm(d_model)
         self.norm2 = LayerNorm(d_model)
-        self.norm3 = LayerNorm(d_model)
-        self.dropout1 = Dropout(dropout)
-        self.dropout2 = Dropout(dropout)
-        self.dropout5 = Dropout(dropout)
+        self.dropout = Dropout(dropout)
 
         self.activation1 = _get_activation_fn(activation)
         self.activation2 = _get_activation_fn(activation)
+        self.activation3 = _get_activation_fn(activation)
+        self.activation4 = _get_activation_fn(activation)
+
+        from x_transformers.x_transformers import GEGLU
+        self.ffd = nn.Sequential(
+            nn.Linear(d_model,dim_feedforward),
+            self.activation1,
+            nn.Linear(dim_feedforward,d_model),
+            self.activation2,
+            PKM(d_model),
+            self.activation3,
+            GEGLU(d_model,d_model),
+            self.activation4
+        )
+        from ET_torch.models.evolved_transformer_block import EvolvedTransformerBlock
+        self.self_attn1 = EvolvedTransformerBlock(d_model,num_heads=nhead,attn=attn,ffd=copy.deepcopy(self.ffd))
+        self.self_attn2 = EvolvedTransformerBlock(d_model,num_heads=nhead,attn=hopfield,ffd=copy.deepcopy(self.ffd),context=False)
 
     def __setstate__(self, state):
         if 'activation' not in state:
@@ -243,29 +254,27 @@ class TransformerEncoderLayer(Module):
 
     def forward(self, src: Tensor, src_mask: Optional[Tensor] = None, src_key_padding_mask: Optional[Tensor] = None) -> Tensor:
 
+        """
         src2 = ckpt(self.linear1,src)
         src2 = ckpt(self.activation1,src2)
         src2 = ckpt(self.dropout1,src2)
         src2 = ckpt(self.linear2,src2)
-        src2 = src + self.dropout2(src2)
+        src3 = ckpt(self.pkm1,src)
+        src2 = src + self.dropout2(src2 + src3)
+        del(src3)
+        """
+        output = ckpt(self.ffd,src) + src
+        output = self.norm1(output)
+        src2 = ckpt(self.self_attn1,output)
+        src3 = ckpt(self.self_attn2,output)
 
-        src = self.norm1(src2)
+        output = self.dropout(src2 + src3)
+        del(src2,src3)
 
-        src2 = ckpt(self.self_attn,src)[0]
-        src = src + self.dropout3(src2)
-        src = self.norm2(src)
-
-        src2 = ckpt(self.linear3,src)
-        src2 = ckpt(self.activation2,src2)
-        src2 = ckpt(self.dropout4,src2)
-        src2 = ckpt(self.linear4,src2)
-
-        src = src + self.dropout5(src2)
-
-        src = self.norm3(src)
+        src = self.norm2(output) + src
         return src
 
-class TransformerEncoder(Module):
+class TransformerEncoder(nn.ModuleList):
     __constants__ = ['norm']
 
     def __init__(self, encoder_layer, num_layers, d_model,num_parallel_layers = 3, norm=None):
@@ -307,10 +316,17 @@ class TransformerEncoder(Module):
                 tmp.append(self.norm2(ckpt(enc,i) + i))
             out = tmp.copy()
 
-        tmp = src
+        tmp = []
         if self.num_parallel_layers > 0:
-            for i,layer in (out,self.linear2):
-                tmp += self.norm3(ckpt(layer,i) + i)
+            for i,layer in enumerate(self.linear2):
+                tmp.append(self.norm3(ckpt(layer,out[i]) + out[i]))
+            out = tmp.copy()
+            tmp = None
+            for i in out:
+                if tmp is None:
+                    tmp = i
+                else:
+                    tmp += i
             output = tmp
         else:
             output = out[0] + src
@@ -416,19 +432,21 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 1024
+bptt = 100
 import random
-def random_mask_encoder(data):
-    rnd = random.randint
-    for i in range(data.size(0)):
-        for j in range(data.size(1)):
-            if rnd(0,1):
-                data[i,j] = data[i,j]
-            else:
-                data[i,j] = 5
-    data = torch.tensor(data)
-    data.to(device)
-    return data
+def random_mask_encoder(inp):
+    inp_2 = torch.full(inp.size(),5).to(device=device)
+    for i in range(inp.size(0)):
+        for j in range(inp.size(1)):
+            rnd = random.randint(0,2)
+            if rnd==1:
+                inp_2[i,j] = copy.deepcopy(inp[i,j])
+            elif rnd==2:
+                inp_2[i,j] = copy.deepcopy(inp[i,random.randint(0,inp.size(1)-1)])
+    inp_2 = torch.tensor(inp_2)
+    #del(inp)
+    inp_2.to(device)
+    return inp_2
 
 
 def get_batch(source, i, mask_input = True):
@@ -442,11 +460,34 @@ def get_batch(source, i, mask_input = True):
 ntokens = tokenizer.vocab_size 
 emsize = 512 
 nhid = emsize * 4 
-nlayers = 24 
+nlayers = 12 
 nhead = 16 
-num_parallel_layers = 5
+num_parallel_layers = 0
 dropout = 0.3 
 model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout)
+"""
+from x_transformers import TransformerWrapper, Decoder
+model = TransformerWrapper(
+    num_tokens = tokenizer.vocab_size ,
+    max_seq_len = max(bptt,2048),
+    emb_dropout = dropout,
+    num_memory_tokens = 50,
+    attn_layers = Decoder(
+        dim = emsize,
+        depth = nlayers,
+        heads = nhead,
+        attn_dropout = dropout,
+        ff_dropout = dropout,
+        attn_num_mem_kv = 50,
+        use_scalenorm = True,
+        ff_glu = True,
+        attn_talking_heads = True,
+        macaron = True,
+        rel_pos_bias = True,
+        residual_attn = True
+    )
+).to(device)
+"""
 #print(sum(p.numel() for p in model.parameters()))
 import time
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
@@ -504,14 +545,14 @@ torch.cuda.empty_cache()
 
 model.to(device)
 
-print(summary(model, torch.zeros([1,1],dtype=torch.long).to(device)))
+print(summary(model, torch.zeros([1,10],dtype=torch.long).to(device)))
 
 
 def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096):
     model.train() 
     total_loss = 0.
     start_time = time.time()
-    src_mask = model.generate_square_subsequent_mask(bptt).to(device)
+    #src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     #optimizer.zero_grad()
     for batch, i in enumerate(range(0, train_data.size(1) - 1, bptt)):
         if resume_batch != None:
@@ -520,8 +561,8 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096)
         data, targets = get_batch(train_data, i)
         
         if data.size(1) != bptt:
-            src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
-        output = model(data, src_mask)
+            pass#src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
+        output = model(data)#, src_mask)
         #with torch.cuda.amp.autocast():
         loss = criterion(output.view(-1, ntokens), targets)
         #scaler.scale(loss).backward()
@@ -535,7 +576,7 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096)
     
 
         total_loss += loss.item()
-        log_interval = 2
+        log_interval = 50
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
@@ -547,7 +588,7 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096)
                     cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
-        if batch % save_intermediate_intervel == 0 and batch > 0:
+        if batch % save_intermediate_intervel == 0 and batch > 1:
 
             torch.save(
             {
@@ -563,19 +604,19 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096)
             path
             )
         if step_scheduler != None:
-            if batch % step_scheduler == 0 and batch > 0:
+            if (batch % step_scheduler == 0 and batch > 0) or epoch >=1 and batch % step_scheduler == 0:
                 scheduler.step()
 
 def evaluate(eval_model, data_source):
     eval_model.eval()
     total_loss = 0.
-    src_mask = model.generate_square_subsequent_mask(bptt).to(device)
+    #src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     with torch.no_grad():
         for i in range(0, data_source.size(1) - 1, bptt):
             data, targets = get_batch(data_source, i, mask_input = False)
             if data.size(1) != bptt:
-                src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
-            output = eval_model(data, src_mask)
+                pass#src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
+            output = eval_model(data)#, src_mask)
             output_flat = output.view(-1, ntokens)
             total_loss += data.size(1) * criterion(output_flat, targets).item()
     return total_loss / (data_source.size(1) - 1)
@@ -626,8 +667,8 @@ print('=' * 95)
 
 def inference(text,eval_model = best_model):
     text_input = data_process(text).unsqueeze(0).to(device)
-    mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
-    out = eval_model(text_input,mask).view(-1, ntokens)
+    #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
+    out = eval_model(text_input).view(-1, ntokens)
     out = torch.argmax(out,dim=-1)
     result = tokenizer.decode(out)
     return [[text,result],[text_input,out]]

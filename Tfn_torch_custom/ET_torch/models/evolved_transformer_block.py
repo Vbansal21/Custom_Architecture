@@ -6,15 +6,22 @@ import torch.nn.functional as F
 from ..models.gated_linear_unit import GLU
 
 class EvolvedTransformerBlock(nn.Module):
-    def __init__(self,d_model,num_heads=8,ff_hidden=4):
+    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,context = True):
         super(EvolvedTransformerBlock,self).__init__()
-        self.attention = nn.MultiheadAttention(d_model, num_heads) 
+        self.context_pass = context
+        if attn == None:
+            self.attention = nn.MultiheadAttention(d_model, num_heads) 
+        else:
+            self.attention = attn
         self.layer_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(4)])
-        self.feed_forward = nn.Sequential(
-            nn.Linear(d_model,ff_hidden*d_model),
-            nn.ReLU(),
-            nn.Linear(ff_hidden*d_model,d_model),
-        )
+        if ffd == None:
+            self.feed_forward = nn.Sequential(
+                nn.Linear(d_model,ff_hidden*d_model),
+                nn.ReLU(),
+                nn.Linear(ff_hidden*d_model,d_model),
+            )
+        else:
+            self.feed_forward = ffd
         self.glu = GLU(d_model,1)
         self.left_net = nn.Sequential(
             nn.Linear(d_model,ff_hidden*d_model),
@@ -47,8 +54,10 @@ class EvolvedTransformerBlock(nn.Module):
         mid_result = mid_result + glued
 
         normed = self.layer_norms[2](mid_result)
-        normed=normed.transpose(0,1)
-        attended = self.attention(normed,normed,normed,need_weights=False)[0].transpose(0,1) + mid_result
+        if self.context_pass:
+            attended = self.attention(normed,normed) + mid_result 
+        else:
+            attended = self.attention(normed) + mid_result
         normed = self.layer_norms[3](attended)
         forwarded = self.feed_forward(normed)+attended
         return forwarded
