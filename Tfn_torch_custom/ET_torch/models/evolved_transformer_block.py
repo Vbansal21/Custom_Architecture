@@ -1,12 +1,14 @@
 #from ..models.embedder import Embedder, PositionalEncoder
 #import math
-#import torch
+import torch
+from typing import Optional
+from torch.functional import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 from ..models.gated_linear_unit import GLU
 
 class EvolvedTransformerBlock(nn.Module):
-    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,context = True):
+    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,context = True,pkm=None):
         super(EvolvedTransformerBlock,self).__init__()
         self.context_pass = context
         if attn == None:
@@ -22,6 +24,7 @@ class EvolvedTransformerBlock(nn.Module):
             )
         else:
             self.feed_forward = ffd
+        self.pkm = pkm
         self.glu = GLU(d_model,1)
         self.left_net = nn.Sequential(
             nn.Linear(d_model,ff_hidden*d_model),
@@ -38,8 +41,10 @@ class EvolvedTransformerBlock(nn.Module):
             nn.Conv1d(in_channels=1,out_channels=d_model,kernel_size=1)
         )
 
-    def forward(self,x):
+    def forward(self,x:Tensor,context: Optional[Tensor] = None) -> Tensor:
 
+        if context != None:
+            x = torch.cat((x.unsqueeze(0),context.unsqueeze(0)),dim=0)
         glued = self.glu(self.layer_norms[0](x))+x
         glu_normed = self.layer_norms[1](glued)
 
@@ -54,10 +59,19 @@ class EvolvedTransformerBlock(nn.Module):
         mid_result = mid_result + glued
 
         normed = self.layer_norms[2](mid_result)
+        if context != None:
+            context = normed[1]
+            normed = normed[0]
+            mid_result = mid_result[0]
+        else:
+            context = normed
         if self.context_pass:
-            attended = self.attention(normed,normed) + mid_result 
+            attended = self.attention(normed,context) + mid_result 
         else:
             attended = self.attention(normed) + mid_result
         normed = self.layer_norms[3](attended)
-        forwarded = self.feed_forward(normed)+attended
+        if self.pkm == None:
+            forwarded = self.feed_forward(normed)+attended
+        else:
+            forwarded = self.feed_forward(normed)+self.pkm(normed)+attended
         return forwarded

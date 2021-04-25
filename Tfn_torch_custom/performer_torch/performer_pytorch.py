@@ -292,7 +292,21 @@ class FeedForward(nn.Module):
         return x
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim, causal = False, heads = 16, dim_head = 64, local_heads = 0, local_window_size = 256, nb_features = None, feature_redraw_interval = 1000, generalized_attention = False, kernel_fn = nn.ReLU(), qr_uniform_q = False, dropout = 0., no_projection = False):
+    def __init__(self,
+                 dim,
+                 causal = False, 
+                 heads = 16, 
+                 dim_head = None, 
+                 local_heads = 0, 
+                 local_window_size = 256, 
+                 nb_features = None, 
+                 feature_redraw_interval = 1000, 
+                 generalized_attention = False, 
+                 kernel_fn = nn.ReLU(), 
+                 qr_uniform_q = False, 
+                 dropout = 0.3, 
+                 no_projection = False,
+                 num_mem_kv = 100):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
@@ -309,17 +323,36 @@ class SelfAttention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, context=None, mask = None, context_mask = None, **kwargs):
+        self.num_mem_kv = num_mem_kv
+        if num_mem_kv > 0:
+            self.mem_k = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
+            self.mem_v = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
+
+    def forward(self, 
+                x, 
+                context=None, 
+                mask = None, 
+                context_mask = None,
+                **kwargs):
         b, n, _, h, gh = *x.shape, self.heads, self.global_heads
 
         cross_attend = exists(context)
 
         context = default(context, x)
+
         context_mask = default(context_mask, mask) if not cross_attend else context_mask
 
         q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+
+        if self.num_mem_kv > 0:
+            mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v))
+            k = torch.cat((mem_k, k), dim = -2)
+            v = torch.cat((mem_v, v), dim = -2)
+            if exists(context_mask):
+                context_mask = F.pad(context_mask, (self.num_mem_kv, 0), value = True)
+
         (q, lq), (k, lk), (v, lv) = map(lambda t: (t[:, :gh], t[:, gh:]), (q, k, v))
 
         attn_outs = []
