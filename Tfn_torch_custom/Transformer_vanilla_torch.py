@@ -427,12 +427,22 @@ model.to(device)
 print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
 
+def inference(text,size=128,eval_model = best_model):
+    model.eval()
+    text_input = torch.cat((data_process(text),torch.full((size),5)),dim=0).unsqueeze(0).to(device)
+    #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
+    out,_= eval_model(text_input)
+    out = torch.argmax(out.view(-1, ntokens),dim=-1)
+    result = tokenizer.decode(out)
+    return [text,result]
+
+
 def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,mini_batch_size=20):
     model.train() 
     total_loss = 0.
     start_time = time.time()
     mem_dict = None
-    single_pass_mem = model.transformer_encoder.mem
+    single_pass_mem = None
     acc = 0
     #src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     #optimizer.zero_grad()
@@ -449,7 +459,7 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,
         #scaler.scale(loss).backward()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 4.0)
-        acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(0)
+        acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
         if batch % mini_batch_size == 0:
             optimizer.step()
             optimizer.zero_grad()
@@ -467,9 +477,11 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,
                   'lr {:04.3f} | ms/batch {:08.3f} | acc {:5.3f} | '
                   'loss {:5.3f} | ppl {:10.3f}'.format(
                     epoch, batch, train_data.size(1) // bptt, scheduler.get_lr()[0],
-                    elapsed * 1000 / log_interval,acc/batch,
+                    elapsed * 1000 / log_interval,acc/log_interval,
                     cur_loss, math.exp(cur_loss)))
+            print(inference("Hello World!!! This is inference function on the currently trained model"))
             total_loss = 0
+            acc = 0
             start_time = time.time()
         if batch % save_intermediate_intervel == 0 and batch > 0:
 
@@ -550,16 +562,6 @@ print('=' * 113)
 print('| End of training | test acc {:5.3f} | test loss {:5.3f} | test ppl {:10.3f}'.format(test_acc,
     test_loss, math.exp(test_loss)))
 print('=' * 113)
-
-
-def inference(text,size=128,eval_model = best_model):
-    model.eval()
-    text_input = torch.cat((data_process(text),torch.full((size),5)),dim=0).unsqueeze(0).to(device)
-    #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
-    out,_= eval_model(text_input)
-    out = torch.argmax(out.view(-1, ntokens),dim=-1)
-    result = tokenizer.decode(out)
-    return [[text,result],[text_input,out]]
 
 print(inference("Hello World!!! This is inference function on the currently trained model"))
 
