@@ -24,7 +24,10 @@ from torch.nn.init import xavier_normal_
 from torch.nn.parameter import Parameter
 from einops import repeat
 
-from x_transformers.x_transformers import RMSNorm,RotaryEmbedding
+torch.set_num_threads(10)
+torch.set_num_interop_threads(10)
+
+from x_transformers.x_transformers import RMSNorm
 
 from torch.utils.checkpoint import checkpoint #as ckpt
 
@@ -53,7 +56,7 @@ def _get_activation_fn(activation):
 
     raise RuntimeError("activation should be relu/gelu, not {}".format(activation))
 
-class TransformerEncoderLayer(nn.ModuleList):
+class TransformerEncoderLayer(nn.Module):
     r"""Advances in
     Neural Information Processing Systems
     """
@@ -63,21 +66,16 @@ class TransformerEncoderLayer(nn.ModuleList):
         #self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
 
         from performer_torch import SelfAttention
-        attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
+        #attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
 
         from hopfield_modules import Hopfield
-        hopfield = Hopfield(
-            input_size=d_model,
-            num_heads=nhead
-            )
+        #hopfield = Hopfield(input_size=d_model,num_heads=nhead)
 
         from product_key_memory import PKM
 
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
         self.dropout = Dropout(dropout)
-
-        #self.pe = PositionalEncoding(d_model,dropout=dropout,max_len=2**16)
         
         from x_transformers.x_transformers import GEGLU
 
@@ -99,8 +97,25 @@ class TransformerEncoderLayer(nn.ModuleList):
             )
         
         from ET_torch.models.evolved_transformer_block import EvolvedTransformerBlock
-        self.self_attn1 = EvolvedTransformerBlock(d_model,num_heads=nhead,attn=attn,ffd=copy.deepcopy(self.ffd),pkm=copy.deepcopy(self.pkm))
-        self.self_attn2 = EvolvedTransformerBlock(d_model,num_heads=nhead,attn=hopfield,ffd=copy.deepcopy(self.ffd),context=False,pkm=copy.deepcopy(self.pkm))
+        self.self_attn1 = EvolvedTransformerBlock(d_model,
+                            num_heads=nhead,
+                            attn=SelfAttention(d_model,
+                                                heads=nhead,
+                                                dim_head=d_model//nhead
+                                            ),
+                            ffd=copy.deepcopy(self.ffd),
+                            pkm=copy.deepcopy(self.pkm)
+                            )
+        self.self_attn2 = EvolvedTransformerBlock(d_model,
+                            num_heads=nhead,
+                            attn=Hopfield(
+                                input_size=d_model,
+                                num_heads=nhead
+                                ),
+                            ffd=copy.deepcopy(self.ffd),
+                            context=False,
+                            pkm=copy.deepcopy(self.pkm)
+                            )
 
     def __setstate__(self, state):
         if 'activation' not in state:
@@ -109,15 +124,6 @@ class TransformerEncoderLayer(nn.ModuleList):
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
 
-        """
-        src2 = ckpt(self.linear1,src)
-        src2 = ckpt(self.activation1,src2)
-        src2 = ckpt(self.dropout1,src2)
-        src2 = ckpt(self.linear2,src2)
-        src3 = ckpt(self.pkm1,src)
-        src2 = src + self.dropout2(src2 + src3)
-        del(src3)
-        """
         output = self.norm1(src)
         output = ckpt(self.ffd,output) + ckpt(self.pkm,output)
         src2 = ckpt(self.self_attn1,output)
@@ -131,10 +137,10 @@ class TransformerEncoderLayer(nn.ModuleList):
         del(output)
         return src
 
-class TransformerEncoder(nn.ModuleList):
+class TransformerEncoder(nn.Module):
     __constants__ = ['norm']
 
-    def __init__(self, encoder_layer, num_layers, d_model,num_parallel_layers = 3, norm=None, mem_size = 100):
+    def __init__(self, encoder_layer, num_layers, d_model,num_parallel_layers = 3, mem_size = 100):
         super(TransformerEncoder, self).__init__()
         self.layers = _get_clones(encoder_layer, num_layers)
         d_model = d_model
@@ -147,10 +153,8 @@ class TransformerEncoder(nn.ModuleList):
         self.norm2 = RMSNorm(d_model)
 
         self.mem_exist = True if mem_size else False
-        if mem_size:
-            self.mem = nn.Parameter(torch.randn(mem_size,d_model))
-        self.mem_dict = None
-        self.init_mem_dict = False
+        if self.mem_exist:
+            self.mem = torch.randn(mem_size,d_model).to(device)
 
         if self.num_parallel_layers != 0:
             self.norm1 = RMSNorm(d_model)
@@ -158,10 +162,6 @@ class TransformerEncoder(nn.ModuleList):
         else:
             self.norm1 = None
             self.norm3 = None
-        
-    def initialise_mem_dict(self,dict:dict):
-        self.mem_dict = dict
-        self.init_mem_dict = True
 
     def initialise_single_pass_mem(self,mem:Tensor):
         self.mem = mem
@@ -169,13 +169,9 @@ class TransformerEncoder(nn.ModuleList):
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
         output = src
-
-        #for mod in self.layers:
-        #    output = mod(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
-
         out = []
-        if not self.init_mem_dict and self.mem_exist:
-            self.mem_dict = {i:self.mem for i in range(self.num_layers)}
+
+        output = torch.cat((repeat(self.mem, 'n d -> b n d', b = output.size(0)),output),dim=-2)
 
         if self.num_parallel_layers > 0:
             for layer in self.linear1:
@@ -183,29 +179,13 @@ class TransformerEncoder(nn.ModuleList):
         else:
             out = [src]
 
-        for l,enc in enumerate(self.layers):
+        for enc in self.layers:
             tmp = []
-            if self.mem_exist:
-                tmp2 = repeat(self.mem_dict[l], 'n d -> b n d', b = src.size(0))
 
             for i in out:
-                if not self.init_mem_dict and l==0 and self.mem_exist:
-                    i = torch.cat((repeat(self.mem, 'n d -> b n d', b = i.size(0)),i),dim=-2)
-                
-                if self.init_mem_dict:
-                    i = torch.cat((repeat(self.mem_dict[l], 'n d -> b n d', b = i.size(0)),i),dim=-2)
-
                 out2 = self.norm2(ckpt(enc,i)) + i
-                if self.mem_exist:
-                    tmp2 = tmp2 + out2[:,:out2.size(1)-src.size(1)]
-
-                if ((self.init_mem_dict or l == self.num_layers-1) and self.mem_exist):
-                    out2 = out2[:,out2.size(1)-src.size(1):]
-
                 tmp.append(out2)
 
-            if self.mem_exist:
-                self.mem_dict[l] = tmp2
             out = tmp.copy()
 
         tmp = []
@@ -221,7 +201,14 @@ class TransformerEncoder(nn.ModuleList):
                     tmp += i
             output = tmp
         else:
-            output = out[0] + src
+            output = out[0]
+
+        for i in range(output.size(0)):
+            if i == 0:
+                self.mem = output[i,:output.size(1)-src.size(1)]
+            else:
+                self.mem += output[i,:output.size(1)-src.size(1)]
+        output = output[:,output.size(1)-src.size(1):]
 
         if self.norm is not None:
             output = self.norm(output)
@@ -251,32 +238,26 @@ class TransformerModel(nn.Module):
 
         self.init_weights()
 
-    def generate_square_subsequent_mask(self, sz):
-        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-        return mask
-
     def init_weights(self):
-        initrange = 0.1
+        initrange = 0.2
         self.encoder.weight.data.uniform_(-initrange, initrange)
         self.decoder.bias.data.zero_()
         self.decoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, src:Tensor,context: Optional[Tensor] = None,mem_dict: Optional[dict] = None,mem: Optional[dict] = None) -> Tensor:
+    def forward(self, src:Tensor,context: Optional[Tensor] = None,mem: Optional[dict] = None) -> Tensor:
 
-        if mem_dict != None:
+        if mem != None:
             self.transformer_encoder.initialise_single_pass_mem(mem)
         src = ckpt(self.encoder,src) * math.sqrt(self.ninp)
         output = self.pos_encoder(src)
         output2 = ckpt(self.ffd1,output)
         output = ckpt(self.norm1,output2) + output
-        output2 = self.transformer_encoder(output)
-        mem_dict = self.transformer_encoder.mem_dict
+        output = self.transformer_encoder(output)
         mem = self.transformer_encoder.mem
-        output2 = ckpt(self.ffd2,output2)
+        output2 = ckpt(self.ffd2,output)
         output = ckpt(self.norm2,output2) + output
         output = ckpt(self.decoder,output)
-        return output,mem_dict,mem
+        return output,mem
 
 
 class PositionalEncoding(nn.Module):
@@ -325,7 +306,7 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 1000
+bptt = 400
 import random
 def random_mask_encoder(inp):
     inp_2 = torch.full(inp.size(),5).to(device=device)
@@ -342,21 +323,20 @@ def random_mask_encoder(inp):
     return inp_2
 
 
-def get_batch(source, i, mask_input = True):
-    seq_len = min(bptt, source.size(1) - 1 - i)
+def get_batch(source, i):
+    seq_len = min(bptt, source.size(1) - i)
     data = source[:,i:i+seq_len]
-    if mask_input:
-        data = random_mask_encoder(data) #torch.tensor.new_full(data.size(),tokenizer.encode("<mask>"))
-    target = source[:,i+1:i+1+seq_len].reshape(-1)
+    data = random_mask_encoder(data)
+    target = source[:,i:i+seq_len].reshape(-1)
     return data, target
 
 ntokens = tokenizer.vocab_size 
-emsize = 512 
+emsize = 512
 nhid = emsize * 4 
-nlayers = 12 
-nhead = 16 
+nlayers = 12
+nhead = 16
 num_parallel_layers = 0
-dropout = 0.3 
+dropout = 0.3
 model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout)
 """
 from x_transformers import TransformerWrapper, Decoder
@@ -395,6 +375,8 @@ epoch = 0
 best_val_loss = float("inf")
 best_model = model
 
+resume_batch = 0
+
 
 try:
     #model.load_state_dict(torch.load(path), strict=False)
@@ -413,6 +395,10 @@ try:
     scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
     vocab = checkpoint_['vocab']
     tokenizer = checkpoint_['tokenizer']
+    try:
+        resume_batch = checkpoint_['resume_batch']
+    finally:
+        pass
     best_model = model
     del(checkpoint_)
     torch.cuda.empty_cache()
@@ -441,12 +427,13 @@ model.to(device)
 print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
 
-def train(resume_batch=None,step_scheduler=1024//2,save_intermediate_intervel=4096,mini_batch_size=20):
+def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,mini_batch_size=20):
     model.train() 
     total_loss = 0.
     start_time = time.time()
     mem_dict = None
-    single_pass_mem = None
+    single_pass_mem = model.transformer_encoder.mem
+    acc = 0
     #src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     #optimizer.zero_grad()
     for batch, i in enumerate(range(0, train_data.size(1) - 1, bptt)):
@@ -454,16 +441,15 @@ def train(resume_batch=None,step_scheduler=1024//2,save_intermediate_intervel=40
             if batch < resume_batch:
                 continue
         data, targets = get_batch(train_data, i)
-        
-        if data.size(1) != bptt:
-            pass#src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
-        output,mem_dict,single_pass_mem = model(data,mem=single_pass_mem)#, src_mask)
+    
+        output,single_pass_mem = model(data,mem=single_pass_mem)#, src_mask)
         #with torch.cuda.amp.autocast():
         loss = criterion(output.view(-1, ntokens), targets)
         #loss = torch.autograd.Variable(loss,requires_grad=True)
         #scaler.scale(loss).backward()
-        loss.backward(retain_graph=True)
+        loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 4.0)
+        acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(0)
         if batch % mini_batch_size == 0:
             optimizer.step()
             optimizer.zero_grad()
@@ -478,10 +464,10 @@ def train(resume_batch=None,step_scheduler=1024//2,save_intermediate_intervel=40
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr {:04.3f} | ms/batch {:08.3f} | '
+                  'lr {:04.3f} | ms/batch {:08.3f} | acc {:5.3f} | '
                   'loss {:5.3f} | ppl {:10.3f}'.format(
                     epoch, batch, train_data.size(1) // bptt, scheduler.get_lr()[0],
-                    elapsed * 1000 / log_interval,
+                    elapsed * 1000 / log_interval,acc/batch,
                     cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
@@ -497,42 +483,44 @@ def train(resume_batch=None,step_scheduler=1024//2,save_intermediate_intervel=40
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
                 'tokenizer': tokenizer,
+                'resume_batch':batch
             },
             path
             )
         if step_scheduler != None:
-            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0):
+            if (batch % step_scheduler == 0 and batch > 0):# or (epoch >1 and batch == 0):
                 scheduler.step()
 
 def evaluate(eval_model, data_source):
     eval_model.eval()
     total_loss = 0.
+    total_acc = 0.
     single_pass_mem = None
     #src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     with torch.no_grad():
         for i in range(0, data_source.size(1) - 1, bptt):
-            data, targets = get_batch(data_source, i, mask_input = False)
-            if data.size(1) != bptt:
-                pass#src_mask = model.generate_square_subsequent_mask(data.size(1)).to(device)
-            output,_,single_pass_mem = eval_model(data,mem = single_pass_mem)#, src_mask)
+            data, targets = get_batch(data_source, i)
+            output,single_pass_mem = eval_model(data,mem = single_pass_mem)#, src_mask)
             output_flat = output.view(-1, ntokens)
             total_loss += data.size(1) * criterion(output_flat, targets).item()
-    return total_loss / (data_source.size(1) - 1)
+            total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(0)
+    return total_loss / (data_source.size(1) - 1), total_acc / (data_source.size(1) - 1)
 
-epochs = 10
+epochs = 20
 
 while True:
     if epoch >= epochs:
         break
     epoch +=1
     epoch_start_time = time.time()
-    train(mini_batch_size= 1)
-    val_loss = evaluate(model, val_data)
-    print('-' * 95)
-    print('| end of epoch {:3d} | time: {:08.3f}s | valid loss {:5.3f} | '
-          'valid ppl {:10.3f}'.format(epoch, (time.time() - epoch_start_time),
+    train(resume_batch=resume_batch,mini_batch_size= 1)
+    resume_batch = 0
+    val_loss, val_acc = evaluate(model, val_data)
+    print('-' * 113)
+    print('| end of epoch {:3d} | time: {:08.3f}s | valid acc {:5.3f} | valid loss {:5.3f} | '
+          'valid ppl {:10.3f}'.format(epoch, (time.time() - epoch_start_time),val_acc,
                                      val_loss, math.exp(val_loss)))
-    print('-' * 95)
+    print('-' * 113)
 
     #scheduler.step()
     if val_loss < best_val_loss:
@@ -550,25 +538,26 @@ while True:
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
                 'tokenizer': tokenizer,
+                'resume_batch':0
             },
             path
         )
 #best_model = best_model.to(device)
 model = best_model
 
-test_loss = evaluate(best_model, test_data)
-print('=' * 95)
-print('| End of training | test loss {:5.3f} | test ppl {:10.3f}'.format(
+test_loss,test_acc = evaluate(best_model, test_data)
+print('=' * 113)
+print('| End of training | test acc {:5.3f} | test loss {:5.3f} | test ppl {:10.3f}'.format(test_acc,
     test_loss, math.exp(test_loss)))
-print('=' * 95)
+print('=' * 113)
 
 
-def inference(text,eval_model = best_model):
+def inference(text,size=128,eval_model = best_model):
     model.eval()
-    text_input = data_process(text).unsqueeze(0).to(device)
+    text_input = torch.cat((data_process(text),torch.full((size),5)),dim=0).unsqueeze(0).to(device)
     #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
-    out,_,__ = eval_model(text_input).view(-1, ntokens)
-    out = torch.argmax(out,dim=-1)
+    out,_= eval_model(text_input)
+    out = torch.argmax(out.view(-1, ntokens),dim=-1)
     result = tokenizer.decode(out)
     return [[text,result],[text_input,out]]
 
