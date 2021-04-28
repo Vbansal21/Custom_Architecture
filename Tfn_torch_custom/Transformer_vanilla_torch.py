@@ -291,8 +291,8 @@ url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
 #url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 #tokenizer = get_tokenizer('basic_english')
-tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=50000,reserved_tokens=[
-    '<pad>','<unk>','</s>','<s>','<copy>','<mask>'
+tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=35000,reserved_tokens=[
+    '<pad>','<unk>','<s>','</s>','<copy>','<mask>','<se>','</se>','<non_text_content>','</non_text_content>'
 ])
 vocab = tokenizer.vocab
 
@@ -331,40 +331,17 @@ def get_batch(source, i):
     return data, target
 
 ntokens = tokenizer.vocab_size 
-emsize = 512
+emsize = 1024
 nhid = emsize * 4 
-nlayers = 12
+nlayers = 4
 nhead = 16
 num_parallel_layers = 0
 dropout = 0.3
 model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout)
-"""
-from x_transformers import TransformerWrapper, Decoder
-model = TransformerWrapper(
-    num_tokens = tokenizer.vocab_size ,
-    max_seq_len = max(bptt,2048),
-    emb_dropout = dropout,
-    num_memory_tokens = 50,
-    attn_layers = Decoder(
-        dim = emsize,
-        depth = nlayers,
-        heads = nhead,
-        attn_dropout = dropout,
-        ff_dropout = dropout,
-        attn_num_mem_kv = 50,
-        use_scalenorm = True,
-        ff_glu = True,
-        attn_talking_heads = True,
-        macaron = True,
-        rel_pos_bias = True,
-        residual_attn = True
-    )
-).to(device)
-"""
+
 #print(sum(p.numel() for p in model.parameters()))
 import time
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
-#path = "/models/"+date_time+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
@@ -376,6 +353,8 @@ best_val_loss = float("inf")
 best_model = model
 
 resume_batch = 0
+
+train_eval_event = [date_time]
 
 
 try:
@@ -397,6 +376,7 @@ try:
     tokenizer = checkpoint_['tokenizer']
     try:
         resume_batch = checkpoint_['resume_batch']
+        train_eval_event = checkpoint_['train_eval_events'] + [date_time]
     finally:
         pass
     best_model = model
@@ -429,13 +409,12 @@ print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
 def inference(text,size=128,eval_model = best_model):
     model.eval()
-    text_input = torch.cat((data_process(text),torch.full((size),5)),dim=0).unsqueeze(0).to(device)
+    text_input = torch.cat((data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device)
     #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
     out,_= eval_model(text_input)
     out = torch.argmax(out.view(-1, ntokens),dim=-1)
     result = tokenizer.decode(out)
-    return [text,result]
-
+    return [tokenizer.decode(text_input.view(-1)),result]
 
 def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,mini_batch_size=20):
     model.train() 
@@ -495,7 +474,8 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
                 'tokenizer': tokenizer,
-                'resume_batch':batch
+                'resume_batch':batch,
+                'train_eval_events': train_eval_event
             },
             path
             )
@@ -550,7 +530,8 @@ while True:
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
                 'tokenizer': tokenizer,
-                'resume_batch':0
+                'resume_batch':0,
+                'train_eval_events': train_eval_event
             },
             path
         )
