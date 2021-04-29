@@ -306,7 +306,12 @@ class SelfAttention(nn.Module):
                  qr_uniform_q = False, 
                  dropout = 0.3, 
                  no_projection = False,
-                 num_mem_kv = 100):
+                 num_mem_kv = 200,
+                 to_q = None,
+                 to_k = None,
+                 to_v = None,
+                 to_out = None
+                 ):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
@@ -317,10 +322,10 @@ class SelfAttention(nn.Module):
         self.global_heads = heads - local_heads
         self.local_attn = LocalAttention(window_size = local_window_size, causal = causal, autopad = True, dropout = dropout, look_forward = int(not causal), rel_pos_emb_config = (dim_head, local_heads)) if local_heads > 0 else None
 
-        self.to_q = nn.Linear(dim, inner_dim)
-        self.to_k = nn.Linear(dim, inner_dim)
-        self.to_v = nn.Linear(dim, inner_dim)
-        self.to_out = nn.Linear(inner_dim, dim)
+        self.to_q = default(nn.Linear(dim, inner_dim),to_q)
+        self.to_k = default(nn.Linear(dim, inner_dim),to_k)
+        self.to_v = default(nn.Linear(dim, inner_dim),to_v)
+        self.to_out = default(nn.Linear(inner_dim, dim),to_out)
         self.dropout = nn.Dropout(dropout)
 
         self.num_mem_kv = num_mem_kv
@@ -333,6 +338,7 @@ class SelfAttention(nn.Module):
                 context=None, 
                 mask = None, 
                 context_mask = None,
+                running_attn = True,
                 **kwargs):
         b, n, _, h, gh = *x.shape, self.heads, self.global_heads
 
@@ -346,7 +352,7 @@ class SelfAttention(nn.Module):
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
-        if self.num_mem_kv > 0:
+        if self.num_mem_kv > 0 and context!=None:
             mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v))
             k = torch.cat((mem_k, k), dim = -2)
             v = torch.cat((mem_v, v), dim = -2)

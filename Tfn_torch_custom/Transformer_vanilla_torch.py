@@ -1,6 +1,7 @@
 from logging import exception
 import math
 import torch
+from torch import tensor
 #from torch._C import int64
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,8 +25,8 @@ from torch.nn.init import xavier_normal_
 from torch.nn.parameter import Parameter
 from einops import repeat
 
-torch.set_num_threads(10)
-torch.set_num_interop_threads(10)
+torch.set_num_threads(12)
+torch.set_num_interop_threads(12)
 
 from x_transformers.x_transformers import RMSNorm
 
@@ -88,11 +89,11 @@ class TransformerEncoderLayer(nn.Module):
             _get_activation_fn(activation)
         )
         self.pkm = nn.Sequential(
-            Linear(d_model,d_model//2),
+            Linear(d_model,d_model),
             _get_activation_fn(activation),
-            PKM(d_model//2),
+            PKM(d_model),
             _get_activation_fn(activation),
-            Linear(d_model//2,d_model),
+            Linear(d_model,d_model),
             _get_activation_fn(activation)
             )
         
@@ -100,6 +101,7 @@ class TransformerEncoderLayer(nn.Module):
         self.self_attn1 = EvolvedTransformerBlock(d_model,
                             num_heads=nhead,
                             attn=SelfAttention(d_model,
+                                                causal=False,
                                                 heads=nhead,
                                                 dim_head=d_model//nhead
                                             ),
@@ -210,53 +212,212 @@ class TransformerEncoder(nn.Module):
                 self.mem += output[i,:output.size(1)-src.size(1)]
         output = output[:,output.size(1)-src.size(1):]
 
-        if self.norm is not None:
+        if self.norm != None:
             output = self.norm(output)
         return output
 
+class greedy_input_processing(nn.Module):
+
+    def __init__(self,
+                    text_embedding: Optional[nn.Module] = None,
+                    audio_encoder:  Optional[nn.Module] = None,
+                    image_encoder:  Optional[nn.Module] = None,
+                    voxel_encoder:  Optional[nn.Module] = None
+                    ):
+        super(greedy_input_processing,self).__init__()
+
+        self.text_embedding = text_embedding
+        self.audio_encoder  = audio_encoder
+        self.image_encoder  = image_encoder
+        self.voxel_encoder  = voxel_encoder
+
+    def forward(self,*args) -> Tensor:
+        
+        output = None
+        nxt_arg_start_pos = []
+        for i in args:
+            tmp = None
+            assert type(i) == Tensor or type(i) == tensor
+            if len(i.size()) == 2 and self.text_embedding != None:
+                tmp = ckpt(self.text_embedding,i)
+                nxt_arg_start_pos.append((tmp.size(1),'text'))
+            elif len(i.size()) == 3 and self.audio_encoder != None:
+                tmp = ckpt(self.audio_encoder,i)
+                nxt_arg_start_pos.append((tmp.size(1),'audio'))
+            elif len(i.size()) == 4 and self.image_encoder != None:
+                tmp = ckpt(self.image_encoder,i)
+                nxt_arg_start_pos.append((tmp.size(1),'image'))
+            elif len(i.size()) == 5 and self.voxel_encoder != None:
+                tmp = ckpt(self.voxel_encoder,i)
+                nxt_arg_start_pos.append((tmp.size(1),'voxel'))
+            else:
+                raise("Currently not defined for the inputted value")
+            
+            if tmp == None:
+                tmp = i
+
+            if output is None:
+                output = tmp
+            else:
+                output = torch.cat((output,tmp),dim=1)
+            del(tmp)
+        
+        return output,nxt_arg_start_pos
+
+class lm_head(nn.Module):
+
+    def __init__(self,
+                    text_decoder:  Optional[nn.Module] = None,
+                    audio_decoder: Optional[nn.Module] = None,
+                    image_decoder: Optional[nn.Module] = None,
+                    voxel_decoder: Optional[nn.Module] = None
+                    ):
+        super(lm_head,self).__init__()
+
+        self.text_decoder = text_decoder
+        self.audio_decoder = audio_decoder
+        self.image_decoder = image_decoder
+        self.voxel_decoder = voxel_decoder
+
+    def forward(self,src: Tensor,nxt_arg_start_pos: list):
+        
+        src_copy = src
+        output = []
+        for (key,value) in nxt_arg_start_pos:
+            tmp = None
+            if value=='text' and self.text_decoder != None:
+                tmp = src_copy[:,:key] if src_copy.size(1) != key else src_copy
+                src_copy = src_copy[:,key:] if src_copy.size(1) != key else src_copy
+                tmp = ckpt(self.text_decoder,tmp)
+            elif value=='audio' and self.audio_decoder != None:
+                tmp = src_copy[:,:key] if src_copy.size(1) != key else src_copy
+                src_copy = src_copy[:,key:] if src_copy.size(1) != key else src_copy
+                tmp = ckpt(self.audio_decoder,tmp)
+            elif value=='image' and self.image_decoder != None:
+                tmp = src_copy[:,:key] if src_copy.size(1) != key else src_copy
+                src_copy = src_copy[:,key:] if src_copy.size(1) != key else src_copy
+                tmp = ckpt(self.image_decoder,tmp)
+            elif value=='voxel' and self.voxel_decoder != None:
+                tmp = src_copy[:,:key] if src_copy.size(1) != key else src_copy
+                src_copy = src_copy[:,key:] if src_copy.size(1) != key else src_copy
+                tmp = ckpt(self.voxel_decoder,tmp)
+            else:
+                raise("Currently not defined for the inputted value")
+            output.append(tmp)
+            del(tmp)
+        output = tuple(output)
+        return output
+
+
 class TransformerModel(nn.Module):
 
-    def __init__(self, ntoken, ninp, nhead, nhid, nlayers,num_parallel_layers = 0, dropout=0.5):
+    def __init__(self, ntoken, ninp, nhead, nhid, nlayers,num_parallel_layers = 0, dropout=0.5,activation='gelu',mem_token=100):
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
         self.pos_encoder = PositionalEncoding(ninp, dropout)
         encoder_layers = TransformerEncoderLayer(ninp, nhead, nhid, dropout)
         self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers, ninp, num_parallel_layers).to(device=device)
-        self.encoder = nn.Embedding(ntoken, ninp)
+        #self.encoder = nn.Embedding(ntoken, ninp)
+
+        embedding_encoder = nn.Sequential(
+            nn.Embedding(ntoken, ninp),
+            _get_activation_fn(activation),
+            nn.Linear(ninp,nhid*2),
+            _get_activation_fn(activation),
+            nn.Linear(nhid*2,ninp),
+            _get_activation_fn(activation)
+        )
+
         self.ninp = ninp
-        self.decoder = nn.Linear(ninp, ntoken)
-        self.nlayers = nlayers
+
+        
+        decoder = nn.Sequential(
+            nn.Linear(ninp,nhid*2),
+            _get_activation_fn(activation),
+            nn.Linear(nhid*2,ninp),
+            _get_activation_fn(activation),
+            nn.Linear(ninp,ntoken)
+        )
+
         self.ffd1 = nn.Sequential(
             nn.Linear(ninp,nhid*2),
-            nn.ReLU(),
+            _get_activation_fn(activation),
             nn.Linear(nhid*2,ninp),
-            nn.ReLU()
+            _get_activation_fn(activation)
         )
         self.ffd2 = copy.deepcopy(self.ffd1)
         self.norm1 = RMSNorm(ninp)
         self.norm2 = RMSNorm(ninp)
 
-        self.init_weights()
+        self.normalised_args_cat = greedy_input_processing(text_embedding=embedding_encoder)
+        self.decoder = lm_head(text_decoder=decoder)
 
-    def init_weights(self):
-        initrange = 0.2
-        self.encoder.weight.data.uniform_(-initrange, initrange)
-        self.decoder.bias.data.zero_()
-        self.decoder.weight.data.uniform_(-initrange, initrange)
+        self.mem_exist = True if mem_token else False
+        if self.mem_exist:
+            if type(mem_token)==int:
+                self.mem = nn.Parameter(torch.randn(mem_token,ninp)).to(device)
+            elif type(mem_token) == Tensor:
+                assert mem_token.size(-1)==ninp
+                self.mem = nn.Parameter(mem_token)
+        
+        self.alt_mem = None
+        self.alt_mem_with_primary_mem = False
 
-    def forward(self, src:Tensor,context: Optional[Tensor] = None,mem: Optional[dict] = None) -> Tensor:
+    def alt_mem_tokens(self,mem: Tensor,alt_mem_with_primary_mem: Optional[bool] == True):
+        self.alt_mem = mem
+        self.alt_mem_with_primary_mem = alt_mem_with_primary_mem
+
+    def forward(self, src:Tensor,*args,context: Optional[Tensor] = None,mem: Optional[dict] = None,alt_mem_with_primary_key: Optional[bool] = None) -> Tensor:
+
+        src,nxt_arg_start_pos = self.normalised_args_cat(src,*args)
+        src = src * math.sqrt(self.ninp)
+
+
+        if alt_mem_with_primary_key != None:
+            self.alt_mem_with_primary_mem = alt_mem_with_primary_key
 
         if mem != None:
-            self.transformer_encoder.initialise_single_pass_mem(mem)
-        src = ckpt(self.encoder,src) * math.sqrt(self.ninp)
+            if self.alt_mem_with_primary_mem and self.alt_mem != None:
+                output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+            elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
+                output = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+            else:
+                output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+
+        else:
+            if self.alt_mem_with_primary_mem and self.alt_mem != None:
+                output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+            elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
+                output = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+            else:
+                output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+
+
         output = self.pos_encoder(src)
+
         output2 = ckpt(self.ffd1,output)
         output = ckpt(self.norm1,output2) + output
+
         output = self.transformer_encoder(output)
-        mem = self.transformer_encoder.mem
+
         output2 = ckpt(self.ffd2,output)
         output = ckpt(self.norm2,output2) + output
-        output = ckpt(self.decoder,output)
+
+
+        for i in range(output.size(0)):
+            if i == 0:
+                mem = [output[i,:output.size(1)-src.size(1)]]
+            else:
+                mem += [output[i,:output.size(1)-src.size(1)]]
+        mem = torch.cat(mem,dim=1)
+        output = output[:,output.size(1)-src.size(1):]
+
+
+        output = self.decoder(output,nxt_arg_start_pos)
+
+        if len(output) == 1:
+            output = output[0]
+
         return output,mem
 
 
@@ -292,7 +453,7 @@ url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 #tokenizer = get_tokenizer('basic_english')
 tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=35000,reserved_tokens=[
-    '<pad>','<unk>','<s>','</s>','<copy>','<mask>','<se>','</se>','<non_text_content>','</non_text_content>'
+    '<pad>','<unk>','<s>','</s>','<copy>','<mask>','<segment>','</segment>','<non_text_content>','</non_text_content>'
 ])
 vocab = tokenizer.vocab
 
@@ -306,13 +467,13 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 400
+bptt = 500 * 2
 import random
 def random_mask_encoder(inp):
     inp_2 = torch.full(inp.size(),5).to(device=device)
     for i in range(inp.size(0)):
         for j in range(inp.size(1)):
-            rnd = random.randint(0,2)
+            rnd = random.randint(0,6)
             if rnd==1:
                 inp_2[i,j] = copy.deepcopy(inp[i,j])
             elif rnd==2:
@@ -331,21 +492,21 @@ def get_batch(source, i):
     return data, target
 
 ntokens = tokenizer.vocab_size 
-emsize = 1024
+emsize = 512
 nhid = emsize * 4 
-nlayers = 4
+nlayers = 8
 nhead = 16
 num_parallel_layers = 0
 dropout = 0.3
-model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout)
+model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout).to(device=device)
 
-#print(sum(p.numel() for p in model.parameters()))
+print(sum(p.numel() for p in model.parameters()))
 import time
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.3 # learning rate
+lr = 0.3
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
 epoch = 0
@@ -358,33 +519,39 @@ train_eval_event = [date_time]
 
 
 try:
-    #model.load_state_dict(torch.load(path), strict=False)
     checkpoint_ = torch.load(path, map_location=device)
 
     epoch = checkpoint_['epoch']
     best_val_loss = checkpoint_['best_val_loss']
+    vocab = checkpoint_['vocab']
+    tokenizer = checkpoint_['tokenizer']
     try:
         model.load_state_dict(checkpoint_['model_state_dict'],strict=False)
     except:
         try:
             model = checkpoint_['model']
-        except:
-            pass
+        except Exception as e:
+            print("Exception",e)
     optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
-    vocab = checkpoint_['vocab']
-    tokenizer = checkpoint_['tokenizer']
+
     try:
         resume_batch = checkpoint_['resume_batch']
         train_eval_event = checkpoint_['train_eval_events'] + [date_time]
-    finally:
+    except Exception as e:
+        print("Exception",e)
+    try:
+        best_model = checkpoint_['best_model']
+    except:
         pass
-    best_model = model
     del(checkpoint_)
     torch.cuda.empty_cache()
 except Exception as e:
     print("Exception",e)
     pass
+
+model.eval()
+out = model(torch.zeros([5,10],dtype=torch.long).to(device),torch.zeros([5,10],dtype=torch.long).to(device))
 
 
 def data_process(raw_text_iter):
@@ -404,7 +571,7 @@ torch.cuda.empty_cache()
 
 model.to(device)
 
-print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
+#print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
 
 def inference(text,size=128,eval_model = best_model):
@@ -416,35 +583,26 @@ def inference(text,size=128,eval_model = best_model):
     result = tokenizer.decode(out)
     return [tokenizer.decode(text_input.view(-1)),result]
 
-def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,mini_batch_size=20):
+def train(resume_batch=0,step_scheduler=1024,save_intermediate_intervel=4096,mini_batch_size=20):
     model.train() 
     total_loss = 0.
     start_time = time.time()
-    mem_dict = None
     single_pass_mem = None
     acc = 0
-    #src_mask = model.generate_square_subsequent_mask(bptt).to(device)
-    #optimizer.zero_grad()
     for batch, i in enumerate(range(0, train_data.size(1) - 1, bptt)):
         if resume_batch != None:
             if batch < resume_batch:
                 continue
         data, targets = get_batch(train_data, i)
     
-        output,single_pass_mem = model(data,mem=single_pass_mem)#, src_mask)
-        #with torch.cuda.amp.autocast():
+        output,single_pass_mem = model(data,mem=single_pass_mem)
         loss = criterion(output.view(-1, ntokens), targets)
-        #loss = torch.autograd.Variable(loss,requires_grad=True)
-        #scaler.scale(loss).backward()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 4.0)
         acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
-        if batch % mini_batch_size == 0:
+        if batch % mini_batch_size == 0 or batch == train_data.size(1):
             optimizer.step()
             optimizer.zero_grad()
-        #optimizer.step()
-        #scaler.step(optimizer)
-        #scaler.update()
     
 
         total_loss += loss.item()
@@ -453,12 +611,11 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr {:04.3f} | ms/batch {:08.3f} | acc {:5.3f} | '
+                  'lr {:04.4f} | ms/batch {:08.3f} | acc {:3.2f}% | '
                   'loss {:5.3f} | ppl {:10.3f}'.format(
                     epoch, batch, train_data.size(1) // bptt, scheduler.get_lr()[0],
-                    elapsed * 1000 / log_interval,acc/log_interval,
+                    elapsed * 1000 / log_interval,acc*100/log_interval,
                     cur_loss, math.exp(cur_loss)))
-            print(inference("Hello World!!! This is inference function on the currently trained model"))
             total_loss = 0
             acc = 0
             start_time = time.time()
@@ -468,7 +625,7 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,
             {
                 'epoch': epoch,
                 'model_state_dict': best_model.state_dict(),
-                #'model': best_model,
+                'best_model': best_model,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
@@ -480,7 +637,7 @@ def train(resume_batch=None,step_scheduler=1024,save_intermediate_intervel=4096,
             path
             )
         if step_scheduler != None:
-            if (batch % step_scheduler == 0 and batch > 0):# or (epoch >1 and batch == 0):
+            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and train_data.size(1) < step_scheduler):
                 scheduler.step()
 
 def evaluate(eval_model, data_source):
@@ -488,17 +645,16 @@ def evaluate(eval_model, data_source):
     total_loss = 0.
     total_acc = 0.
     single_pass_mem = None
-    #src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     with torch.no_grad():
         for i in range(0, data_source.size(1) - 1, bptt):
             data, targets = get_batch(data_source, i)
-            output,single_pass_mem = eval_model(data,mem = single_pass_mem)#, src_mask)
+            output,single_pass_mem = eval_model(data,mem = single_pass_mem)
             output_flat = output.view(-1, ntokens)
             total_loss += data.size(1) * criterion(output_flat, targets).item()
             total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(0)
     return total_loss / (data_source.size(1) - 1), total_acc / (data_source.size(1) - 1)
 
-epochs = 20
+epochs = 30
 
 while True:
     if epoch >= epochs:
@@ -508,23 +664,20 @@ while True:
     train(resume_batch=resume_batch,mini_batch_size= 1)
     resume_batch = 0
     val_loss, val_acc = evaluate(model, val_data)
-    print('-' * 113)
-    print('| end of epoch {:3d} | time: {:08.3f}s | valid acc {:5.3f} | valid loss {:5.3f} | '
-          'valid ppl {:10.3f}'.format(epoch, (time.time() - epoch_start_time),val_acc,
+    print('-' * 105)
+    print('| end of epoch {:3d} | time: {:08.3f}s | valid acc {:3.2f}% | valid loss {:5.3f} | '
+          'valid ppl {:10.3f}'.format(epoch, (time.time() - epoch_start_time),val_acc*100,
                                      val_loss, math.exp(val_loss)))
-    print('-' * 113)
+    print('-' * 105)
 
-    #scheduler.step()
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         best_model = model
-        #best_model = best_model.to(torch.device("cpu"))
-        #best_model_state = copy.deepcopy(best_model.state_dict())
         torch.save(
             {
                 'epoch': epoch,
                 'model_state_dict': best_model.state_dict(),
-                #'model': best_model,
+                'best_model': best_model,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
@@ -535,14 +688,13 @@ while True:
             },
             path
         )
-#best_model = best_model.to(device)
 model = best_model
 
 test_loss,test_acc = evaluate(best_model, test_data)
-print('=' * 113)
-print('| End of training | test acc {:5.3f} | test loss {:5.3f} | test ppl {:10.3f}'.format(test_acc,
+print('=' * 105)
+print('| End of training | test acc {:3.2f}% | test loss {:5.3f} | test ppl {:10.3f}'.format(test_acc*100,
     test_loss, math.exp(test_loss)))
-print('=' * 113)
+print('=' * 105)
 
 print(inference("Hello World!!! This is inference function on the currently trained model"))
 
