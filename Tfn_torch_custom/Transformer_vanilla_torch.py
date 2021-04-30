@@ -34,7 +34,7 @@ from x_transformers.x_transformers import RMSNorm
 
 from torch.utils.checkpoint import checkpoint #as ckpt
 
-def ckpt(f,args,checkpointed = True):
+def ckpt(f,args,checkpointed = False):
     if checkpointed:
         return checkpoint(f,args)
     else:
@@ -497,7 +497,8 @@ path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(nu
 
 criterion = nn.CrossEntropyLoss()
 lr = 0.02
-optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+#optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+optimizer = torch.optim.Adam(model.parameters(), lr= lr,betas=[0.8,0.99],eps=1e-8,weight_decay=3e-7)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
 epoch = 0
 best_val_loss = float("inf")
@@ -512,6 +513,26 @@ train_eval_event = [date_time]
 deepspeed_args = {
   "train_batch_size": 1,
   "gradient_accumulation_steps": 1,
+  "optimizer": {
+    "type": "Adam",
+    "params": {
+      "lr": 0.03,
+      "betas": [
+        0.8,
+        0.999
+      ],
+      "eps": 1e-8,
+      "weight_decay": 3e-7
+    }
+  },
+  "scheduler": {
+      "type": "WarmupLR",
+      "params": {
+          "warmup_min_lr": 0,
+          "warmup_max_lr": 0.03,
+          "warmup_num_steps": 2000
+      }
+  },
   "fp16": {
     "enabled": True,
     "loss_scale": 0,
@@ -526,11 +547,11 @@ deepspeed_args = {
     "contiguous_gradients" : True,
     "offload_param":{
         "device": "nvme",
-        "nvme_path":"/dev/nvme0n1p3"
+        "nvme_path":"/mnt/nvme0n1p3/"
         },
     "offload_optimizer": {
        "device": "nvme",
-       "nvme_path": "/dev/nvme0n1p3"
+       "nvme_path": "/mnt/nvme0n1p3/"
         },
     "elastic_checkpoint" : True,
     "stage3_gather_fp16_weights_on_model_save": True
@@ -553,7 +574,7 @@ deepspeed_args = {
     
 }
 
-model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer,lr_scheduler=scheduler,config_params=deepspeed_args)
+model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer, config_params=deepspeed_args)
 
 try:
     #checkpoint_ = torch.load(path, map_location=device)
@@ -573,7 +594,7 @@ try:
             print("Exception",e)
             """
     #optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
+    #scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
 
     try:
         resume_batch = checkpoint_['resume_batch']

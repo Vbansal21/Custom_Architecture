@@ -15,3 +15,7 @@ numpy
 mogrifier
 tqdm
 spacy
+tensorboardx
+deepspeed
+mpi4i
+Ninja
