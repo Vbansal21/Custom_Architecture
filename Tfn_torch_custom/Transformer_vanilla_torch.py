@@ -434,8 +434,8 @@ from torchtext.utils import download_from_url, extract_archive
 from torchnlp.encoders.text import SubwordEncoder
 
 
-#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
-url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
+url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
+#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 #tokenizer = get_tokenizer('basic_english')
 try:
@@ -508,6 +508,53 @@ resume_batch = 0
 train_eval_event = [date_time]
 
 
+
+deepspeed_args = {
+  "train_batch_size": 1,
+  "gradient_accumulation_steps": 1,
+  "fp16": {
+    "enabled": True,
+    "loss_scale": 0,
+    "initial_scale_power": 32,
+    "loss_scale_window": 1000,
+    "hysteresis": 2,
+    "min_loss_scale": 1
+    },
+  "gradient_clipping":4.0,
+  "zero_optimization": {
+    "stage": 3,
+    "contiguous_gradients" : True,
+    "offload_param":{
+        "device": "nvme",
+        "nvme_path":"/dev/nvme0n1p3"
+        },
+    "offload_optimizer": {
+       "device": "nvme",
+       "nvme_path": "/dev/nvme0n1p3"
+        },
+    "elastic_checkpoint" : True,
+    "stage3_gather_fp16_weights_on_model_save": True
+    },
+    "flops_profiler": {
+    "enabled": True,
+    "profile_step": 1,
+    "module_depth": -1,
+    "top_modules": 3,
+    "detailed": True,
+    },
+    "activation_checkpointing": {
+    "partition_activations": True,
+    "cpu_checkpointing": True,
+    "contiguous_memory_optimization": True,
+    "number_checkpoints": nlayers,
+    "synchronize_checkpoint_boundary": True,
+    "profile": True
+    }
+    
+}
+
+model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer,lr_scheduler=scheduler,config_params=deepspeed_args)
+
 try:
     #checkpoint_ = torch.load(path, map_location=device)
     _,checkpoint_ = model.load_checkpoint(path,)
@@ -575,53 +622,6 @@ except:
 
 torch.cuda.empty_cache()
 model.to(device)
-
-
-deepspeed_args = {
-  "train_batch_size": 1,
-  "gradient_accumulation_steps": 1,
-  "fp16": {
-    "enabled": True,
-    "loss_scale": 0,
-    "initial_scale_power": 32,
-    "loss_scale_window": 1000,
-    "hysteresis": 2,
-    "min_loss_scale": 1
-    },
-  "gradient_clipping":4.0,
-  "zero_optimization": {
-    "stage": 3,
-    "contiguous_gradients" : True,
-    "offload_param":{
-        "device": "nvme",
-        "nvme_path":"/dev/nvme0n1p3"
-        },
-    "offload_optimizer": {
-       "device": "nvme",
-       "nvme_path": "/dev/nvme0n1p3"
-        },
-    "elastic_checkpoint" : True,
-    "stage3_gather_fp16_weights_on_model_save": True
-    },
-    "flops_profiler": {
-    "enabled": True,
-    "profile_step": 1,
-    "module_depth": -1,
-    "top_modules": 3,
-    "detailed": True,
-    },
-    "activation_checkpointing": {
-    "partition_activations": True,
-    "cpu_checkpointing": True,
-    "contiguous_memory_optimization": True,
-    "number_checkpoints": nlayers,
-    "synchronize_checkpoint_boundary": True,
-    "profile": True
-    }
-    
-}
-
-model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer,lr_scheduler=scheduler,config_params=deepspeed_args)
 
 
 model.eval()
