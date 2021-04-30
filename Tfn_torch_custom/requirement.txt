@@ -18,4 +18,5 @@ spacy
 tensorboardx
 deepspeed
 mpi4i
-Ninja
+# sudo pip3 install --force-reinstall Ninja
+# sudo apt install libaio-dev

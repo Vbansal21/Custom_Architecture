@@ -545,15 +545,31 @@ deepspeed_args = {
   "zero_optimization": {
     "stage": 3,
     "contiguous_gradients" : True,
+    "allgather_partitions": True,
+    "allgather_bucket_size": 1e8,
+    "reduce_scatter": True,
+    "reduce_bucket_size": 1e8,
     "offload_param":{
         "device": "nvme",
-        "nvme_path":"/mnt/nvme0n1p3/"
+        "nvme_path":"/mnt/nvme0n1p3/",  
+        "buffer_count": nlayers+4,
+        "buffer_size": 5e8
         },
     "offload_optimizer": {
-       "device": "nvme",
-       "nvme_path": "/mnt/nvme0n1p3/"
+        "device": "cpu",
+        "nvme_path": "/mnt/nvme0n1p3/",
+        "buffer_count": 4,
+        "fast_init": True
         },
+      "aio": {
+        "block_size": 1048576,
+        "queue_depth": 8,
+        "thread_count": 1,
+        "single_submit": False,
+        "overlap_events": True
+    },
     "elastic_checkpoint" : True,
+    "stage3_prefetch_bucket_size" : 5e8,
     "stage3_gather_fp16_weights_on_model_save": True
     },
     "flops_profiler": {
@@ -564,11 +580,11 @@ deepspeed_args = {
     "detailed": True,
     },
     "activation_checkpointing": {
-    "partition_activations": True,
-    "cpu_checkpointing": True,
-    "contiguous_memory_optimization": True,
-    "number_checkpoints": nlayers,
-    "synchronize_checkpoint_boundary": True,
+    "partition_activations": False,
+    "cpu_checkpointing": False,
+    "contiguous_memory_optimization": False,
+    "number_checkpoints": nlayers+4,
+    "synchronize_checkpoint_boundary": False,
     "profile": True
     }
     
