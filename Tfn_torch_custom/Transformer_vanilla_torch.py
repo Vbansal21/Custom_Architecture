@@ -594,11 +594,11 @@ deepspeed_args = {
     "contiguous_gradients" : True,
     "offload_param":{
         "device": "nvme",
-        "nvme_path":"/dev/nvme0n1p1"
+        "nvme_path":"/dev/nvme0n1p3"
         },
     "offload_optimizer": {
        "device": "nvme",
-       "nvme_path": "/dev/nvme0n1p1"
+       "nvme_path": "/dev/nvme0n1p3"
         },
     "elastic_checkpoint" : True,
     "stage3_gather_fp16_weights_on_model_save": True
