@@ -1,3 +1,5 @@
+import deepspeed
+
 from logging import exception
 import math
 import torch
@@ -106,6 +108,7 @@ class TransformerEncoderLayer(nn.Module):
                                                 dim_head=d_model//nhead
                                             ),
                             ffd=copy.deepcopy(self.ffd),
+                            context=False,
                             pkm=copy.deepcopy(self.pkm)
                             )
         self.self_attn2 = EvolvedTransformerBlock(d_model,
@@ -142,7 +145,7 @@ class TransformerEncoderLayer(nn.Module):
 class TransformerEncoder(nn.Module):
     __constants__ = ['norm']
 
-    def __init__(self, encoder_layer, num_layers, d_model,num_parallel_layers = 3, mem_size = 100):
+    def __init__(self, encoder_layer, num_layers, d_model,num_parallel_layers = 3):
         super(TransformerEncoder, self).__init__()
         self.layers = _get_clones(encoder_layer, num_layers)
         d_model = d_model
@@ -154,10 +157,6 @@ class TransformerEncoder(nn.Module):
         self.norm = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
 
-        self.mem_exist = True if mem_size else False
-        if self.mem_exist:
-            self.mem = torch.randn(mem_size,d_model).to(device)
-
         if self.num_parallel_layers != 0:
             self.norm1 = RMSNorm(d_model)
             self.norm3 = RMSNorm(d_model)
@@ -165,15 +164,9 @@ class TransformerEncoder(nn.Module):
             self.norm1 = None
             self.norm3 = None
 
-    def initialise_single_pass_mem(self,mem:Tensor):
-        self.mem = mem
-        self.init_mem_dict = False
-
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
         output = src
         out = []
-
-        output = torch.cat((repeat(self.mem, 'n d -> b n d', b = output.size(0)),output),dim=-2)
 
         if self.num_parallel_layers > 0:
             for layer in self.linear1:
@@ -204,13 +197,6 @@ class TransformerEncoder(nn.Module):
             output = tmp
         else:
             output = out[0]
-
-        for i in range(output.size(0)):
-            if i == 0:
-                self.mem = output[i,:output.size(1)-src.size(1)]
-            else:
-                self.mem += output[i,:output.size(1)-src.size(1)]
-        output = output[:,output.size(1)-src.size(1):]
 
         if self.norm != None:
             output = self.norm(output)
@@ -448,13 +434,17 @@ from torchtext.utils import download_from_url, extract_archive
 from torchnlp.encoders.text import SubwordEncoder
 
 
-url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
-#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
+#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
+url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 #tokenizer = get_tokenizer('basic_english')
-tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=35000,reserved_tokens=[
+try:
+    tokenizer = torch.load("models/tokenizer.tar")
+except:
+    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=50000,reserved_tokens=[
     '<pad>','<unk>','<s>','</s>','<copy>','<mask>','<segment>','</segment>','<non_text_content>','</non_text_content>'
-])
+    ])
+    torch.save(tokenizer,"models/tokenizer.tar")
 vocab = tokenizer.vocab
 
 
@@ -462,39 +452,39 @@ def batchify(data, bsz):
     nbatch = data.size(0) // bsz
     data = data.narrow(0, 0, nbatch * bsz)
     data = data.view(bsz, -1).contiguous()
-    return data.to(device)
+    return data
 
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 500 * 2
+bptt = 512*2*2
 import random
 def random_mask_encoder(inp):
-    inp_2 = torch.full(inp.size(),5).to(device=device)
+    inp_2 = inp.clone().detach()
     for i in range(inp.size(0)):
         for j in range(inp.size(1)):
             rnd = random.randint(0,6)
             if rnd==1:
-                inp_2[i,j] = copy.deepcopy(inp[i,j])
-            elif rnd==2:
+                inp_2[i,j] = 5
+            elif rnd==0:
                 inp_2[i,j] = copy.deepcopy(inp[i,random.randint(0,inp.size(1)-1)])
     inp_2 = inp_2.clone().detach()
-    #del(inp)
-    inp_2.to(device)
     return inp_2
 
 
-def get_batch(source, i):
-    seq_len = min(bptt, source.size(1) - i)
-    data = source[:,i:i+seq_len]
-    data = random_mask_encoder(data)
-    target = source[:,i:i+seq_len].reshape(-1)
-    return data, target
+def prepare_batch(source):
+    data = random_mask_encoder(source)
+    target = source
+    return torch.cat((data.unsqueeze(0),target.unsqueeze(0)),dim=0).to(torch.device('cpu'))
+
+def get_batch(source,j):
+    seq_len = min(bptt, source.size(2) - j)
+    return source[0,:,j:j+seq_len].to(device),source[1,:,j:j+seq_len].reshape(-1).to(device)
 
 ntokens = tokenizer.vocab_size 
-emsize = 512
+emsize = 512*2
 nhid = emsize * 4 
-nlayers = 8
+nlayers = 8//8
 nhead = 16
 num_parallel_layers = 0
 dropout = 0.3
@@ -506,7 +496,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.3
+lr = 0.02
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
 epoch = 0
@@ -519,12 +509,14 @@ train_eval_event = [date_time]
 
 
 try:
-    checkpoint_ = torch.load(path, map_location=device)
+    #checkpoint_ = torch.load(path, map_location=device)
+    _,checkpoint_ = model.load_checkpoint(path,)
 
     epoch = checkpoint_['epoch']
     best_val_loss = checkpoint_['best_val_loss']
     vocab = checkpoint_['vocab']
     tokenizer = checkpoint_['tokenizer']
+    """
     try:
         model.load_state_dict(checkpoint_['model_state_dict'],strict=False)
     except:
@@ -532,7 +524,8 @@ try:
             model = checkpoint_['model']
         except Exception as e:
             print("Exception",e)
-    optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
+            """
+    #optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
 
     try:
@@ -550,26 +543,89 @@ except Exception as e:
     print("Exception",e)
     pass
 
-model.eval()
-out = model(torch.zeros([5,10],dtype=torch.long).to(device),torch.zeros([5,10],dtype=torch.long).to(device))
-
-
 def data_process(raw_text_iter):
   data = tokenizer.encode(raw_text_iter)
-  return torch.tensor(data) #torch.cat(tuple(filter(lambda t: t.numel() > 0, data)))
+  return torch.tensor(data)
 
-train_data = data_process(io.open(train_filepath, encoding="utf8").read())
-val_data = data_process(io.open(valid_filepath, encoding="utf8").read())
-test_data = data_process(io.open(test_filepath, encoding="utf8").read())
+try:
+    processed_train_data = torch.load("models/data/train")
+    processed_test_data = torch.load("models/data/test")
+    processed_val_data = torch.load("models/data/val")
+except:
 
-train_data = batchify(train_data, batch_size)
-val_data = batchify(val_data, eval_batch_size)
-test_data = batchify(test_data, eval_batch_size)
+    train_data = data_process(io.open(train_filepath, encoding="utf8").read()).to(device)
+    val_data = data_process(io.open(valid_filepath, encoding="utf8").read()).to(device)
+    test_data = data_process(io.open(test_filepath, encoding="utf8").read()).to(device)
+
+    train_data = batchify(train_data, batch_size)
+    val_data = batchify(val_data, eval_batch_size)
+    test_data = batchify(test_data, eval_batch_size)
+
+
+
+    processed_train_data = prepare_batch(train_data)
+    processed_test_data = prepare_batch(test_data)
+    processed_val_data = prepare_batch(val_data)
+
+    del(train_data,test_data,val_data)
+
+    torch.save(processed_train_data,"models/data/train.tar")
+    torch.save(processed_test_data,"models/data/test.tar")
+    torch.save(processed_val_data,"models/data/val.tar")
 
 torch.cuda.empty_cache()
-
-
 model.to(device)
+
+
+deepspeed_args = {
+  "train_batch_size": 1,
+  "gradient_accumulation_steps": 1,
+  "fp16": {
+    "enabled": True,
+    "loss_scale": 0,
+    "initial_scale_power": 32,
+    "loss_scale_window": 1000,
+    "hysteresis": 2,
+    "min_loss_scale": 1
+    },
+  "gradient_clipping":4.0,
+  "zero_optimization": {
+    "stage": 3,
+    "contiguous_gradients" : True,
+    "offload_param":{
+        "device": "nvme",
+        "nvme_path":"/dev/nvme0n1p1"
+        },
+    "offload_optimizer": {
+       "device": "nvme",
+       "nvme_path": "/dev/nvme0n1p1"
+        },
+    "elastic_checkpoint" : True,
+    "stage3_gather_fp16_weights_on_model_save": True
+    },
+    "flops_profiler": {
+    "enabled": True,
+    "profile_step": 1,
+    "module_depth": -1,
+    "top_modules": 3,
+    "detailed": True,
+    },
+    "activation_checkpointing": {
+    "partition_activations": True,
+    "cpu_checkpointing": True,
+    "contiguous_memory_optimization": True,
+    "number_checkpoints": nlayers,
+    "synchronize_checkpoint_boundary": True,
+    "profile": True
+    }
+    
+}
+
+model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer,lr_scheduler=scheduler,config_params=deepspeed_args)
+
+
+model.eval()
+model(torch.zeros([5,10],dtype=torch.long).to(device),torch.zeros([5,10],dtype=torch.long).to(device))
 
 #print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
@@ -589,21 +645,24 @@ def train(resume_batch=0,step_scheduler=1024,save_intermediate_intervel=4096,min
     start_time = time.time()
     single_pass_mem = None
     acc = 0
-    for batch, i in enumerate(range(0, train_data.size(1) - 1, bptt)):
+    for batch, i in enumerate(range(0, processed_train_data.size(2), bptt)):
         if resume_batch != None:
             if batch < resume_batch:
                 continue
-        data, targets = get_batch(train_data, i)
+        data, targets = get_batch(processed_train_data, i)
     
         output,single_pass_mem = model(data,mem=single_pass_mem)
         loss = criterion(output.view(-1, ntokens), targets)
-        loss.backward()
+        #loss.backward()
+        model.backward(loss)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 4.0)
         acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
-        if batch % mini_batch_size == 0 or batch == train_data.size(1):
-            optimizer.step()
-            optimizer.zero_grad()
-    
+        if batch % mini_batch_size == 0 or i == processed_train_data.size(2)-1:
+            #optimizer.step()
+            model.step()
+            #optimizer.zero_grad()
+        del(data,targets)
+        torch.cuda.empty_cache()
 
         total_loss += loss.item()
         log_interval = 200
@@ -611,16 +670,16 @@ def train(resume_batch=0,step_scheduler=1024,save_intermediate_intervel=4096,min
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr {:04.4f} | ms/batch {:08.3f} | acc {:3.2f}% | '
+                  'lr {:04.5f} | ms/batch {:08.3f} | acc {:3.2f}% | '
                   'loss {:5.3f} | ppl {:10.3f}'.format(
-                    epoch, batch, train_data.size(1) // bptt, scheduler.get_lr()[0],
+                    epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
                     elapsed * 1000 / log_interval,acc*100/log_interval,
                     cur_loss, math.exp(cur_loss)))
             total_loss = 0
             acc = 0
             start_time = time.time()
         if batch % save_intermediate_intervel == 0 and batch > 0:
-
+            """
             torch.save(
             {
                 'epoch': epoch,
@@ -635,9 +694,20 @@ def train(resume_batch=0,step_scheduler=1024,save_intermediate_intervel=4096,min
                 'train_eval_events': train_eval_event
             },
             path
-            )
+            )"""
+            ckpt_id = epoch*(processed_train_data.size(-1)//bptt) + batch
+            model.save_checkpoint(path,ckpt_id,client_sd = {
+                'epoch': epoch,
+                'best_model': best_model,
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_loss': best_val_loss,
+                'vocab': vocab,
+                'tokenizer': tokenizer,
+                'resume_batch':batch,
+                'train_eval_events': train_eval_event
+            })
         if step_scheduler != None:
-            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and train_data.size(1) < step_scheduler):
+            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(2)//bptt < step_scheduler):
                 scheduler.step()
 
 def evaluate(eval_model, data_source):
@@ -646,13 +716,13 @@ def evaluate(eval_model, data_source):
     total_acc = 0.
     single_pass_mem = None
     with torch.no_grad():
-        for i in range(0, data_source.size(1) - 1, bptt):
+        for i in range(0, data_source.size(2), bptt):
             data, targets = get_batch(data_source, i)
             output,single_pass_mem = eval_model(data,mem = single_pass_mem)
             output_flat = output.view(-1, ntokens)
             total_loss += data.size(1) * criterion(output_flat, targets).item()
-            total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(0)
-    return total_loss / (data_source.size(1) - 1), total_acc / (data_source.size(1) - 1)
+            total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
+    return total_loss / (data_source.size(2)), total_acc / (data_source.size(2))
 
 epochs = 30
 
@@ -663,7 +733,7 @@ while True:
     epoch_start_time = time.time()
     train(resume_batch=resume_batch,mini_batch_size= 1)
     resume_batch = 0
-    val_loss, val_acc = evaluate(model, val_data)
+    val_loss, val_acc = evaluate(model, processed_val_data)
     print('-' * 105)
     print('| end of epoch {:3d} | time: {:08.3f}s | valid acc {:3.2f}% | valid loss {:5.3f} | '
           'valid ppl {:10.3f}'.format(epoch, (time.time() - epoch_start_time),val_acc*100,
@@ -673,6 +743,9 @@ while True:
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         best_model = model
+
+
+        """
         torch.save(
             {
                 'epoch': epoch,
@@ -687,10 +760,22 @@ while True:
                 'train_eval_events': train_eval_event
             },
             path
-        )
+        )"""
+        batch = 0
+        ckpt_id = epoch*(processed_train_data.size(-1)//bptt) + batch
+        model.save_checkpoint(path,ckpt_id,client_sd = {
+                'epoch': epoch,
+                'best_model': best_model,
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_loss': best_val_loss,
+                'vocab': vocab,
+                'tokenizer': tokenizer,
+                'resume_batch':batch,
+                'train_eval_events': train_eval_event
+            })
 model = best_model
 
-test_loss,test_acc = evaluate(best_model, test_data)
+test_loss,test_acc = evaluate(best_model, processed_test_data)
 print('=' * 105)
 print('| End of training | test acc {:3.2f}% | test loss {:5.3f} | test ppl {:10.3f}'.format(test_acc*100,
     test_loss, math.exp(test_loss)))

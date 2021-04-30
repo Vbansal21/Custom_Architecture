@@ -44,7 +44,7 @@ class EvolvedTransformerBlock(nn.Module):
     def forward(self,x:Tensor,context: Optional[Tensor] = None) -> Tensor:
 
         if context != None:
-            x = torch.cat((x.unsqueeze(0),context.unsqueeze(0)),dim=0)
+            x = torch.cat((x.unsqueeze(1),context.unsqueeze(1)),dim=1)
         glued = self.glu(self.layer_norms[0](x))+x
         glu_normed = self.layer_norms[1](glued)
 
@@ -60,9 +60,9 @@ class EvolvedTransformerBlock(nn.Module):
 
         normed = self.layer_norms[2](mid_result)
         if context != None:
-            context = normed[1]
-            normed = normed[0]
-            mid_result = mid_result[0]
+            context = normed[:,1]
+            normed = normed[:,0]
+            mid_result = mid_result[:,0]
         else:
             context = normed
         if self.context_pass:

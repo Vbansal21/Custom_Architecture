@@ -310,7 +310,8 @@ class SelfAttention(nn.Module):
                  to_q = None,
                  to_k = None,
                  to_v = None,
-                 to_out = None
+                 to_out = None,
+                 running_attn = False
                  ):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
@@ -318,6 +319,7 @@ class SelfAttention(nn.Module):
         inner_dim = dim_head * heads
         self.fast_attention = FastAttention(dim_head, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, qr_uniform_q = qr_uniform_q, no_projection = no_projection)
 
+        self.running_attn = running_attn
         self.heads = heads
         self.global_heads = heads - local_heads
         self.local_attn = LocalAttention(window_size = local_window_size, causal = causal, autopad = True, dropout = dropout, look_forward = int(not causal), rel_pos_emb_config = (dim_head, local_heads)) if local_heads > 0 else None
@@ -338,7 +340,6 @@ class SelfAttention(nn.Module):
                 context=None, 
                 mask = None, 
                 context_mask = None,
-                running_attn = True,
                 **kwargs):
         b, n, _, h, gh = *x.shape, self.heads, self.global_heads
 
@@ -352,7 +353,7 @@ class SelfAttention(nn.Module):
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
-        if self.num_mem_kv > 0 and context!=None:
+        if self.num_mem_kv > 0:
             mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v))
             k = torch.cat((mem_k, k), dim = -2)
             v = torch.cat((mem_v, v), dim = -2)
@@ -367,8 +368,10 @@ class SelfAttention(nn.Module):
             if exists(context_mask):
                 global_mask = context_mask[:, None, :, None]
                 v.masked_fill_(~global_mask, 0.)
-
-            out = self.fast_attention(q, k, v)
+            if self.running_attn and not cross_attend:
+                out = torch.cat([self.fast_attention(q[:,:,i:i+1],k[:,:,:k.size(-2)-q.size(-2)+i+1],v[:,:,:k.size(-2)-q.size(-2)+i+1]) for i in range(q.size(-2))],dim=-2)
+            else:
+                out = self.fast_attention(q, k, v)
             attn_outs.append(out)
 
         if not empty(lq):
