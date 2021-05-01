@@ -482,9 +482,9 @@ def get_batch(source,j):
     return source[0,:,j:j+seq_len].to(device),source[1,:,j:j+seq_len].reshape(-1).to(device)
 
 ntokens = tokenizer.vocab_size 
-emsize = 512*2
+emsize = 2048
 nhid = emsize * 4 
-nlayers = 8//8
+nlayers = 24
 nhead = 16
 num_parallel_layers = 0
 dropout = 0.3
@@ -548,12 +548,12 @@ deepspeed_args = {
     "allgather_partitions": True,
     "allgather_bucket_size": 1e8,
     "reduce_scatter": True,
-    "reduce_bucket_size": 1e8,
+    "reduce_bucket_size": 5e8,
     "offload_param":{
         "device": "nvme",
         "nvme_path":"/mnt/nvme0n1p3/",  
-        "buffer_count": nlayers+4,
-        "buffer_size": 5e8
+        "buffer_count": 5,
+        "buffer_size": 1e8
         },
     "offload_optimizer": {
         "device": "cpu",
@@ -590,7 +590,7 @@ deepspeed_args = {
     
 }
 
-model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer, config_params=deepspeed_args)
+model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer,lr_scheduler=scheduler, config_params=deepspeed_args)
 
 try:
     #checkpoint_ = torch.load(path, map_location=device)
