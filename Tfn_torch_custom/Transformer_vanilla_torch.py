@@ -27,8 +27,8 @@ from torch.nn.init import xavier_normal_
 from torch.nn.parameter import Parameter
 from einops import repeat
 
-torch.set_num_threads(12)
-torch.set_num_interop_threads(12)
+#torch.set_num_threads(12)
+#torch.set_num_interop_threads(12)
 
 from x_transformers.x_transformers import RMSNorm
 
@@ -43,10 +43,12 @@ def ckpt(f,args,checkpointed = False):
 from pytorch_model_summary import summary
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#print(torch.cuda.is_available())
 #device = torch.device("cpu")
 
 torch.autograd.set_detect_anomaly(True)
-#scaler = torch.cuda.amp.GradScaler()
+#scaler = torch.cuda.amp.GradScaler(init_scale=2**3)
+autocast = torch.cuda.amp.autocast
 
 def _get_clones(module, N):
     return ModuleList([copy.deepcopy(module) for i in range(N)])
@@ -105,7 +107,8 @@ class TransformerEncoderLayer(nn.Module):
                             attn=SelfAttention(d_model,
                                                 causal=False,
                                                 heads=nhead,
-                                                dim_head=d_model//nhead
+                                                dim_head=d_model//nhead,
+                                                num_mem_kv=0
                                             ),
                             ffd=copy.deepcopy(self.ffd),
                             context=False,
@@ -317,13 +320,14 @@ class TransformerModel(nn.Module):
         self.ninp = ninp
 
         
-        decoder = nn.Sequential(
+        self.decoder = nn.Linear(ninp,ntokens)
+        """nn.Sequential(
             nn.Linear(ninp,nhid*2),
             _get_activation_fn(activation),
             nn.Linear(nhid*2,ninp),
             _get_activation_fn(activation),
             nn.Linear(ninp,ntoken)
-        )
+        )"""
 
         self.ffd1 = nn.Sequential(
             nn.Linear(ninp,nhid*2),
@@ -335,8 +339,8 @@ class TransformerModel(nn.Module):
         self.norm1 = RMSNorm(ninp)
         self.norm2 = RMSNorm(ninp)
 
-        self.normalised_args_cat = greedy_input_processing(text_embedding=embedding_encoder)
-        self.decoder = lm_head(text_decoder=decoder)
+        self.normalised_args_cat = embedding_encoder#greedy_input_processing(text_embedding=embedding_encoder)
+        #self.decoder = decoder #lm_head(text_decoder=decoder)
 
         self.mem_exist = True if mem_token else False
         if self.mem_exist:
@@ -349,20 +353,28 @@ class TransformerModel(nn.Module):
         self.alt_mem = None
         self.alt_mem_with_primary_mem = False
 
+        self.init_weights()
+
+    def init_weights(self):
+        for w in self.parameters():
+            w.data.uniform_(-1/4,1/4)
+        self.decoder.weight.data.uniform_(-1/4,1/4)
+        self.decoder.bias.data.uniform_(-1/4,1/4)
+
+
     def alt_mem_tokens(self,mem: Tensor,alt_mem_with_primary_mem: Optional[bool] == True):
         self.alt_mem = mem
         self.alt_mem_with_primary_mem = alt_mem_with_primary_mem
 
-    def forward(self, src:Tensor,*args,context: Optional[Tensor] = None,mem: Optional[dict] = None,alt_mem_with_primary_key: Optional[bool] = None) -> Tensor:
+    def forward(self, src:Tensor,context: Optional[Tensor] = None,mem: Optional[dict] = None,alt_mem_with_primary_key: Optional[bool] = False) -> Tensor:
 
-        src,nxt_arg_start_pos = self.normalised_args_cat(src,*args)
+        src = self.normalised_args_cat(src)#,nxt_arg_start_pos
         src = src * math.sqrt(self.ninp)
 
 
-        if alt_mem_with_primary_key != None:
-            self.alt_mem_with_primary_mem = alt_mem_with_primary_key
+        self.alt_mem_with_primary_mem = alt_mem_with_primary_key
 
-        if mem != None:
+        if mem != None and self.mem_exist:
             if self.alt_mem_with_primary_mem and self.alt_mem != None:
                 output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
             elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
@@ -370,7 +382,7 @@ class TransformerModel(nn.Module):
             else:
                 output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
 
-        else:
+        elif self.mem_exist:
             if self.alt_mem_with_primary_mem and self.alt_mem != None:
                 output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
             elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
@@ -395,15 +407,14 @@ class TransformerModel(nn.Module):
                 mem = [output[i,:output.size(1)-src.size(1)]]
             else:
                 mem += [output[i,:output.size(1)-src.size(1)]]
-        mem = torch.cat(mem,dim=1)
-        output = output[:,output.size(1)-src.size(1):]
+        mem = torch.cat(mem,dim=1) if type(mem) == torch.tensor else None
+        output = output[:,output.size(1)-src.size(1):] if type(mem) == torch.tensor else output
 
 
-        output = self.decoder(output,nxt_arg_start_pos)
+        output = self.decoder(output)#,nxt_arg_start_pos)
 
-        if len(output) == 1:
-            output = output[0]
-
+        """if len(output) == 1:
+            output = output[0]"""
         return output,mem
 
 
@@ -441,7 +452,7 @@ test_filepath, valid_filepath, train_filepath = extract_archive(download_from_ur
 try:
     tokenizer = torch.load("models/tokenizer.tar")
 except:
-    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=50000,reserved_tokens=[
+    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**16,reserved_tokens=[
     '<pad>','<unk>','<s>','</s>','<copy>','<mask>','<segment>','</segment>','<non_text_content>','</non_text_content>'
     ])
     torch.save(tokenizer,"models/tokenizer.tar")
@@ -457,7 +468,7 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 512*2*2
+bptt = 512#*2*2
 import random
 def random_mask_encoder(inp):
     inp_2 = inp.clone().detach()
@@ -475,20 +486,21 @@ def random_mask_encoder(inp):
 def prepare_batch(source):
     data = random_mask_encoder(source)
     target = source
-    return torch.cat((data.unsqueeze(0),target.unsqueeze(0)),dim=0).to(torch.device('cpu'))
+    return torch.cat((data.unsqueeze(0),target.unsqueeze(0)),dim=0)#.to(torch.device('cpu'))
 
 def get_batch(source,j):
     seq_len = min(bptt, source.size(2) - j)
     return source[0,:,j:j+seq_len].to(device),source[1,:,j:j+seq_len].reshape(-1).to(device)
 
-ntokens = tokenizer.vocab_size 
-emsize = 2048
+ntokens = tokenizer.vocab_size
+emsize = 2048//8
 nhid = emsize * 4 
-nlayers = 24
+nlayers = 2
 nhead = 16
 num_parallel_layers = 0
 dropout = 0.3
-model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout).to(device=device)
+#with deepspeed.zero.Init():
+model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout).half().to(device=device)
 
 print(sum(p.numel() for p in model.parameters()))
 import time
@@ -496,13 +508,12 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.02
+lr = 0.03
 #optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 optimizer = torch.optim.Adam(model.parameters(), lr= lr,betas=[0.8,0.99],eps=1e-8,weight_decay=3e-7)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
 epoch = 0
 best_val_loss = float("inf")
-best_model = model
 
 resume_batch = 0
 
@@ -535,62 +546,50 @@ deepspeed_args = {
   },
   "fp16": {
     "enabled": True,
-    "loss_scale": 0,
-    "initial_scale_power": 32,
+    "loss_scale": 0.5,
+    "initial_scale_power": 0,
     "loss_scale_window": 1000,
     "hysteresis": 2,
-    "min_loss_scale": 1
+    "min_loss_scale": 0
     },
-  "gradient_clipping":4.0,
+  "gradient_clipping":0.5,
   "zero_optimization": {
     "stage": 3,
-    "contiguous_gradients" : True,
-    "allgather_partitions": True,
-    "allgather_bucket_size": 1e8,
-    "reduce_scatter": True,
-    "reduce_bucket_size": 5e8,
     "offload_param":{
         "device": "nvme",
-        "nvme_path":"/mnt/nvme0n1p3/",  
-        "buffer_count": 5,
-        "buffer_size": 1e8
+        "nvme_path":"/mnt/nvme0n1p3/"
         },
     "offload_optimizer": {
-        "device": "cpu",
-        "nvme_path": "/mnt/nvme0n1p3/",
-        "buffer_count": 4,
-        "fast_init": True
+        "device": "nvme",
+        "nvme_path": "/mnt/nvme0n1p3/"
         },
-      "aio": {
-        "block_size": 1048576,
-        "queue_depth": 8,
-        "thread_count": 1,
-        "single_submit": False,
-        "overlap_events": True
-    },
-    "elastic_checkpoint" : True,
-    "stage3_prefetch_bucket_size" : 5e8,
-    "stage3_gather_fp16_weights_on_model_save": True
+    "stage3_gather_fp16_weights_on_model_save": True,
+        "overlap_comm": True,
+        "contiguous_gradients": True,
+        "sub_group_size": 1e3,
+        "stage3_param_persistence_threshold": 1e8,
     },
     "flops_profiler": {
-    "enabled": True,
+    "enabled": False,
     "profile_step": 1,
     "module_depth": -1,
     "top_modules": 3,
-    "detailed": True,
+    "detailed": False
     },
     "activation_checkpointing": {
-    "partition_activations": False,
-    "cpu_checkpointing": False,
-    "contiguous_memory_optimization": False,
+    "partition_activations": True,
+    "cpu_checkpointing": True,
+    "contiguous_memory_optimization": True,
     "number_checkpoints": nlayers+4,
-    "synchronize_checkpoint_boundary": False,
+    "synchronize_checkpoint_boundary": True,
     "profile": True
     }
     
 }
 
 model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer,lr_scheduler=scheduler, config_params=deepspeed_args)
+
+best_model = model
 
 try:
     #checkpoint_ = torch.load(path, map_location=device)
@@ -662,7 +661,7 @@ model.to(device)
 
 
 model.eval()
-model(torch.zeros([5,10],dtype=torch.long).to(device),torch.zeros([5,10],dtype=torch.long).to(device))
+model(torch.zeros([5,10],dtype=torch.long).to(device))
 
 #print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
@@ -687,16 +686,18 @@ def train(resume_batch=0,step_scheduler=1024,save_intermediate_intervel=4096,min
             if batch < resume_batch:
                 continue
         data, targets = get_batch(processed_train_data, i)
-    
-        output,single_pass_mem = model(data,mem=single_pass_mem)
-        loss = criterion(output.view(-1, ntokens), targets)
+
+        with autocast():
+            output,single_pass_mem = model(data,mem = single_pass_mem)
+            loss = criterion(output.view(-1, ntokens), targets)
         #loss.backward()
         model.backward(loss)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 4.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
         if batch % mini_batch_size == 0 or i == processed_train_data.size(2)-1:
             #optimizer.step()
             model.step()
+            model.zero_grad()
             #optimizer.zero_grad()
         del(data,targets)
         torch.cuda.empty_cache()
