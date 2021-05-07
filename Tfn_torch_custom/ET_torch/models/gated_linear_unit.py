@@ -7,7 +7,7 @@ class GatedConvolution(nn.Module):
     def __init__(self,d_model,patch_size=3,padding=1):
         super(GatedConvolution,self).__init__()
         self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=padding,bias=True)
-        init.xavier_uniform_(self.conv.weight, gain=1)
+        #init.xavier_uniform_(self.conv.weight, gain=1)
 
     def forward(self,x):
         convoluted = self.conv(x.transpose(1,2)).transpose(1,2)

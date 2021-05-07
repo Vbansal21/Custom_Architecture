@@ -306,7 +306,7 @@ class SelfAttention(nn.Module):
                  qr_uniform_q = False, 
                  dropout = 0.3, 
                  no_projection = False,
-                 num_mem_kv = 200,
+                 num_mem_kv = 00,
                  to_q = None,
                  to_k = None,
                  to_v = None,

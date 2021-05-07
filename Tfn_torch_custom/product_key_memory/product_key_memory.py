@@ -109,7 +109,7 @@ class PKM(nn.Module):
 
         value_indices, attn = map(lambda x: x.reshape(-1, self.topk * h), (value_indices, attn))
 
-        out = self.values(value_indices, per_sample_weights=attn.to(torch.float16))
+        out = self.values(value_indices, per_sample_weights=attn.to(x.dtype))
         out = self.value_dropout(out)
         return out.reshape(b, t, e)
 
