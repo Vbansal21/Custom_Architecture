@@ -631,9 +631,11 @@ lr = 0.1
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 #optimizer = torch.optim.Adam(model.parameters(), lr= lr,betas=[0.8,0.99],eps=1e-8,weight_decay=3e-7)
 #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 100, gamma=0.95)
-multiplier = 1000000
+a = 5000000
+b = 500
+c = 0.5
 step = 1
-lambda_1 = lambda step: (multiplier/200 * step + 1) / (step**2 + multiplier)
+lambda_1 = lambda step: ((a/b * step + 1) / (step**2 + a)) + c
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 epoch = 0
 best_val_loss = float("inf")
@@ -847,11 +849,11 @@ while True:
     train(resume_batch=resume_batch,mini_batch_size= 1)
     resume_batch = 0
     val_loss, val_acc = evaluate(model, processed_val_data)
-    print('-' * 105)
+    print('-' * 110)
     print('| end of epoch {:3d} | time: {:08.3f}s | valid acc {:3.2f}% | valid loss {:5.3f} | '
           'valid ppl {:10.3f}'.format(epoch, (time.time() - epoch_start_time),val_acc*100,
                                      val_loss, math.exp(val_loss)))
-    print('-' * 105)
+    print('-' * 110)
 
     if val_loss < best_val_loss:
         best_val_loss = val_loss
@@ -890,10 +892,10 @@ while True:
 model = best_model
 
 test_loss,test_acc = evaluate(best_model, processed_test_data)
-print('=' * 105)
+print('=' * 110)
 print('| End of training | test acc {:3.2f}% | test loss {:5.3f} | test ppl {:10.3f}'.format(test_acc*100,
     test_loss, math.exp(test_loss)))
-print('=' * 105)
+print('=' * 110)
 
 print(inference("Hello World!!! This is inference function on the currently trained model"))
 
