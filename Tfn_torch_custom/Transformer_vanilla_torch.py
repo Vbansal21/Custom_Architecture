@@ -1,5 +1,6 @@
 from logging import exception
 import math
+from numpy import multiply
 import torch
 from torch import tensor
 #from torch._C import int64
@@ -28,16 +29,16 @@ from typing import  Optional
 #from torch.nn.modules.linear import _LinearWithBias
 #from torch.nn.init import constant_
 #from torch.nn.parameter import Parameter
-from einops import repeat
+from einops import repeat,rearrange
 
 torch.set_num_threads(12)
 torch.set_num_interop_threads(12)
 
-from x_transformers.x_transformers import RMSNorm
+#from x_transformers.x_transformers import RMSNorm
 from ET_torch.models.evolved_transformer_block import EvolvedTransformerBlock
 #from x_transformers.x_transformers import GEGLU
 from product_key_memory import PKM
-from hopfield_modules import Hopfield
+from hopfield_modules import Hopfield, HopfieldLayer, HopfieldPooling
 from performer_torch import SelfAttention
 
 from torch.utils.checkpoint import checkpoint #as ckpt
@@ -69,6 +70,17 @@ def _get_activation_fn(activation):
 
     raise RuntimeError("activation should be relu/gelu, not {}".format(activation))
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps = 1e-8):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
 class GEGLU(nn.Module):
     def __init__(self, dim_in, dim_out):
         super().__init__()
@@ -78,7 +90,26 @@ class GEGLU(nn.Module):
         x, gate = self.proj(x).chunk(2, dim = -1)
         return x * F.gelu(gate)
 
-from x_transformers.x_transformers import GRUGating
+#from x_transformers.x_transformers import GRUGating,Rezero
+
+class mem_norm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.gru = nn.GRUCell(dim, dim*2)
+        #self.proj = nn.Linear(dim,dim*2)
+        self.proj = HopfieldLayer(dim,output_size=dim*2)
+        self.g = nn.Parameter(torch.zeros(1))
+        self.norm = RMSNorm(dim)
+
+    def forward(self, x, residual):
+        residual_proj = F.tanh(self.proj(residual))
+        gated_output, gate = F.tanh(self.gru(
+            rearrange(x, 'b n d -> (b n) d'),
+            rearrange(residual_proj, 'b n d -> (b n) d')
+        ).reshape_as(residual_proj)).chunk(2, dim = -1)
+        x = (gated_output + x) * F.gelu(gate) 
+        x = x * self.g
+        return self.norm(x)+residual
 
 class TransformerEncoderLayer(nn.Module):
     r"""Advances in
@@ -92,24 +123,24 @@ class TransformerEncoderLayer(nn.Module):
         #hopfield = Hopfield(input_size=d_model,num_heads=nhead)
 
         self.norm1 = RMSNorm(d_model)
-        self.norm2 = RMSNorm(d_model)
+        #self.norm2 = RMSNorm(d_model)
         self.dropout = Dropout(dropout)
 
         self.ffd = nn.Sequential(
             nn.Linear(d_model,dim_feedforward),
-            nn.GELU(),
+            _get_activation_fn(activation),
             GEGLU(dim_feedforward,dim_feedforward),
-            nn.GELU(),
+            _get_activation_fn(activation),
             nn.Linear(dim_feedforward,d_model),
-            nn.GELU(),
+            _get_activation_fn(activation),
         )
         self.pkm = nn.Sequential(
             nn.Linear(d_model,d_model),
-            nn.GELU(),
+            _get_activation_fn(activation),
             PKM(d_model),
-            nn.GELU(),
+            _get_activation_fn(activation),
             nn.Linear(d_model,d_model),
-            nn.GELU(),
+            _get_activation_fn(activation),
             )
         
         
@@ -119,8 +150,8 @@ class TransformerEncoderLayer(nn.Module):
                                                 causal=False,
                                                 heads=nhead,
                                                 dim_head=d_model//nhead,
-                                                num_mem_kv=2048,
-                                                to_q=copy.deepcopy(self.pkm)
+                                                num_mem_kv=2048*2,
+                                                #to_q=copy.deepcopy(self.pkm)
                                             ),
                             ffd=copy.deepcopy(self.ffd),
                             context=False,
@@ -137,7 +168,7 @@ class TransformerEncoderLayer(nn.Module):
                             pkm=copy.deepcopy(self.pkm)
                             )
         
-        self.gate = GRUGating(d_model)
+        self.gate = mem_norm(d_model)
 
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
@@ -149,11 +180,10 @@ class TransformerEncoderLayer(nn.Module):
         del(output)
 
         output = src2 + src3
-        output = self.dropout(output)
-        output = ckpt(self.gate,output,src)
         del(src2,src3)
 
-        src = self.norm2(output) + src
+        output = self.dropout(output)
+        src = ckpt(self.gate,output,src)
         del(output)
         return src
 
@@ -322,11 +352,11 @@ class TransformerModel(nn.Module):
         
         embedding_encoder = nn.Sequential(
             nn.Embedding(ntoken, ninp),
-            nn.GELU(),
+            _get_activation_fn(activation),
             nn.Linear(ninp,nhid*2),
-            nn.GELU(),
+            _get_activation_fn(activation),
             nn.Linear(nhid*2,ninp),
-            nn.GELU(),
+            _get_activation_fn(activation),
         )
         
         self.ninp = ninp
@@ -334,23 +364,23 @@ class TransformerModel(nn.Module):
         
         self.decoder = nn.Sequential(
             nn.Linear(ninp,nhid*2),
-            nn.GELU(),
+            _get_activation_fn(activation),
             nn.Linear(nhid*2,ninp),
-            nn.GELU(),
+            _get_activation_fn(activation),
             nn.Linear(ninp,ntoken)
         )
 
         self.ffd1 = nn.Sequential(
             nn.Linear(ninp,nhid*2),
-            nn.GELU(),
+            _get_activation_fn(activation),
             nn.Linear(nhid*2,ninp),
-            nn.GELU()
+            _get_activation_fn(activation)
         )
         self.ffd2 = nn.Sequential(
             nn.Linear(ninp,nhid*2),
-            nn.GELU(),
+            _get_activation_fn(activation),
             nn.Linear(nhid*2,ninp),
-            nn.GELU()
+            _get_activation_fn(activation)
         )
         self.norm1 = RMSNorm(ninp)
         self.norm2 = RMSNorm(ninp)
@@ -387,7 +417,7 @@ class TransformerModel(nn.Module):
         
         orignal_src = src
 
-        src = self.normalised_args_cat(src)#,nxt_arg_start_pos
+        src = ckpt(self.normalised_args_cat,src)#,nxt_arg_start_pos
         src = src * math.sqrt(self.ninp)
 
 
@@ -396,8 +426,6 @@ class TransformerModel(nn.Module):
         if mem != None and self.mem_exist:
             if self.alt_mem_with_primary_mem and self.alt_mem != None:
                 output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
-                output = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
             else:
                 output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
 
@@ -412,7 +440,7 @@ class TransformerModel(nn.Module):
 
         output = self.pos_encoder(src)
 
-        output2 = self.ffd1(output)
+        output2 = ckpt(self.ffd1,output)
         output = ckpt(self.norm1,output2) + output
 
         output = self.transformer_encoder(output)
@@ -432,7 +460,7 @@ class TransformerModel(nn.Module):
         output = output[:,output.size(1)-src.size(1):] if type(mem) == torch.tensor else output
 
 
-        output = self.decoder(output)#,nxt_arg_start_pos)
+        output = ckpt(self.decoder,output)#,nxt_arg_start_pos)
 
         """if len(output) == 1:
             output = output[0]"""
@@ -466,7 +494,7 @@ test_filepath, valid_filepath, train_filepath = extract_archive(download_from_ur
 try:
     tokenizer = torch.load("models/tokenizer.tar")
 except:
-    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**17,reserved_tokens=[
+    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**16,reserved_tokens=[
     '<pad>','<unk>','<s>','</s>','<copy>','<mask>','<segment>','</segment>','<non_text_content>','</non_text_content>'
     ])
     torch.save(tokenizer,"models/tokenizer.tar")
@@ -482,7 +510,7 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 512#*2*2
+bptt = 512*3
 import random
 def random_mask_encoder(inp):
     inp_2 = inp.clone().detach()
@@ -493,25 +521,24 @@ def random_mask_encoder(inp):
                 inp_2[i,j] = 5
             elif rnd==0:
                 inp_2[i,j] = inp[i,random.randint(0,inp.size(1)-1)]
-    inp_2 = inp_2
     return inp_2
 
 
 def prepare_batch(source):
-    data = random_mask_encoder(source)
+    data = source.clone().detach() #random_mask_encoder(source)
     target = source
     return torch.cat((data.unsqueeze(0),target.unsqueeze(0)),dim=0)
 
 def get_batch(source,j):
     seq_len = min(bptt, source.size(2) - j)
-    return source[0,:,j:j+seq_len].to(device),source[1,:,j:j+seq_len].reshape(-1).to(device)
+    return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j:j+seq_len].reshape(-1).to(device)
 
 ntokens = tokenizer.vocab_size
-emsize = 2048//8
-nhid = emsize * 2 
-nlayers = 16
-nhead = 16
-num_parallel_layers = 3
+emsize = 2048//2
+nhid = emsize * 4
+nlayers = 1
+nhead = 64
+num_parallel_layers = 0
 dropout = 0.3
 
 use_deepspeed = False
@@ -592,7 +619,7 @@ if use_deepspeed:
         model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout)
 
 
-model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout,mem_token=100).to(device)
+model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout,mem_token=128).to(device)
 
 #print(sum(p.numel() for p in model.parameters()))
 import time
@@ -600,10 +627,14 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.03
+lr = 0.1
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 #optimizer = torch.optim.Adam(model.parameters(), lr= lr,betas=[0.8,0.99],eps=1e-8,weight_decay=3e-7)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
+#scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 100, gamma=0.95)
+multiplier = 1000000
+step = 1
+lambda_1 = lambda step: (multiplier/200 * step + 1) / (step**2 + multiplier)
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 epoch = 0
 best_val_loss = float("inf")
 
@@ -616,9 +647,9 @@ if use_deepspeed:
 
 model.eval()
 inp = torch.zeros((1,10),dtype=torch.long).to(device)
-out = model(inp,assign_to_alt_mem=False)
+out,mem = model(inp,assign_to_alt_mem=False)
 print(torch.argmax((out.view(-1,ntokens)),dim=-1))
-del(out)
+del(out,mem,inp)
 
 best_model = model
 
@@ -643,6 +674,7 @@ try:
             """
     optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
+    step = checkpoint_['step_number']
 
     try:
         resume_batch = checkpoint_['resume_batch']
@@ -683,11 +715,11 @@ except:
     processed_test_data = prepare_batch(test_data)
     processed_val_data = prepare_batch(val_data)
 
-    del(train_data,test_data,val_data)
+    #del(train_data,test_data,val_data)
 
-    torch.save(processed_train_data,"models/data/train.tar")
-    torch.save(processed_test_data,"models/data/test.tar")
-    torch.save(processed_val_data,"models/data/val.tar")
+    #torch.save(processed_train_data,"models/data/train.tar")
+    #torch.save(processed_test_data,"models/data/test.tar")
+    #torch.save(processed_val_data,"models/data/val.tar")
 
 torch.cuda.empty_cache()
 #model.to(device)
@@ -697,14 +729,17 @@ print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
 def inference(text,size=128,eval_model = best_model):
     model.eval()
-    text_input = torch.cat((data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1)
+    text_input = torch.cat((data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device )
     #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
     out,_= eval_model(text_input)
     out = torch.argmax(out.view(-1, ntokens),dim=-1)
     result = tokenizer.decode(out)
     return [tokenizer.decode(text_input.view(-1)),result]
 
-def train(resume_batch=0,step_scheduler=1024,save_intermediate_intervel=4096,mini_batch_size=20):
+
+print(inference("Hello World!!! This is inference function on the currently trained model"))
+
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_batch_size=20,step=step):
     model.train() 
     total_loss = 0.
     start_time = time.time()
@@ -737,7 +772,7 @@ def train(resume_batch=0,step_scheduler=1024,save_intermediate_intervel=4096,min
         torch.cuda.empty_cache()
 
         total_loss += loss.item()
-        log_interval = 20
+        log_interval = 200
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
@@ -763,7 +798,8 @@ def train(resume_batch=0,step_scheduler=1024,save_intermediate_intervel=4096,min
                 'vocab': vocab,
                 'tokenizer': tokenizer,
                 'resume_batch':batch,
-                'train_eval_events': train_eval_event
+                'train_eval_events': train_eval_event,
+                'step_number': step
             },
             path
             )
@@ -778,11 +814,13 @@ def train(resume_batch=0,step_scheduler=1024,save_intermediate_intervel=4096,min
                 'vocab': vocab,
                 'tokenizer': tokenizer,
                 'resume_batch':batch,
-                'train_eval_events': train_eval_event
+                'train_eval_events': train_eval_event,
+                'step_number': step
             })"""
         if step_scheduler != None:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(2)//bptt < step_scheduler):
                 scheduler.step()
+                step += 1
 
 def evaluate(eval_model, data_source):
     eval_model.eval()
@@ -795,8 +833,8 @@ def evaluate(eval_model, data_source):
             output,single_pass_mem = eval_model(data,mem = single_pass_mem)
             output_flat = output.view(-1, ntokens)
             total_loss += data.size(1) * criterion(output_flat, targets).item()
-            total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
-    return total_loss / (data_source.size(2)), total_acc / (data_source.size(2))
+            total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()
+    return total_loss / (data_source.size(2)), total_acc/data_source.size(2)
 
 epochs = 30
 
@@ -804,6 +842,7 @@ while True:
     if epoch >= epochs:
         break
     epoch +=1
+    step=step
     epoch_start_time = time.time()
     train(resume_batch=resume_batch,mini_batch_size= 1)
     resume_batch = 0
@@ -829,7 +868,8 @@ while True:
                 'vocab': vocab,
                 'tokenizer': tokenizer,
                 'resume_batch':0,
-                'train_eval_events': train_eval_event
+                'train_eval_events': train_eval_event,
+                'step_number': step
             },
             path
         )
@@ -844,7 +884,8 @@ while True:
                 'vocab': vocab,
                 'tokenizer': tokenizer,
                 'resume_batch':0,
-                'train_eval_events': train_eval_event
+                'train_eval_events': train_eval_event,
+                'step_number': step
             })"""
 model = best_model
 
