@@ -487,8 +487,8 @@ class PositionalEncoding(nn.Module):
 
 
 
-url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
-#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
+#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
+url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 #tokenizer = get_tokenizer('basic_english')
 try:
@@ -633,7 +633,7 @@ optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 100, gamma=0.95)
 a = 5000000
 b = 500
-c = 0.5
+c = 0.01
 step = 1
 lambda_1 = lambda step: ((a/b * step + 1) / (step**2 + a)) + c
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
@@ -653,7 +653,7 @@ out,mem = model(inp,assign_to_alt_mem=False)
 print(torch.argmax((out.view(-1,ntokens)),dim=-1))
 del(out,mem,inp)
 
-best_model = model
+best_model = None
 
 try:
     try:
@@ -665,7 +665,7 @@ try:
     best_val_loss = checkpoint_['best_val_loss']
     vocab = checkpoint_['vocab']
     tokenizer = checkpoint_['tokenizer']
-    """
+    
     try:
         model.load_state_dict(checkpoint_['model_state_dict'],strict=False)
     except:
@@ -673,7 +673,7 @@ try:
             model = checkpoint_['model']
         except Exception as e:
             print("Exception",e)
-            """
+            
     optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
     step = checkpoint_['step_number']
@@ -684,14 +684,19 @@ try:
     except Exception as e:
         print("Exception",e)
     try:
-        best_model = checkpoint_['best_model']
-    except:
+        #best_model = checkpoint_['best_model'].to(torch.device('cpu'))
+        pass
+    except Exception as e:
+        print("Exception",e)
         pass
     del(checkpoint_)
     torch.cuda.empty_cache()
 except Exception as e:
     print("Exception",e)
     pass
+
+if best_model==None:
+    best_model=model
 
 def data_process(raw_text_iter):
   data = tokenizer.encode(raw_text_iter)
@@ -724,7 +729,7 @@ except:
     #torch.save(processed_val_data,"models/data/val.tar")
 
 torch.cuda.empty_cache()
-#model.to(device)
+model.to(device)
 
 print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
@@ -838,7 +843,7 @@ def evaluate(eval_model, data_source):
             total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()
     return total_loss / (data_source.size(2)), total_acc/data_source.size(2)
 
-epochs = 30
+epochs = 60
 
 while True:
     if epoch >= epochs:
