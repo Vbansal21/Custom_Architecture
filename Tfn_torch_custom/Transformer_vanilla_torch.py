@@ -529,9 +529,9 @@ def prepare_batch(source):
     target = source
     return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
 
-def get_batch(source,j):
+def get_batch(source,j,bptt=bptt):
     seq_len = min(bptt, source.size(2) - j -1)
-    return random_mask_encoder(source[0,:,j:j+seq_len-1]).to(device),source[1,:,j+1:j+seq_len].reshape(-1).to(device)
+    return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j+1:j+seq_len+1].reshape(-1).to(device)
 
 ntokens = tokenizer.vocab_size
 emsize = 2048//2
@@ -675,11 +675,11 @@ try:
             print("Exception",e)
             
     optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
-    step = checkpoint_['step_number']
+    #scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
+    #step = checkpoint_['step_number']
 
     try:
-        resume_batch = checkpoint_['resume_batch']
+        #resume_batch = checkpoint_['resume_batch']
         train_eval_event = checkpoint_['train_eval_events'] + [date_time]
     except Exception as e:
         print("Exception",e)
@@ -703,9 +703,9 @@ def data_process(raw_text_iter):
   return torch.tensor(data)
 
 try:
-    processed_train_data = torch.load("models/data/train")
-    processed_test_data = torch.load("models/data/test")
-    processed_val_data = torch.load("models/data/val")
+    processed_train_data = torch.load("models/data/train.tar")
+    processed_test_data = torch.load("models/data/test.tar")
+    processed_val_data = torch.load("models/data/val.tar")
 except:
 
     train_data = data_process(io.open(train_filepath, encoding="utf8").read()).to(device)
@@ -758,9 +758,11 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
         if resume_batch != None:
             if batch < resume_batch:
                 continue
+        if epoch%2==0:
+            single_pass_mem = None
         data, targets = get_batch(processed_train_data, i)
         #with autocast():
-        output,single_pass_mem = model(data)
+        output,single_pass_mem = model(data,mem=single_pass_mem)
         loss = criterion(output.view(-1, ntokens), targets)
         if use_deepspeed:
             model.backward(loss)
