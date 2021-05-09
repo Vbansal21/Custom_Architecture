@@ -102,8 +102,8 @@ class mem_norm(nn.Module):
         self.norm = RMSNorm(dim)
 
     def forward(self, x, residual):
-        residual_proj = F.tanh(self.proj(residual))
-        gated_output, gate = F.tanh(self.gru(
+        residual_proj = torch.tanh(self.proj(residual))
+        gated_output, gate = torch.tanh(self.gru(
             rearrange(x, 'b n d -> (b n) d'),
             rearrange(residual_proj, 'b n d -> (b n) d')
         ).reshape_as(residual_proj)).chunk(2, dim = -1)
@@ -129,11 +129,15 @@ class TransformerEncoderLayer(nn.Module):
         self.ffd = nn.Sequential(
             nn.Linear(d_model,dim_feedforward),
             _get_activation_fn(activation),
-            GEGLU(dim_feedforward,dim_feedforward),
-            _get_activation_fn(activation),
             nn.Linear(dim_feedforward,d_model),
             _get_activation_fn(activation),
         )
+
+        self.geglu = nn.Sequential(
+            GEGLU(d_model,d_model),
+            _get_activation_fn(activation),
+        )
+
         self.pkm = nn.Sequential(
             nn.Linear(d_model,d_model),
             _get_activation_fn(activation),
@@ -174,7 +178,7 @@ class TransformerEncoderLayer(nn.Module):
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
 
         output = self.norm1(src)
-        output = ckpt(self.ffd,output) + ckpt(self.pkm,output)
+        output = ckpt(self.ffd,output) + ckpt(self.pkm,output) + ckpt(self.geglu,output)
         src2 = ckpt(self.self_attn1,output)
         src3 = ckpt(self.self_attn2,output)
         del(output)
@@ -510,7 +514,7 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 512*3
+bptt = 512*6
 import random
 def random_mask_encoder(inp):
     inp_2 = inp.clone().detach()
@@ -521,7 +525,7 @@ def random_mask_encoder(inp):
                 inp_2[i,j] = 5
             elif rnd==0:
                 inp_2[i,j] = inp[i,random.randint(0,inp.size(1)-1)]
-    return inp_2
+    return torch.cat((torch.zeros((inp.size(0),1)).to(dtype=torch.long),inp_2),dim=1)
 
 
 def prepare_batch(source):
@@ -531,15 +535,15 @@ def prepare_batch(source):
 
 def get_batch(source,j,bptt=bptt):
     seq_len = min(bptt, source.size(2) - j -1)
-    return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j+1:j+seq_len+1].reshape(-1).to(device)
+    return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j:j+seq_len+1].reshape(-1).to(device)
 
 import wandb,numpy
 
 ntokens = tokenizer.vocab_size
-emsize = 2048//2
+emsize = 2048//4
 nhid = emsize * 4
 nlayers = 1
-nhead = 64
+nhead = 16
 num_parallel_layers = 0
 dropout = 0.3
 mem_tokens = 128
@@ -630,7 +634,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.1
+lr = 0.3
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 #optimizer = torch.optim.Adam(model.parameters(), lr= lr,betas=[0.8,0.99],eps=1e-8,weight_decay=3e-7)
 #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 100, gamma=0.95)
@@ -644,7 +648,7 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-epochs = 60
+epochs = 10
 
 train_eval_event = [date_time]
 
@@ -659,8 +663,9 @@ del(out,mem,inp)
 
 best_model = None
 
+project_name = "Tfn_X"
 
-wandb.init(project=path,config={
+wandb.init(project=project_name,config={
     "ntokens":ntokens,
     "d_model":emsize,
     "ffd":nhid,
@@ -669,7 +674,8 @@ wandb.init(project=path,config={
     "parallel_layer":num_parallel_layers,
     "dropout":dropout,
     "memory_tokens":mem_tokens,
-    "total_epochs":epochs
+    "total_epochs":epochs,
+    "Sequence_length":bptt
 })
 
 
@@ -693,11 +699,11 @@ try:
             print("Exception",e)
             
     optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
-    #scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
-    #step = checkpoint_['step_number']
+    scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
+    step = checkpoint_['step_number']
 
     try:
-        #resume_batch = checkpoint_['resume_batch']
+        resume_batch = checkpoint_['resume_batch']
         train_eval_event = checkpoint_['train_eval_events'] + [date_time]
     except Exception as e:
         print("Exception",e)
@@ -754,7 +760,7 @@ print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
 def inference(text,size=128,eval_model = best_model):
     model.eval()
-    text_input = torch.cat((data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device )
+    text_input = torch.cat((torch.tensor([[0]]),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device )
     #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
     out,_= eval_model(text_input)
     out = torch.argmax(out.view(-1, ntokens),dim=-1)
@@ -797,8 +803,9 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
                 "epoch":epoch,
                 "batch":batch,
                 "perplexity":math.exp(loss.item()),
-                "input":wandb.Html(tokenizer.decode(data)),
-                "target":wandb.Html(tokenizer.decode(targets)),
+                'Learning_Rate':scheduler.get_lr()[0]
+                #"input":wandb.Html(tokenizer.decode(data)),
+                #"target":wandb.Html(tokenizer.decode(targets)),
             }
         )
         if batch % mini_batch_size == 0 or i == processed_train_data.size(2)-1:

@@ -2,3 +2,4 @@
 /Tfn_torch_custom/.data
 /Tfn_torch_custom/models
 launch.json
+/Tfn_torch_custom/wandb
