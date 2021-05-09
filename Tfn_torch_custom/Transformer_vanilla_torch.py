@@ -533,6 +533,8 @@ def get_batch(source,j,bptt=bptt):
     seq_len = min(bptt, source.size(2) - j -1)
     return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j+1:j+seq_len+1].reshape(-1).to(device)
 
+import wandb,numpy
+
 ntokens = tokenizer.vocab_size
 emsize = 2048//2
 nhid = emsize * 4
@@ -540,6 +542,7 @@ nlayers = 1
 nhead = 64
 num_parallel_layers = 0
 dropout = 0.3
+mem_tokens = 128
 
 use_deepspeed = False
 
@@ -619,7 +622,7 @@ if use_deepspeed:
         model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout)
 
 
-model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout,mem_token=128).to(device)
+model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout,mem_token=mem_tokens).to(device)
 
 #print(sum(p.numel() for p in model.parameters()))
 import time
@@ -641,6 +644,7 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
+epochs = 60
 
 train_eval_event = [date_time]
 
@@ -654,6 +658,20 @@ print(torch.argmax((out.view(-1,ntokens)),dim=-1))
 del(out,mem,inp)
 
 best_model = None
+
+
+wandb.init(project=path,config={
+    "ntokens":ntokens,
+    "d_model":emsize,
+    "ffd":nhid,
+    "layers":nlayers,
+    "heads":nhead,
+    "parallel_layer":num_parallel_layers,
+    "dropout":dropout,
+    "memory_tokens":mem_tokens,
+    "total_epochs":epochs
+})
+
 
 try:
     try:
@@ -754,6 +772,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
     #model.alt_mem = None
     #model.alt_mem_tokens(None,False)
     acc = 0
+    total_acc = 0
     for batch, i in enumerate(range(0, processed_train_data.size(2)-1, bptt)):
         if resume_batch != None:
             if batch < resume_batch:
@@ -769,7 +788,19 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
         else:
             loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
+        acc = ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
+        wandb.log(
+            {
+                "loss":loss.item(),
+                "step":step,
+                "accuracy":acc,
+                "epoch":epoch,
+                "batch":batch,
+                "perplexity":math.exp(loss.item()),
+                "input":wandb.Html(tokenizer.decode(data)),
+                "target":wandb.Html(tokenizer.decode(targets)),
+            }
+        )
         if batch % mini_batch_size == 0 or i == processed_train_data.size(2)-1:
             if use_deepspeed:
                 model.step()
@@ -780,6 +811,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
         del(data,targets)
         torch.cuda.empty_cache()
 
+        total_acc += acc
         total_loss += loss.item()
         log_interval = 200
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
@@ -789,10 +821,10 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
                   'lr {:04.5f} | ms/batch {:08.3f} | acc {:3.2f}% | '
                   'loss {:5.3f} | ppl {:10.3f}'.format(
                     epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
-                    elapsed * 1000 / log_interval,acc*100/log_interval,
+                    elapsed * 1000 / log_interval,total_acc*100/log_interval,
                     cur_loss, math.exp(cur_loss)))
             total_loss = 0
-            acc = 0
+            total_acc = 0
             start_time = time.time()
         if batch % save_intermediate_intervel == 0 and batch > 0:
             
@@ -844,8 +876,6 @@ def evaluate(eval_model, data_source):
             total_loss += data.size(1) * criterion(output_flat, targets).item()
             total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()
     return total_loss / (data_source.size(2)), total_acc/data_source.size(2)
-
-epochs = 60
 
 while True:
     if epoch >= epochs:
