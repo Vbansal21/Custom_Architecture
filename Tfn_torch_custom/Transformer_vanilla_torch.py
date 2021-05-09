@@ -527,7 +527,7 @@ def random_mask_encoder(inp):
 def prepare_batch(source):
     data = source.clone().detach() #random_mask_encoder(source)
     target = source
-    return torch.cat((data.unsqueeze(0),target.unsqueeze(0)),dim=0)
+    return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
 
 def get_batch(source,j):
     seq_len = min(bptt, source.size(2) - j)
@@ -722,11 +722,11 @@ except:
     processed_test_data = prepare_batch(test_data)
     processed_val_data = prepare_batch(val_data)
 
-    #del(train_data,test_data,val_data)
+    del(train_data,test_data,val_data)
 
-    #torch.save(processed_train_data,"models/data/train.tar")
-    #torch.save(processed_test_data,"models/data/test.tar")
-    #torch.save(processed_val_data,"models/data/val.tar")
+    torch.save(processed_train_data,"models/data/train.tar")
+    torch.save(processed_test_data,"models/data/test.tar")
+    torch.save(processed_val_data,"models/data/val.tar")
 
 torch.cuda.empty_cache()
 model.to(device)
@@ -760,7 +760,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
                 continue
         data, targets = get_batch(processed_train_data, i)
         #with autocast():
-        output,single_pass_mem = model(data,mem = single_pass_mem)
+        output,single_pass_mem = model(data)
         loss = criterion(output.view(-1, ntokens), targets)
         if use_deepspeed:
             model.backward(loss)
