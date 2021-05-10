@@ -20,3 +20,6 @@ deepspeed
 mpi4i
 # sudo pip3 install --force-reinstall Ninja
 # sudo apt install libaio-dev
+wandb
+mmcv
+cupy

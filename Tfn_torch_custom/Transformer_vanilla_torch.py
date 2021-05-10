@@ -1,500 +1,31 @@
-from logging import exception
-import math
-from numpy import multiply
-import torch
-from torch import tensor
-#from torch._C import int64
-import torch.nn as nn
-import torch.nn.functional as F
-
-
 import io
-from torchtext.utils import download_from_url, extract_archive
-#from torchtext.data.utils import get_tokenizer
-#from torchtext.vocab import build_vocab_from_iterator
-from torchnlp.encoders.text import SubwordEncoder
-
-import copy
-from typing import Tuple, Optional, Any
-
-from torch import Tensor
-#from torch.nn.modules.module import Module
-from torch.nn.modules.container import ModuleList
-from torch.nn.init import xavier_uniform_
-from torch.nn.modules.dropout import Dropout
-#from torch.nn.modules.linear import Linear
-#from torch.nn.modules.normalization import LayerNorm
-
-from typing import  Optional
-#from torch.nn.modules.linear import _LinearWithBias
-#from torch.nn.init import constant_
-#from torch.nn.parameter import Parameter
-from einops import repeat,rearrange
-
+import time
+import math
+import torch
+import random,wandb
+from torch import nn
+import scripts.model
 torch.set_num_threads(12)
 torch.set_num_interop_threads(12)
-
-#from x_transformers.x_transformers import RMSNorm
-from ET_torch.models.evolved_transformer_block import EvolvedTransformerBlock
-#from x_transformers.x_transformers import GEGLU
-from product_key_memory import PKM
-from hopfield_modules import Hopfield, HopfieldLayer, HopfieldPooling
-from performer_torch import SelfAttention
-
-from torch.utils.checkpoint import checkpoint #as ckpt
-
-def ckpt(f,*args,checkpointed = True):
-    if checkpointed:
-        return checkpoint(f,*args)
-    else:
-        return f(*args)
-
+#from performer_torch import PerformerLM
 from pytorch_model_summary import summary
+from scripts.model import TransformerModel
+from torchnlp.encoders.text import SubwordEncoder
+from torchtext.utils import download_from_url, extract_archive
+
+scripts.model.checkpointed = True
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#print(torch.cuda.is_available())
 #device = torch.device("cpu")
 
 torch.autograd.set_detect_anomaly(True)
 #scaler = torch.cuda.amp.GradScaler(init_scale=2**3)
 #autocast = torch.cuda.amp.autocast
 
-def _get_clones(module, N):
-    return ModuleList([copy.deepcopy(module) for i in range(N)])
-
-def _get_activation_fn(activation):
-    if activation == "relu":
-        return nn.ReLU()
-    elif activation == "gelu":
-        return nn.GELU()
-
-    raise RuntimeError("activation should be relu/gelu, not {}".format(activation))
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-8):
-        super().__init__()
-        self.scale = dim ** -0.5
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
-        return x / norm.clamp(min = self.eps) * self.g
-
-class GEGLU(nn.Module):
-    def __init__(self, dim_in, dim_out):
-        super().__init__()
-        self.proj = nn.Linear(dim_in, dim_out * 2)
-
-    def forward(self, x):
-        x, gate = self.proj(x).chunk(2, dim = -1)
-        return x * F.gelu(gate)
-
-#from x_transformers.x_transformers import GRUGating,Rezero
-
-class mem_norm(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.gru = nn.GRUCell(dim, dim*2)
-        #self.proj = nn.Linear(dim,dim*2)
-        self.proj = HopfieldLayer(dim,output_size=dim*2)
-        self.g = nn.Parameter(torch.zeros(1))
-        self.norm = RMSNorm(dim)
-
-    def forward(self, x, residual):
-        residual_proj = torch.tanh(self.proj(residual))
-        gated_output, gate = torch.tanh(self.gru(
-            rearrange(x, 'b n d -> (b n) d'),
-            rearrange(residual_proj, 'b n d -> (b n) d')
-        ).reshape_as(residual_proj)).chunk(2, dim = -1)
-        x = (gated_output + x) * F.gelu(gate) 
-        x = x * self.g
-        return self.norm(x)+residual
-
-class TransformerEncoderLayer(nn.Module):
-    r"""Advances in
-    Neural Information Processing Systems
-    """
-
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="gelu"):
-        super(TransformerEncoderLayer, self).__init__()
-        #self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)        
-        #attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
-        #hopfield = Hopfield(input_size=d_model,num_heads=nhead)
-
-        self.norm1 = RMSNorm(d_model)
-        #self.norm2 = RMSNorm(d_model)
-        self.dropout = Dropout(dropout)
-
-        self.ffd = nn.Sequential(
-            nn.Linear(d_model,dim_feedforward),
-            _get_activation_fn(activation),
-            nn.Linear(dim_feedforward,d_model),
-            _get_activation_fn(activation),
-        )
-
-        self.geglu = nn.Sequential(
-            GEGLU(d_model,d_model),
-            _get_activation_fn(activation),
-        )
-
-        self.pkm = nn.Sequential(
-            nn.Linear(d_model,d_model),
-            _get_activation_fn(activation),
-            PKM(d_model),
-            _get_activation_fn(activation),
-            nn.Linear(d_model,d_model),
-            _get_activation_fn(activation),
-            )
-        
-        
-        self.self_attn1 = EvolvedTransformerBlock(d_model,
-                            num_heads=nhead,
-                            attn=SelfAttention(d_model,
-                                                causal=False,
-                                                heads=nhead,
-                                                dim_head=d_model//nhead,
-                                                num_mem_kv=2048*2,
-                                                #to_q=copy.deepcopy(self.pkm)
-                                            ),
-                            ffd=copy.deepcopy(self.ffd),
-                            context=False,
-                            pkm=copy.deepcopy(self.pkm)
-                            )
-        self.self_attn2 = EvolvedTransformerBlock(d_model,
-                            num_heads=nhead,
-                            attn=Hopfield(
-                                input_size=d_model,
-                                num_heads=nhead
-                                ),
-                            ffd=copy.deepcopy(self.ffd),
-                            context=False,
-                            pkm=copy.deepcopy(self.pkm)
-                            )
-        
-        self.gate = mem_norm(d_model)
-
-
-    def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
-
-        output = self.norm1(src)
-        output = ckpt(self.ffd,output) + ckpt(self.pkm,output) + ckpt(self.geglu,output)
-        src2 = ckpt(self.self_attn1,output)
-        src3 = ckpt(self.self_attn2,output)
-        del(output)
-
-        output = src2 + src3
-        del(src2,src3)
-
-        output = self.dropout(output)
-        src = ckpt(self.gate,output,src)
-        del(output)
-        return src
-
-class TransformerEncoder(nn.Module):
-    __constants__ = ['norm']
-
-    def __init__(self, encoder_layer, num_layers, d_model,num_parallel_layers = 3):
-        super(TransformerEncoder, self).__init__()
-        self.layers = _get_clones(encoder_layer, num_layers)
-        d_model = d_model
-        self.num_parallel_layers = num_parallel_layers
-        self.linear1 = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(self.num_parallel_layers)])
-        self.linear2 = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(self.num_parallel_layers)])
-        #self.enc = encoder_layer
-        self.num_layers = num_layers
-        self.norm = RMSNorm(d_model)
-        self.norm2 = RMSNorm(d_model)
-
-        if self.num_parallel_layers != 0:
-            self.norm1 = RMSNorm(d_model)
-            self.norm3 = RMSNorm(d_model)
-        else:
-            self.norm1 = None
-            self.norm3 = None
-
-    def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
-        output = src
-        out = []
-
-        if self.num_parallel_layers > 0:
-            for layer in self.linear1:
-               out.append(self.norm1(ckpt(layer,output))+output)
-        else:
-            out = [src]
-
-        for enc in self.layers:
-            tmp = []
-
-            for i in out:
-                out2 = self.norm2(ckpt(enc,i)) + i
-                tmp.append(out2)
-
-            out = tmp.copy()
-
-        tmp = []
-        if self.num_parallel_layers > 0:
-            for i,layer in enumerate(self.linear2):
-                tmp.append(self.norm3(ckpt(layer,out[i])) + out[i])
-            out = tmp.copy()
-            tmp = None
-            for i in out:
-                if tmp is None:
-                    tmp = i
-                else:
-                    tmp += i
-            output = tmp
-        else:
-            output = out[0]
-
-        if self.norm != None:
-            output = self.norm(output)
-        return output
-
-class greedy_input_processing(nn.Module):
-
-    def __init__(self,
-                    text_embedding: Optional[nn.Module] = None,
-                    audio_encoder:  Optional[nn.Module] = None,
-                    image_encoder:  Optional[nn.Module] = None,
-                    voxel_encoder:  Optional[nn.Module] = None
-                    ):
-        super(greedy_input_processing,self).__init__()
-
-        self.text_embedding = text_embedding
-        self.audio_encoder  = audio_encoder
-        self.image_encoder  = image_encoder
-        self.voxel_encoder  = voxel_encoder
-
-    def forward(self,*args) -> Tensor:
-        
-        output = None
-        nxt_arg_start_pos = []
-        for i in args:
-            tmp = None
-            assert type(i) == Tensor or type(i) == tensor
-            if len(i.size()) == 2 and self.text_embedding != None:
-                tmp = ckpt(self.text_embedding,i)
-                nxt_arg_start_pos.append((tmp.size(1),'text'))
-            elif len(i.size()) == 3 and self.audio_encoder != None:
-                tmp = ckpt(self.audio_encoder,i)
-                nxt_arg_start_pos.append((tmp.size(1),'audio'))
-            elif len(i.size()) == 4 and self.image_encoder != None:
-                tmp = ckpt(self.image_encoder,i)
-                nxt_arg_start_pos.append((tmp.size(1),'image'))
-            elif len(i.size()) == 5 and self.voxel_encoder != None:
-                tmp = ckpt(self.voxel_encoder,i)
-                nxt_arg_start_pos.append((tmp.size(1),'voxel'))
-            else:
-                raise("Currently not defined for the inputted value")
-            
-            if tmp == None:
-                tmp = i
-
-            if output is None:
-                output = tmp
-            else:
-                output = torch.cat((output,tmp),dim=1)
-            del(tmp)
-        
-        return output,nxt_arg_start_pos
-
-class lm_head(nn.Module):
-
-    def __init__(self,
-                    text_decoder:  Optional[nn.Module] = None,
-                    audio_decoder: Optional[nn.Module] = None,
-                    image_decoder: Optional[nn.Module] = None,
-                    voxel_decoder: Optional[nn.Module] = None
-                    ):
-        super(lm_head,self).__init__()
-
-        self.text_decoder = text_decoder
-        self.audio_decoder = audio_decoder
-        self.image_decoder = image_decoder
-        self.voxel_decoder = voxel_decoder
-
-    def forward(self,src: Tensor,nxt_arg_start_pos: list):
-        
-        src_copy = src
-        output = []
-        for (key,value) in nxt_arg_start_pos:
-            tmp = None
-            if value=='text' and self.text_decoder != None:
-                tmp = src_copy[:,:key] if src_copy.size(1) != key else src_copy
-                src_copy = src_copy[:,key:] if src_copy.size(1) != key else src_copy
-                tmp = ckpt(self.text_decoder,tmp)
-            elif value=='audio' and self.audio_decoder != None:
-                tmp = src_copy[:,:key] if src_copy.size(1) != key else src_copy
-                src_copy = src_copy[:,key:] if src_copy.size(1) != key else src_copy
-                tmp = ckpt(self.audio_decoder,tmp)
-            elif value=='image' and self.image_decoder != None:
-                tmp = src_copy[:,:key] if src_copy.size(1) != key else src_copy
-                src_copy = src_copy[:,key:] if src_copy.size(1) != key else src_copy
-                tmp = ckpt(self.image_decoder,tmp)
-            elif value=='voxel' and self.voxel_decoder != None:
-                tmp = src_copy[:,:key] if src_copy.size(1) != key else src_copy
-                src_copy = src_copy[:,key:] if src_copy.size(1) != key else src_copy
-                tmp = ckpt(self.voxel_decoder,tmp)
-            else:
-                raise("Currently not defined for the inputted value")
-            output.append(tmp)
-            del(tmp)
-        output = tuple(output)
-        return output
-
-
-class TransformerModel(nn.Module):
-
-    def __init__(self, ntoken, ninp, nhead, nhid, nlayers,num_parallel_layers = 0, dropout=0.5,activation='gelu',mem_token=00):
-        super(TransformerModel, self).__init__()
-        self.model_type = 'Transformer'
-        self.pos_encoder = PositionalEncoding(ninp, dropout)
-        encoder_layers = TransformerEncoderLayer(ninp, nhead, nhid, dropout)
-        self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers, ninp, num_parallel_layers)
-        #self.encoder = nn.Embedding(ntoken, ninp)
-        
-        embedding_encoder = nn.Sequential(
-            nn.Embedding(ntoken, ninp),
-            _get_activation_fn(activation),
-            nn.Linear(ninp,nhid*2),
-            _get_activation_fn(activation),
-            nn.Linear(nhid*2,ninp),
-            _get_activation_fn(activation),
-        )
-        
-        self.ninp = ninp
-
-        
-        self.decoder = nn.Sequential(
-            nn.Linear(ninp,nhid*2),
-            _get_activation_fn(activation),
-            nn.Linear(nhid*2,ninp),
-            _get_activation_fn(activation),
-            nn.Linear(ninp,ntoken)
-        )
-
-        self.ffd1 = nn.Sequential(
-            nn.Linear(ninp,nhid*2),
-            _get_activation_fn(activation),
-            nn.Linear(nhid*2,ninp),
-            _get_activation_fn(activation)
-        )
-        self.ffd2 = nn.Sequential(
-            nn.Linear(ninp,nhid*2),
-            _get_activation_fn(activation),
-            nn.Linear(nhid*2,ninp),
-            _get_activation_fn(activation)
-        )
-        self.norm1 = RMSNorm(ninp)
-        self.norm2 = RMSNorm(ninp)
-
-        self.normalised_args_cat = embedding_encoder#embedding_encoder#greedy_input_processing(text_embedding=embedding_encoder)
-        #self.decoder = decoder #lm_head(text_decoder=decoder)
-
-        self.mem_exist = True if mem_token else False
-        if self.mem_exist:
-            if type(mem_token)==int:
-                self.mem = nn.Parameter(torch.randn(mem_token,ninp))
-            elif type(mem_token) == Tensor:
-                assert mem_token.size(-1)==ninp
-                self.mem = nn.Parameter(mem_token)
-        
-        self.alt_mem = None
-        self.alt_mem_with_primary_mem = False
-
-        self.init_weights()
-
-    def init_weights(self):
-        for w in self.parameters():
-            w.data.uniform_(-1/4,1/4)
-        #self.decoder.weight.data.uniform_(-1/4,1/4)
-        #self.decoder.bias.data.uniform_(-1/4,1/4)
-
-
-    def alt_mem_tokens(self,mem: Tensor,alt_mem_with_primary_mem: Optional[bool] == True):
-        self.alt_mem = mem
-        self.alt_mem_with_primary_mem = alt_mem_with_primary_mem
-
-    #@autocast()
-    def forward(self, src:Tensor,mem: Optional[Tensor] = None,context: Optional[Tensor] = None,alt_mem_with_primary_key: Optional[bool] = None,assign_to_alt_mem: Optional[bool] = True) -> Tensor:
-        
-        orignal_src = src
-
-        src = ckpt(self.normalised_args_cat,src)#,nxt_arg_start_pos
-        src = src * math.sqrt(self.ninp)
-
-
-        self.alt_mem_with_primary_mem = alt_mem_with_primary_key if type(alt_mem_with_primary_key) == bool else self.alt_mem_with_primary_mem
-
-        if mem != None and self.mem_exist:
-            if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            else:
-                output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-
-        elif self.mem_exist:
-            if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
-                output = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            else:
-                output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-
-
-        output = self.pos_encoder(src)
-
-        output2 = ckpt(self.ffd1,output)
-        output = ckpt(self.norm1,output2) + output
-
-        output = self.transformer_encoder(output)
-
-        output2 = ckpt(self.ffd2,output)
-        output = ckpt(self.norm2,output2) + output
-
-
-        for i in range(output.size(0)):
-            if i == 0:
-                mem = [output[i,:output.size(1)-src.size(1)]]
-            else:
-                mem += [output[i,:output.size(1)-src.size(1)]]
-        mem = torch.cat(mem,dim=1) if type(mem) == torch.tensor else None
-        self.alt_mem = mem if assign_to_alt_mem else None
-
-        output = output[:,output.size(1)-src.size(1):] if type(mem) == torch.tensor else output
-
-
-        output = ckpt(self.decoder,output)#,nxt_arg_start_pos)
-
-        """if len(output) == 1:
-            output = output[0]"""
-        return output,mem
-
-
-class PositionalEncoding(nn.Module):
-
-    def __init__(self, d_model, dropout=0.1,max_len=2**17):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)#.transpose(0, 1)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        x = x + self.pe[:, :x.size(1)]
-        return self.dropout(x)
-
-
 
 #url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
 url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
-#tokenizer = get_tokenizer('basic_english')
 try:
     tokenizer = torch.load("models/tokenizer.tar")
 except:
@@ -514,39 +45,15 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
-bptt = 512*6
-import random
-def random_mask_encoder(inp):
-    inp_2 = inp.clone().detach()
-    for i in range(inp.size(0)):
-        for j in range(inp.size(1)):
-            rnd = random.randint(0,6)
-            if rnd==1:
-                inp_2[i,j] = 5
-            elif rnd==0:
-                inp_2[i,j] = inp[i,random.randint(0,inp.size(1)-1)]
-    return torch.cat((torch.zeros((inp.size(0),1)).to(dtype=torch.long),inp_2),dim=1)
-
-
-def prepare_batch(source):
-    data = source.clone().detach() #random_mask_encoder(source)
-    target = source
-    return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
-
-def get_batch(source,j,bptt=bptt):
-    seq_len = min(bptt, source.size(2) - j -1)
-    return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j:j+seq_len+1].reshape(-1).to(device)
-
-import wandb,numpy
-
 ntokens = tokenizer.vocab_size
-emsize = 2048//4
+emsize = 2048//2
 nhid = emsize * 4
 nlayers = 1
 nhead = 16
 num_parallel_layers = 0
 dropout = 0.3
-mem_tokens = 128
+mem_tokens = 256
+bptt = 1024 - mem_tokens
 
 use_deepspeed = False
 
@@ -613,10 +120,28 @@ deepspeed_args = {
     "synchronize_checkpoint_boundary": True,
     "profile": False
     }
-    
 }
 
-#from performer_torch import PerformerLM
+def random_mask_encoder(inp):
+    inp_2 = inp.clone().detach()
+    for i in range(inp.size(0)):
+        for j in range(inp.size(1)):
+            rnd = random.randint(0,6)
+            if rnd==1:
+                inp_2[i,j] = 5
+            elif rnd==0:
+                inp_2[i,j] = inp[i,random.randint(0,inp.size(1)-1)]
+    return torch.cat((torch.zeros((inp.size(0),1)).to(dtype=torch.long),inp_2),dim=1)
+
+def prepare_batch(source):
+    data = source.clone().detach()
+    target = source
+    return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
+
+def get_batch(source,j,bptt=bptt):
+    seq_len = min(bptt-1, source.size(2) - j -1 - 1)
+    return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j:j+seq_len+1].reshape(-1).to(device)
+
 
 if use_deepspeed:
     import deepspeed
@@ -629,21 +154,19 @@ if use_deepspeed:
 model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout,mem_token=mem_tokens).to(device)
 
 #print(sum(p.numel() for p in model.parameters()))
-import time
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.3
+lr = 0.0175
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-#optimizer = torch.optim.Adam(model.parameters(), lr= lr,betas=[0.8,0.99],eps=1e-8,weight_decay=3e-7)
-#scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 100, gamma=0.95)
 a = 5000000
 b = 500
-c = 0.01
+c = 0.0
 step = 1
-lambda_1 = lambda step: ((a/b * step + 1) / (step**2 + a)) + c
+lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
+load_scheduler = False
 epoch = 0
 best_val_loss = float("inf")
 
@@ -699,8 +222,12 @@ try:
             print("Exception",e)
             
     optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
     step = checkpoint_['step_number']
+    if load_scheduler:
+        scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
+    else:
+        lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 
     try:
         resume_batch = checkpoint_['resume_batch']
@@ -795,6 +322,10 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
             loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         acc = ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
+        try:
+            ppl = math.exp(loss.item())
+        except:
+            ppl = -1.0
         wandb.log(
             {
                 "loss":loss.item(),
@@ -802,7 +333,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
                 "accuracy":acc,
                 "epoch":epoch,
                 "batch":batch,
-                "perplexity":math.exp(loss.item()),
+                "perplexity":ppl,
                 'Learning_Rate':scheduler.get_lr()[0]
                 #"input":wandb.Html(tokenizer.decode(data)),
                 #"target":wandb.Html(tokenizer.decode(targets)),
@@ -823,13 +354,17 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
         log_interval = 200
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
+            try:
+                ppl = math.exp(cur_loss)
+            except:
+                ppl = -1.0
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
                   'lr {:04.5f} | ms/batch {:08.3f} | acc {:3.2f}% | '
                   'loss {:5.3f} | ppl {:10.3f}'.format(
                     epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
                     elapsed * 1000 / log_interval,total_acc*100/log_interval,
-                    cur_loss, math.exp(cur_loss)))
+                    cur_loss,ppl ))
             total_loss = 0
             total_acc = 0
             start_time = time.time()
@@ -887,7 +422,8 @@ def evaluate(eval_model, data_source):
 while True:
     if epoch >= epochs:
         break
-    epoch +=1
+    if resume_batch==0:
+        epoch +=1
     step=step
     epoch_start_time = time.time()
     train(resume_batch=resume_batch,mini_batch_size= 1)

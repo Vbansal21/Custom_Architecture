@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"python.jediMemoryLimit": 4096,
+		"python.analysis.diagnosticMode": "workspace",
+		"python.analysis.completeFunctionParens": true,
+		"vsintellicode.features.python.deepLearning": "enabled",
+		"vsintellicode.modify.editor.suggestSelection": "automaticallyOverrodeDefaultValue"
+	}
+}
