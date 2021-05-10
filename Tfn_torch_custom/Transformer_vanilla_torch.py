@@ -13,14 +13,15 @@ from scripts.model import TransformerModel
 from torchnlp.encoders.text import SubwordEncoder
 from torchtext.utils import download_from_url, extract_archive
 
-scripts.model.checkpointed = True
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #device = torch.device("cpu")
 
 torch.autograd.set_detect_anomaly(True)
 #scaler = torch.cuda.amp.GradScaler(init_scale=2**3)
 #autocast = torch.cuda.amp.autocast
+
+scripts.model.checkpointed = True
+scripts.model.device = device
 
 
 #url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'

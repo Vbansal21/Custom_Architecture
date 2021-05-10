@@ -2,6 +2,7 @@ import math
 import torch
 from torch import tensor
 import torch.nn as nn
+import random
 import torch.nn.functional as F
 
 import copy
@@ -20,6 +21,7 @@ from hopfield_modules import Hopfield, HopfieldLayer, HopfieldPooling
 from performer_torch import SelfAttention
 
 from torchnlp.encoders.text import SubwordEncoder
+import torchnlp
 
 from torch.utils.checkpoint import checkpoint
 
@@ -30,6 +32,7 @@ torch.set_num_threads(12)
 torch.set_num_interop_threads(12)
 
 checkpointed = True
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def ckpt(f,*args,checkpointed = checkpointed):
@@ -200,7 +203,9 @@ class TransformerBlock(nn.Module):
             context_ = ckpt(self.self_hop_context,context)
             context = ckpt(self.context_gate,context,context_)
             del(context_)
+            context = Positional_Encoding(context)
 
+        output = Positional_Encoding(output)
         output = ckpt(self.attn,output,context)
         output = self.dropout(output)
         src = ckpt(self.gate,output,src)
@@ -263,7 +268,7 @@ class TransformerModel(nn.Module):
                     mem_token: Optional[int] = 00,
                     context_mem_token: Optional[int] = 00,
                     encoder_decoder: Optional[bool] = False,
-                    device: Optional[torch.DeviceObjType] = torch.device('cpu')
+                    device: Optional[torch.DeviceObjType] = device
                 ) -> None :
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
@@ -280,6 +285,7 @@ class TransformerModel(nn.Module):
         )
         
         self.ninp = ninp
+        self.ntokens = ntoken
         
         self.decoder = nn.Sequential(
             nn.Linear(ninp,nhid*2),
@@ -337,7 +343,7 @@ class TransformerModel(nn.Module):
     def multiply_pretrained_transformer_layers(self,num: Optional[int] = 1) -> None :
         self.transformer_encoder.pretrained_layer_multiplier(num)
 
-    def alt_mem_tokens(self,mem: Tensor,alt_mem_with_primary_mem: Optional[bool] == True) -> None :
+    def alt_mem_tokens(self,mem: Tensor,alt_mem_with_primary_mem: Optional[bool] = True) -> None :
         self.alt_mem = mem
         self.alt_mem_with_primary_mem = alt_mem_with_primary_mem
 
@@ -358,8 +364,9 @@ class TransformerModel(nn.Module):
                                                            ],
                         eos_index: Optional[int] = 3,
                         unk_index: Optional[int] = 1,
-                        pad_idx: Optional[int] = 0
-                        ) -> None :
+                        pad_idx: Optional[int] = 0,
+                        return_tokenizer: Optional[bool] = False
+                        ) -> None or torchnlp.encoders.text.text_encoder.TextEncoder :
         self.tokenizer = SubwordEncoder(sample,
                                         append_eos=append_eos,
                                         target_vocab_size=target_vocab_size,
@@ -370,18 +377,77 @@ class TransformerModel(nn.Module):
                                         unknown_index=unk_index,
                                         padding_index=pad_idx)
         self.vocab = self.tokenizer.vocab_size
+        if return_tokenizer:
+            return self.tokenizer
 
-    def encode_text(self,*args: str,append_pad_at_start=True,concatenate_all=False) -> list:
+    def random_mask_shuffle_encoder(self,
+                                inp: Tensor,
+                                mask: Optional[bool] = True,
+                                mask_percentage: Optional[float] = 15,
+                                shuffle: Optional[bool] = True,
+                                shuffle_percentage: Optional[float] = 15
+                            ) -> Tensor:
+        inp_2 = inp.clone().detach()
+        for i in range(inp.size(0)):
+            for j in range(inp.size(1)):
+                rnd = random.randint(0,100000)/1000
+                if ((rnd>=0 and rnd<mask_percentage) and mask):
+                    inp_2[i,j] = 5
+                elif ((rnd>=mask_percentage and rnd<mask_percentage+shuffle_percentage) and shuffle):
+                    inp_2[i,j] = inp[i,random.randint(0,inp.size(1)-1)]
+        return inp_2
+
+    def encode_text(self,
+                        *args: str,
+                        append_pad_at_start: Optional[bool] = True,
+                        pad_idx: Optional[int] = 0,
+                        concatenate_all: Optional[bool] = False,
+                        concatenate_dim: Optional[int] = 1,
+                        append_segment_seperator: Optional[bool] = True,
+                        segment_idx: Optional[int] = 6,
+                        mask_at_random: Optional[bool] = True,
+                        mask_percentage: Optional[float] = 15,
+                        shuffle_at_random: Optional[bool] = True,
+                        shuffle_percentage: Optional[float] = 15
+                    ) -> list:
         encoded_text = []
         for txt in args:
             tmp = self.tokenizer.encode(txt)
+            if mask_at_random or shuffle_at_random:
+                tmp =   self.random_mask_shuffle_encoder(tmp,
+                                                            mask=mask_at_random,
+                                                            mask_percentage=mask_percentage,
+                                                            shuffle=shuffle_at_random,
+                                                            shuffle_percentage=shuffle_percentage
+                                                        )
             if append_pad_at_start:
-                tmp = torch.cat((torch.zero((tmp.size(0),1)),tmp),dim=1)
+                tmp = torch.cat((torch.tensor([[pad_idx]]),tmp),dim=1)
+            if append_segment_seperator:
+                tmp = torch.cat((tmp,torch.tensor([[segment_idx]])),dim=1)
             encoded_text.append(tmp)
         
         if concatenate_all:
-            encoded_text = [torch.cat(encoded_text,dim=1)]
+            encoded_text = [torch.cat(encoded_text,dim=concatenate_dim)]
         return encoded_text
+
+    def decode_text(self,
+                        *args: Tensor,
+                        to_text: Optional[bool] = True
+                        ) -> list:
+        decoded_text = []
+        for txt in args:
+            if type(txt) != Tensor:
+                txt = torch.tensor(txt)
+
+            if txt.size(-1) == self.ntokens and len(txt.size()) == 3:
+                txt = torch.argmax(txt,dim=-1)
+
+            if to_text:
+                if txt.size(0) > 1:
+                    txt = self.tokenizer.batch_decode(txt)
+                else:
+                    txt = self.tokenizer.decode(txt)
+            decoded_text.append(txt)
 
     @autocast()
     def forward(self,
@@ -476,7 +542,9 @@ class TransformerModel(nn.Module):
             return output
 
 
-def Positional_Encoding(x,device):
+def Positional_Encoding(x: Tensor,
+                            device: Optional[torch.DeviceObjType] = device
+                        ) -> Tensor :
     max_len = x.size(1)
     d_model = x.size(2)
     pe = torch.zeros(max_len, d_model)
