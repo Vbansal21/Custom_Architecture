@@ -385,11 +385,11 @@ class TransformerModel(nn.Module):
                                 mask: Optional[bool] = True,
                                 mask_percentage: Optional[float] = 15,
                                 mask_together_nos: Optional[int] = 3,
-                                mask_continuous_pos: Optional[float] = -1,
+                                mask_continuous_pos: Optional[float] = -101,
                                 shuffle: Optional[bool] = True,
                                 shuffle_percentage: Optional[float] = 15,
                                 shuffle_together_nos: Optional[int] = 3,
-                                shuffle_continuous_pos: Optional[float] = -1
+                                shuffle_continuous_pos: Optional[float] = -101
                             ) -> Tensor:
         inp_2 = inp.clone().detach()
         for i in range(inp.size(0)):
@@ -407,7 +407,10 @@ class TransformerModel(nn.Module):
                         if (j+1)/inp.size(1) >= shuffle_continuous_pos:
                             rnd = 0
                 if (((rnd>=0 and rnd<shuffle_percentage) or together_count<shuffle_together_nos) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage)):
-                    r = random.randint(0,inp.size(1)-1)
+                    while True:
+                        r = random.randint(0,inp.size(1)-1)
+                        if r!=j:
+                            break
                     inp_2[i,j],inp_2[i,r] = inp[i,r],inp[i,j]
                     count += 1
                     together_count += 1
@@ -446,11 +449,11 @@ class TransformerModel(nn.Module):
                         mask_at_random: Optional[bool] = True,
                         mask_percentage: Optional[float] = 15,
                         mask_together_nos: Optional[int] = 3,
-                        mask_continuous_pos: Optional[float] = -1,
+                        mask_continuous_pos: Optional[float] = -101,
                         shuffle_at_random: Optional[bool] = True,
                         shuffle_percentage: Optional[float] = 15,
                         shuffle_together_nos: Optional[int] = 3,
-                        shuffle_continuous_pos: Optional[float] = -1
+                        shuffle_continuous_pos: Optional[float] = -101
                     ) -> list:
         encoded_text = []
         for txt in args:

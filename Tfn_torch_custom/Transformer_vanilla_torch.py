@@ -132,7 +132,7 @@ def random_mask_encoder(inp):
                 inp_2[i,j] = 5
             elif rnd==0:
                 inp_2[i,j] = inp[i,random.randint(0,inp.size(1)-1)]
-    return torch.cat((torch.zeros((inp.size(0),1)).to(dtype=torch.long),inp_2),dim=1)
+    return inp_2
 
 def prepare_batch(source):
     data = source.clone().detach()
@@ -140,8 +140,8 @@ def prepare_batch(source):
     return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
 
 def get_batch(source,j,bptt=bptt):
-    seq_len = min(bptt-1, source.size(2) - j -1 - 1)
-    return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j:j+seq_len+1].reshape(-1).to(device)
+    seq_len = min(bptt, source.size(2) - j -1)
+    return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j:j+seq_len].reshape(-1).to(device)
 
 
 if use_deepspeed:
@@ -307,7 +307,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
     #model.alt_mem_tokens(None,False)
     acc = 0
     total_acc = 0
-    for batch, i in enumerate(range(0, processed_train_data.size(2)-1, bptt)):
+    for batch, i in enumerate(range(0, processed_train_data.size(2), bptt)):
         if resume_batch != None:
             if batch < resume_batch:
                 continue
@@ -412,7 +412,7 @@ def evaluate(eval_model, data_source):
     total_acc = 0.
     single_pass_mem = None
     with torch.no_grad():
-        for i in range(0, data_source.size(2)-1, bptt):
+        for i in range(0, data_source.size(2), bptt):
             data, targets = get_batch(data_source, i)
             output,single_pass_mem = eval_model(data,mem = single_pass_mem)
             output_flat = output.view(-1, ntokens)
