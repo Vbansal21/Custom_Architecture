@@ -384,17 +384,55 @@ class TransformerModel(nn.Module):
                                 inp: Tensor,
                                 mask: Optional[bool] = True,
                                 mask_percentage: Optional[float] = 15,
+                                mask_together_nos: Optional[int] = 3,
+                                mask_continuous_pos: Optional[float] = -1,
                                 shuffle: Optional[bool] = True,
-                                shuffle_percentage: Optional[float] = 15
+                                shuffle_percentage: Optional[float] = 15,
+                                shuffle_together_nos: Optional[int] = 3,
+                                shuffle_continuous_pos: Optional[float] = -1
                             ) -> Tensor:
         inp_2 = inp.clone().detach()
         for i in range(inp.size(0)):
+            count = 0
+            together_count = 0
             for j in range(inp.size(1)):
-                rnd = random.randint(0,100000)/1000
-                if ((rnd>=0 and rnd<mask_percentage) and mask):
+                rnd = -1
+                if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
+                    rnd = random.randint(0,100000)/1000
+                elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
+                    if shuffle_continuous_pos < 0:
+                        if (inp.size(1)-j+1)/inp.size(1) >= ((-1)*shuffle_continuous_pos):
+                            rnd = 0
+                    else:
+                        if (j+1)/inp.size(1) >= shuffle_continuous_pos:
+                            rnd = 0
+                if (((rnd>=0 and rnd<shuffle_percentage) or together_count<shuffle_together_nos) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage)):
+                    r = random.randint(0,inp.size(1)-1)
+                    inp_2[i,j],inp_2[i,r] = inp[i,r],inp[i,j]
+                    count += 1
+                    together_count += 1
+                elif together_count>=shuffle_together_nos:
+                    together_count = 0
+
+            count = 0
+            together_count = 0
+            for j in range(inp.size(1)):
+                rnd = -1
+                if mask_continuous_pos < -100 or mask_continuous_pos > 100:
+                    rnd = random.randint(0,100000)/1000
+                elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
+                    if mask_continuous_pos < 0:
+                        if (inp.size(1)-j+1)/inp.size(1) >= ((-1)*mask_continuous_pos):
+                            rnd = 0
+                    else:
+                        if (j+1)/inp.size(1) >= mask_continuous_pos:
+                            rnd = 0
+                if (((rnd>=0 and rnd<mask_percentage) or together_count<mask_together_nos) and mask and (((count+1)/inp.size(1))<=mask_percentage)):
                     inp_2[i,j] = 5
-                elif ((rnd>=mask_percentage and rnd<mask_percentage+shuffle_percentage) and shuffle):
-                    inp_2[i,j] = inp[i,random.randint(0,inp.size(1)-1)]
+                    count += 1
+                    together_count += 1
+                elif together_count>=mask_together_nos:
+                    together_count = 0
         return inp_2
 
     def encode_text(self,
@@ -407,8 +445,12 @@ class TransformerModel(nn.Module):
                         segment_idx: Optional[int] = 6,
                         mask_at_random: Optional[bool] = True,
                         mask_percentage: Optional[float] = 15,
+                        mask_together_nos: Optional[int] = 3,
+                        mask_continuous_pos: Optional[float] = -1,
                         shuffle_at_random: Optional[bool] = True,
-                        shuffle_percentage: Optional[float] = 15
+                        shuffle_percentage: Optional[float] = 15,
+                        shuffle_together_nos: Optional[int] = 3,
+                        shuffle_continuous_pos: Optional[float] = -1
                     ) -> list:
         encoded_text = []
         for txt in args:
@@ -417,8 +459,12 @@ class TransformerModel(nn.Module):
                 tmp =   self.random_mask_shuffle_encoder(tmp,
                                                             mask=mask_at_random,
                                                             mask_percentage=mask_percentage,
+                                                            mask_together_nos=mask_together_nos,
+                                                            mask_continuous_pos=mask_continuous_pos,
                                                             shuffle=shuffle_at_random,
-                                                            shuffle_percentage=shuffle_percentage
+                                                            shuffle_percentage=shuffle_percentage,
+                                                            shuffle_together_nos=shuffle_together_nos,
+                                                            shuffle_continuous_pos=shuffle_continuous_pos
                                                         )
             if append_pad_at_start:
                 tmp = torch.cat((torch.tensor([[pad_idx]]),tmp),dim=1)
