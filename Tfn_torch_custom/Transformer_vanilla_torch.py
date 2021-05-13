@@ -1,26 +1,28 @@
 import io
 import time
+import copy
 import math
 import torch
 import random,wandb
 from torch import nn
 import scripts.model
-torch.set_num_threads(12)
-torch.set_num_interop_threads(12)
+from torch import Tensor
 #from performer_torch import PerformerLM
 from pytorch_model_summary import summary
 from scripts.model import TransformerModel
 from torchnlp.encoders.text import SubwordEncoder
 from torchtext.utils import download_from_url, extract_archive
+from typing import Tuple, Optional, Any, NoReturn, Union, Literal
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #device = torch.device("cpu")
 
 torch.autograd.set_detect_anomaly(True)
-#scaler = torch.cuda.amp.GradScaler(init_scale=2**3)
-#autocast = torch.cuda.amp.autocast
 
-scripts.model.checkpointed = True
+scaler = torch.cuda.amp.GradScaler(init_scale=2**3)
+autocast = torch.cuda.amp.autocast
+
+scripts.model.checkpointed = False
 scripts.model.device = device
 
 
@@ -47,40 +49,19 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 2048//2
+emsize = 2048//8
 nhid = emsize * 4
 nlayers = 1
 nhead = 16
-num_parallel_layers = 0
 dropout = 0.3
 mem_tokens = 256
-bptt = 1024 - mem_tokens
+bptt = 512 - mem_tokens
 
-use_deepspeed = False
+use_deepspeed = True
 
 deepspeed_args = {
   "train_batch_size": 1,
   "gradient_accumulation_steps": 1,
-  "optimizer": {
-    "type": "Adam",
-    "params": {
-      "lr": 0.03,
-      "betas": [
-        0.8,
-        0.999
-      ],
-      "eps": 1e-8,
-      "weight_decay": 3e-7
-    }
-  },
-  "scheduler": {
-      "type": "WarmupLR",
-      "params": {
-          "warmup_min_lr": 0,
-          "warmup_max_lr": 0.03,
-          "warmup_num_steps": 2000
-      }
-  },
   "fp16": {
     "enabled": True,
     "loss_scale": 0.5,
@@ -103,7 +84,7 @@ deepspeed_args = {
     "stage3_gather_fp16_weights_on_model_save": True,
         #"overlap_comm": True,
         #"contiguous_gradients": True,
-        "sub_group_size": 1e3,
+        "sub_group_size": 1,
         #"stage3_param_persistence_threshold": 1e8,
     },
     "flops_profiler": {
@@ -123,6 +104,78 @@ deepspeed_args = {
     }
 }
 
+
+if use_deepspeed:
+    import deepspeed
+
+    with deepspeed.zero.Init(mem_efficient_linear=True,remote_device='nvme',config=deepspeed_args,enabled=False):
+        #model = PerformerLM(num_tokens=ntokens,max_seq_len=2**17,dim=emsize,depth=nlayers,heads=nhead,causal=True,use_rezero=True,cross_attend=True)
+        model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens).half()
+else:
+    model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens,device=device).to(device)
+
+def random_mask_shuffle_encoder(
+                            inp: Tensor,
+                            mask: bool = True,
+                            mask_percentage: float = 15.0,
+                            mask_together_nos: int = 3,
+                            mask_continuous_pos: float = -101.0,
+                            shuffle: bool = True,
+                            shuffle_percentage: float = 15,
+                            shuffle_together_nos: int = 3,
+                            shuffle_continuous_pos: float = -101
+                        ) -> Tensor:
+    inp_2: Tensor = inp.clone().detach()
+    for i in range(inp.size(0)):
+        count: int = 0
+        together_count: int = 0
+        for j in range(inp.size(1)):
+            if not shuffle:
+                break
+            rnd: float = -1
+            if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
+                rnd: float = random.randint(0,100000)/1000
+            elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
+                shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
+                if shuffle_continuous_pos < 0:
+                    if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((-1)*shuffle_continuous_pos/100):
+                        rnd: float = 0
+                else:
+                    if (j+1)/inp.size(1) >= shuffle_continuous_pos:
+                        rnd: float = -1
+            if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
+                while True:
+                    r = random.randint(0,inp.size(1)-1)
+                    if r!=j:
+                        break
+                inp_2[i,j],inp_2[i,r] = inp[i,r],inp[i,j]
+                count += 1
+                together_count += 1
+            elif together_count>=shuffle_together_nos:
+                together_count = 0
+
+        count: int = 0
+        together_count: int = 0
+        for j in range(inp.size(1)):
+            rnd: float = -1
+            if mask_continuous_pos < -100 or mask_continuous_pos > 100:
+                rnd: float = random.randint(0,100000)/1000
+            elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
+                mask_together_nos = mask_percentage * (inp.size(1)/100)
+                if mask_continuous_pos < 0:
+                    if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((-1)*mask_continuous_pos/100):
+                        rnd: float = 0
+                else:
+                    if (j+1)/inp.size(1) >= mask_continuous_pos:
+                        rnd: float = 0
+            if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
+                inp_2[i,j] = 5
+                count += 1
+                together_count += 1
+            elif together_count>=mask_together_nos:
+                together_count = 0
+    return inp_2
+
 def random_mask_encoder(inp):
     inp_2 = inp.clone().detach()
     for i in range(inp.size(0)):
@@ -141,26 +194,16 @@ def prepare_batch(source):
 
 def get_batch(source,j,bptt=bptt):
     seq_len = min(bptt, source.size(2) - j -1)
-    return random_mask_encoder(source[0,:,j:j+seq_len]).to(device),source[1,:,j:j+seq_len].reshape(-1).to(device)
-
-
-if use_deepspeed:
-    import deepspeed
-
-    with deepspeed.zero.Init(mem_efficient_linear=False,remote_device='nvme',config=deepspeed_args,enabled=False):
-        #model = PerformerLM(num_tokens=ntokens,max_seq_len=2**17,dim=emsize,depth=nlayers,heads=nhead,causal=True,use_rezero=True,cross_attend=True)
-        model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout)
-
-
-model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers,num_parallel_layers, dropout,mem_token=mem_tokens).to(device)
+    return random_mask_shuffle_encoder(source[0,:,j:j+seq_len],mask_continuous_pos=-85,shuffle=False).to(device).contiguous(),source[1,:,j:j+seq_len].reshape(-1).to(device).contiguous()
 
 #print(sum(p.numel() for p in model.parameters()))
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
-path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+"_"+str(num_parallel_layers)+".tar"
+path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
 lr = 0.0175
-optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+#optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
 a = 5000000
 b = 500
 c = 0.0
@@ -180,8 +223,9 @@ if use_deepspeed:
     model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer,lr_scheduler=scheduler, config_params=deepspeed_args)
 
 model.eval()
-inp = torch.zeros((1,10),dtype=torch.long).to(device)
-out,mem = model(inp,assign_to_alt_mem=False)
+inp = torch.randint(0,ntokens-1,(1,10),dtype=torch.long,device=device)
+with autocast():
+    out,mem = model(inp,assign_to_alt_mem=False)
 print(torch.argmax((out.view(-1,ntokens)),dim=-1))
 del(out,mem,inp)
 
@@ -195,7 +239,6 @@ wandb.init(project=project_name,config={
     "ffd":nhid,
     "layers":nlayers,
     "heads":nhead,
-    "parallel_layer":num_parallel_layers,
     "dropout":dropout,
     "memory_tokens":mem_tokens,
     "total_epochs":epochs,
@@ -283,20 +326,22 @@ except:
 torch.cuda.empty_cache()
 model.to(device)
 
-print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
+#print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
 
 def inference(text,size=128,eval_model = best_model):
     model.eval()
     text_input = torch.cat((torch.tensor([[0]]),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device )
     #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
-    out,_= eval_model(text_input)
+    with autocast():
+        out,_= eval_model(text_input)
     out = torch.argmax(out.view(-1, ntokens),dim=-1)
     result = tokenizer.decode(out)
     return [tokenizer.decode(text_input.view(-1)),result]
 
 
 print(inference("Hello World!!! This is inference function on the currently trained model"))
+
 
 def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_batch_size=20,step=step):
     model.train() 
@@ -314,10 +359,12 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
         if epoch%2==0:
             single_pass_mem = None
         data, targets = get_batch(processed_train_data, i)
-        #with autocast():
-        output,single_pass_mem = model(data,mem=single_pass_mem)
-        loss = criterion(output.view(-1, ntokens), targets)
+        with autocast():
+            output,single_pass_mem = model(data,mem=single_pass_mem)
+            loss = criterion(output.view(-1, ntokens), targets)
         if use_deepspeed:
+            #scaler.scale(loss).backward()
+            #loss.backward(reatain_graph=True)
             model.backward(loss)
         else:
             loss.backward()

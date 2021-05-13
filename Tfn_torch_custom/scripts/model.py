@@ -6,13 +6,12 @@ import random
 import torch.nn.functional as F
 
 import copy
-from typing import Tuple, Optional, Any
+from typing import Tuple, Optional, Any, NoReturn, Union, Literal
 
 from torch import Tensor
 from torch.nn.modules.container import ModuleList
 from torch.nn.modules.dropout import Dropout
 
-from typing import  Optional
 from einops import repeat,rearrange
 
 from ET_torch.models.evolved_transformer_block import EvolvedTransformerBlock
@@ -31,18 +30,25 @@ autocast = torch.cuda.amp.autocast
 torch.set_num_threads(12)
 torch.set_num_interop_threads(12)
 
-checkpointed = True
+checkpointed = False
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def ckpt(f,*args,checkpointed = checkpointed):
+def ckpt(f,arg1,arg2=None,arg3=None,checkpointed = checkpointed):
     if checkpointed:
-        return checkpoint(f,*args)
+        if arg2 == None and arg3 == None:
+            return checkpoint(f,arg1)
+        elif arg3 == None:
+            return checkpoint(f,arg1,arg2)
+        else:
+            return checkpoint(f,arg1,arg2,arg3)
     else:
-        return f(*args)
-
-def _get_clones(module, N):
-    return ModuleList([copy.deepcopy(module) for i in range(N)])
+        if arg2 == None and arg3 == None:
+            return f(arg1)
+        elif arg3 == None:
+            return f(arg1,arg2)
+        else:
+            return f(arg1,arg2,arg3)
 
 def _get_activation_fn(activation):
     if activation == "relu":
@@ -75,19 +81,19 @@ class GEGLU(nn.Module):
 class mem_norm(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.gru = nn.GRUCell(dim, dim*2)
+        self.gru = nn.GRUCell(dim, dim)
         #self.proj = nn.Linear(dim,dim*2)
         self.proj = HopfieldLayer(dim,output_size=dim*2)
         self.g = nn.Parameter(torch.zeros(1))
         self.norm = RMSNorm(dim)
 
     def forward(self, x, residual):
-        residual_proj = torch.tanh(self.proj(residual))
-        gated_output, gate = torch.tanh(self.gru(
+        gru_out = self.gru(
             rearrange(x, 'b n d -> (b n) d'),
-            rearrange(residual_proj, 'b n d -> (b n) d')
-        ).reshape_as(residual_proj)).chunk(2, dim = -1)
-        x = (gated_output + x) * F.gelu(gate) * self.g
+            rearrange(residual, 'b n d -> (b n) d')
+        ).reshape_as(x) * self.g
+        gated_output,gate = self.proj(gru_out).chunk(2,dim=-1)
+        x = (gated_output + x) * F.gelu(gate)
         return self.norm(x)+residual
 
 class TransformerBlock(nn.Module):
@@ -139,7 +145,7 @@ class TransformerBlock(nn.Module):
                                                 GEGLU(d_model,d_model),
                                             ),
                             context=context,
-                            pkm=copy.deepcopy(self.pkm)
+                            pkm=copy.deepcopy(self.pkm1)
                             )
         self.self_hop_src = EvolvedTransformerBlock(d_model,
                             num_heads=nhead,
@@ -147,9 +153,9 @@ class TransformerBlock(nn.Module):
                                 input_size=d_model,
                                 num_heads=nhead
                                 ),
-                            ffd=copy.deepcopy(self.ffd),
+                            ffd=copy.deepcopy(self.ffd1),
                             context=False,
-                            pkm=copy.deepcopy(self.pkm)
+                            pkm=copy.deepcopy(self.pkm1)
                             )
         
 
@@ -183,9 +189,9 @@ class TransformerBlock(nn.Module):
                                     input_size=d_model,
                                     num_heads=nhead
                                     ),
-                                ffd=copy.deepcopy(self.ffd),
+                                ffd=copy.deepcopy(self.ffd2),
                                 context=False,
-                                pkm=copy.deepcopy(self.pkm)
+                                pkm=copy.deepcopy(self.pkm2)
                                 )
             self.context_gate = mem_norm(d_model)
         
@@ -213,7 +219,6 @@ class TransformerBlock(nn.Module):
         return src
 
 class TransformerModule(nn.Module):
-    __constants__ = ['norm']
 
     def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False):
         super(TransformerModule, self).__init__()
@@ -221,11 +226,11 @@ class TransformerModule(nn.Module):
         self.enable_encoder=enable_encoder
 
         if not enable_encoder:
-            self.decoder = _get_clones(TransformerBlock(d_model, nhead, nhid, dropout), num_layers)
+            self.decoder = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout) for _ in range(num_layers)])
         else:
-            self.encoder = _get_clones(TransformerBlock(d_model, nhead, nhid, dropout), num_layers)
-            self.decoder_self = _get_clones(TransformerBlock(d_model, nhead, nhid, dropout), num_layers)
-            self.decoder_cross = _get_clones(TransformerBlock(d_model, nhead, nhid, dropout,context=True), num_layers)
+            self.encoder = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout) for _ in range(num_layers)])
+            self.decoder_self = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout) for _ in range(num_layers)])
+            self.decoder_cross = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout,context=True) for _ in range(num_layers)])
         d_model = d_model
         self.num_layers = num_layers
         
@@ -269,7 +274,7 @@ class TransformerModel(nn.Module):
                     context_mem_token: Optional[int] = 00,
                     encoder_decoder: Optional[bool] = False,
                     device: Optional[torch.DeviceObjType] = device
-                ) -> None :
+                ) -> NoReturn :
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
         self.encoder_decoder = encoder_decoder
@@ -306,7 +311,7 @@ class TransformerModel(nn.Module):
         self.norm1 = RMSNorm(ninp)
         self.norm2 = RMSNorm(ninp)
 
-        self.embedding_encoder = embedding_encoder
+        self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx) #embedding_encoder
 
         self.mem_exist = True if mem_token else False
         if self.mem_exist:
@@ -336,14 +341,17 @@ class TransformerModel(nn.Module):
         self.device = device
         self.init_weights()
 
-    def init_weights(self) -> None :
+    def init_weights(self) -> NoReturn :
         for w in self.parameters():
             w.data.uniform_(-1/16,1/16)
             
-    def multiply_pretrained_transformer_layers(self,num: Optional[int] = 1) -> None :
+    def __len__(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+            
+    def multiply_pretrained_transformer_layers(self,num: Optional[int] = 1) -> NoReturn :
         self.transformer_encoder.pretrained_layer_multiplier(num)
 
-    def alt_mem_tokens(self,mem: Tensor,alt_mem_with_primary_mem: Optional[bool] = True) -> None :
+    def alt_mem_tokens(self,mem: Tensor,alt_mem_with_primary_mem: Optional[bool] = True) -> NoReturn :
         self.alt_mem = mem
         self.alt_mem_with_primary_mem = alt_mem_with_primary_mem
 
@@ -366,7 +374,7 @@ class TransformerModel(nn.Module):
                         unk_index: Optional[int] = 1,
                         pad_idx: Optional[int] = 0,
                         return_tokenizer: Optional[bool] = False
-                        ) -> None or torchnlp.encoders.text.text_encoder.TextEncoder :
+                        ) -> Union[NoReturn,torchnlp.encoders.text.text_encoder.TextEncoder] :
         self.tokenizer = SubwordEncoder(sample,
                                         append_eos=append_eos,
                                         target_vocab_size=target_vocab_size,
@@ -382,30 +390,33 @@ class TransformerModel(nn.Module):
 
     def random_mask_shuffle_encoder(self,
                                 inp: Tensor,
-                                mask: Optional[bool] = True,
-                                mask_percentage: Optional[float] = 15,
-                                mask_together_nos: Optional[int] = 3,
-                                mask_continuous_pos: Optional[float] = -101,
-                                shuffle: Optional[bool] = True,
-                                shuffle_percentage: Optional[float] = 15,
-                                shuffle_together_nos: Optional[int] = 3,
-                                shuffle_continuous_pos: Optional[float] = -101
+                                mask: bool = True,
+                                mask_percentage: float = 15.0,
+                                mask_together_nos: int = 3,
+                                mask_continuous_pos: float = -101.0,
+                                shuffle: bool = True,
+                                shuffle_percentage: float = 15,
+                                shuffle_together_nos: int = 3,
+                                shuffle_continuous_pos: float = -101
                             ) -> Tensor:
-        inp_2 = inp.clone().detach()
+        inp_2: Tensor = inp.clone().detach()
         for i in range(inp.size(0)):
-            count = 0
-            together_count = 0
+            count: int = 0
+            together_count: int = 0
             for j in range(inp.size(1)):
-                rnd = -1
+                if not shuffle:
+                    break
+                rnd: float = -1
                 if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
-                    rnd = random.randint(0,100000)/1000
+                    rnd: float = random.randint(0,100000)/1000
                 elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
+                    shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
                     if shuffle_continuous_pos < 0:
                         if (inp.size(1)-j+1)/inp.size(1) >= ((-1)*shuffle_continuous_pos):
-                            rnd = 0
+                            rnd: float = 0
                     else:
                         if (j+1)/inp.size(1) >= shuffle_continuous_pos:
-                            rnd = 0
+                            rnd: float = 0
                 if (((rnd>=0 and rnd<shuffle_percentage) or together_count<shuffle_together_nos) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage)):
                     while True:
                         r = random.randint(0,inp.size(1)-1)
@@ -417,19 +428,20 @@ class TransformerModel(nn.Module):
                 elif together_count>=shuffle_together_nos:
                     together_count = 0
 
-            count = 0
-            together_count = 0
+            count: int = 0
+            together_count: int = 0
             for j in range(inp.size(1)):
-                rnd = -1
+                rnd: float = -1
                 if mask_continuous_pos < -100 or mask_continuous_pos > 100:
-                    rnd = random.randint(0,100000)/1000
+                    rnd: float = random.randint(0,100000)/1000
                 elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
+                    mask_together_nos = mask_percentage * (inp.size(1)/100)
                     if mask_continuous_pos < 0:
                         if (inp.size(1)-j+1)/inp.size(1) >= ((-1)*mask_continuous_pos):
-                            rnd = 0
+                            rnd: float = 0
                     else:
                         if (j+1)/inp.size(1) >= mask_continuous_pos:
-                            rnd = 0
+                            rnd: float = 0
                 if (((rnd>=0 and rnd<mask_percentage) or together_count<mask_together_nos) and mask and (((count+1)/inp.size(1))<=mask_percentage)):
                     inp_2[i,j] = 5
                     count += 1
@@ -439,25 +451,29 @@ class TransformerModel(nn.Module):
         return inp_2
 
     def encode_text(self,
-                        *args: str,
-                        append_pad_at_start: Optional[bool] = True,
-                        pad_idx: Optional[int] = 0,
-                        concatenate_all: Optional[bool] = False,
-                        concatenate_dim: Optional[int] = 1,
-                        append_segment_seperator: Optional[bool] = True,
-                        segment_idx: Optional[int] = 6,
-                        mask_at_random: Optional[bool] = True,
-                        mask_percentage: Optional[float] = 15,
-                        mask_together_nos: Optional[int] = 3,
-                        mask_continuous_pos: Optional[float] = -101,
-                        shuffle_at_random: Optional[bool] = True,
-                        shuffle_percentage: Optional[float] = 15,
-                        shuffle_together_nos: Optional[int] = 3,
-                        shuffle_continuous_pos: Optional[float] = -101
-                    ) -> list:
+                        *args: Union[str,Tensor],
+                        append_pad_at_start: Union[bool,int] = True,
+                        append_pad_at_end: Union[bool,int] = True,
+                        padding: Union[int,bool] = 8,
+                        pad_to_make_len_a_multiple: bool = True,
+                        pad_idx: int = 0,
+                        concatenate_all: bool = False,
+                        concatenate_dim: int = 1,
+                        append_segment_seperator: bool = True,
+                        segment_idx: int = 6,
+                        mask_at_random: bool = True,
+                        mask_percentage: float = 15.,
+                        mask_together_nos: int = 3,
+                        mask_continuous_pos: float = -101.,
+                        shuffle_at_random: bool = True,
+                        shuffle_percentage: float = 15.,
+                        shuffle_together_nos: int = 3,
+                        shuffle_continuous_pos: float = -101.
+                    ) -> Union[list,Tensor] :
         encoded_text = []
         for txt in args:
-            tmp = self.tokenizer.encode(txt)
+            if type(txt) == str:
+                tmp = self.tokenizer.batch_encode(txt)
             if mask_at_random or shuffle_at_random:
                 tmp =   self.random_mask_shuffle_encoder(tmp,
                                                             mask=mask_at_random,
@@ -469,8 +485,8 @@ class TransformerModel(nn.Module):
                                                             shuffle_together_nos=shuffle_together_nos,
                                                             shuffle_continuous_pos=shuffle_continuous_pos
                                                         )
-            if append_pad_at_start:
-                tmp = torch.cat((torch.tensor([[pad_idx]]),tmp),dim=1)
+            #tmp = torch.cat((torch.tensor([[pad_idx]]),tmp),dim=1)
+
             if append_segment_seperator:
                 tmp = torch.cat((tmp,torch.tensor([[segment_idx]])),dim=1)
             encoded_text.append(tmp)
@@ -481,7 +497,7 @@ class TransformerModel(nn.Module):
 
     def decode_text(self,
                         *args: Tensor,
-                        to_text: Optional[bool] = True
+                        to_text: bool = True
                         ) -> list:
         decoded_text = []
         for txt in args:
@@ -498,7 +514,7 @@ class TransformerModel(nn.Module):
                     txt = self.tokenizer.decode(txt)
             decoded_text.append(txt)
 
-    @autocast()
+    #@autocast()
     def forward(self,
                     src:Tensor,
                     context: Optional[Tensor] = None,
@@ -507,7 +523,7 @@ class TransformerModel(nn.Module):
                     alt_mem_with_primary_key: Optional[bool] = None,
                     assign_to_alt_mem: Optional[bool] = True,
                     return_mem: Optional[bool] = True,
-                ) -> Tuple(Tensor,Optional[Tensor]):
+                ) -> Tuple[Union[Tensor,Optional[Tensor]]]:
         
         b,s = src.size(0),src.size(1)
 
@@ -555,21 +571,21 @@ class TransformerModel(nn.Module):
         output = Positional_Encoding(output,device=self.device)
         if self.encoder_decoder:
             context = Positional_Encoding(context,device=self.device)
+            context = context.contiguous()
+
+        output = output.contiguous()
 
         output2 = ckpt(self.ffd1,output)
         output = ckpt(self.norm1,output2) + output
-        del(output2)
 
         if self.encoder_decoder:
             context2 = ckpt(self.ffd3,context)
             context = ckpt(self.norm1, context2) + context
-            del(context2)
 
         output = ckpt(self.transformer_encoder,output,context)
 
         output2 = ckpt(self.ffd2,output)
         output = ckpt(self.norm2,output2) + output
-        del(output2)
 
 
         for i in range(b):

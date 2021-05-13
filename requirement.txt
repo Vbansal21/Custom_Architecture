@@ -23,3 +23,8 @@ mpi4i
 wandb
 mmcv
 cupy
+praw
+psaw
+trl
+transformers
+torch-points3d
