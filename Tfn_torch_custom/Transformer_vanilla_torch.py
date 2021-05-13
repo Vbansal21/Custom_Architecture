@@ -19,7 +19,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 torch.autograd.set_detect_anomaly(True)
 
-scaler = torch.cuda.amp.GradScaler(init_scale=2**3)
+#scaler = torch.cuda.amp.GradScaler(init_scale=2**3)
 autocast = torch.cuda.amp.autocast
 
 scripts.model.checkpointed = False
@@ -65,10 +65,10 @@ deepspeed_args = {
   "fp16": {
     "enabled": True,
     "loss_scale": 0.5,
-    "initial_scale_power": 3,
+    "initial_scale_power": 7,
     "loss_scale_window": 1000,
     "hysteresis": 2,
-    "min_loss_scale": 0
+    "min_loss_scale": 1
     },
   "gradient_clipping":0.5,
   "zero_optimization": {

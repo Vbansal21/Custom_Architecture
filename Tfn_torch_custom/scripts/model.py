@@ -120,11 +120,11 @@ class TransformerBlock(nn.Module):
         )
 
         self.pkm1 = nn.Sequential(
-            nn.Linear(d_model,d_model),
+            nn.Linear(d_model,d_model//2),
             _get_activation_fn(activation),
-            PKM(d_model),
+            PKM(d_model//2),
             _get_activation_fn(activation),
-            nn.Linear(d_model,d_model),
+            nn.Linear(d_model//2,d_model),
             _get_activation_fn(activation),
             )
         
@@ -149,10 +149,15 @@ class TransformerBlock(nn.Module):
                             )
         self.self_hop_src = EvolvedTransformerBlock(d_model,
                             num_heads=nhead,
-                            attn=Hopfield(
-                                input_size=d_model,
-                                num_heads=nhead
-                                ),
+                            attn=nn.Sequential(
+                                                nn.Linear(d_model,d_model//2),
+                                                HopfieldLayer(
+                                                            input_size=d_model//2,
+                                                            num_heads=nhead,
+                                                            dropout=dropout
+                                                        ),
+                                                nn.Linear(d_model//2,d_model)
+                                              ),
                             ffd=copy.deepcopy(self.ffd1),
                             context=False,
                             pkm=copy.deepcopy(self.pkm1)
@@ -311,7 +316,7 @@ class TransformerModel(nn.Module):
         self.norm1 = RMSNorm(ninp)
         self.norm2 = RMSNorm(ninp)
 
-        self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx) #embedding_encoder
+        self.embedding_encoder = embedding_encoder
 
         self.mem_exist = True if mem_token else False
         if self.mem_exist:
