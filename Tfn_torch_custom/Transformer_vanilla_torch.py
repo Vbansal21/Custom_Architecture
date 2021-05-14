@@ -22,12 +22,12 @@ torch.autograd.set_detect_anomaly(True)
 #scaler = torch.cuda.amp.GradScaler(init_scale=2**3)
 autocast = torch.cuda.amp.autocast
 
-scripts.model.checkpointed = False
+scripts.model.checkpointed = True
 scripts.model.device = device
 
 
-#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
-url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
+url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
+#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 try:
     tokenizer = torch.load("models/tokenizer.tar")
@@ -49,18 +49,18 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 2048//8
+emsize = 2048//4
 nhid = emsize * 4
 nlayers = 1
 nhead = 16
 dropout = 0.3
 mem_tokens = 256
-bptt = 512 - mem_tokens
+bptt = (1024*4+mem_tokens) - mem_tokens
 
-use_deepspeed = True
+use_deepspeed = False
 
 deepspeed_args = {
-  "train_batch_size": 1,
+  "train_batch_size": batch_size,
   "gradient_accumulation_steps": 1,
   "fp16": {
     "enabled": True,
@@ -194,7 +194,7 @@ def prepare_batch(source):
 
 def get_batch(source,j,bptt=bptt):
     seq_len = min(bptt, source.size(2) - j -1)
-    return random_mask_shuffle_encoder(source[0,:,j:j+seq_len],mask_continuous_pos=-85,shuffle=False).to(device).contiguous(),source[1,:,j:j+seq_len].reshape(-1).to(device).contiguous()
+    return random_mask_shuffle_encoder(source[0,:,j:j+seq_len],mask_percentage=20,mask_together_nos=10,shuffle_percentage=10).to(device).contiguous(),source[1,:,j:j+seq_len].reshape(-1).to(device).contiguous()
 
 #print(sum(p.numel() for p in model.parameters()))
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
@@ -210,12 +210,12 @@ c = 0.0
 step = 1
 lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
-load_scheduler = False
+load_scheduler = True
 epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-epochs = 10
+epochs = 30
 
 train_eval_event = [date_time]
 
@@ -223,8 +223,11 @@ if use_deepspeed:
     model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer,lr_scheduler=scheduler, config_params=deepspeed_args)
 
 model.eval()
-inp = torch.randint(0,ntokens-1,(1,10),dtype=torch.long,device=device)
-with autocast():
+inp = torch.randint(0,ntokens-1,(1,bptt),dtype=torch.long,device=device)
+if use_deepspeed:
+    with autocast():
+        out,mem = model(inp,assign_to_alt_mem=False)
+else:
     out,mem = model(inp,assign_to_alt_mem=False)
 print(torch.argmax((out.view(-1,ntokens)),dim=-1))
 del(out,mem,inp)
@@ -326,14 +329,17 @@ except:
 torch.cuda.empty_cache()
 model.to(device)
 
-#print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
+print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
 
 
 def inference(text,size=128,eval_model = best_model):
     model.eval()
-    text_input = torch.cat((torch.tensor([[0]]),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device )
+    text_input = torch.cat((data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device )
     #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
-    with autocast():
+    if use_deepspeed:
+        with autocast():
+            out,_= eval_model(text_input)
+    else:
         out,_= eval_model(text_input)
     out = torch.argmax(out.view(-1, ntokens),dim=-1)
     result = tokenizer.decode(out)
@@ -359,9 +365,14 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
         if epoch%2==0:
             single_pass_mem = None
         data, targets = get_batch(processed_train_data, i)
-        with autocast():
+        if use_deepspeed:
+            with autocast():
+                output,single_pass_mem = model(data,mem=single_pass_mem)
+                loss = criterion(output.view(-1, ntokens), targets)
+        else:
             output,single_pass_mem = model(data,mem=single_pass_mem)
             loss = criterion(output.view(-1, ntokens), targets)
+
         if use_deepspeed:
             #scaler.scale(loss).backward()
             #loss.backward(reatain_graph=True)
@@ -461,10 +472,17 @@ def evaluate(eval_model, data_source):
     with torch.no_grad():
         for i in range(0, data_source.size(2), bptt):
             data, targets = get_batch(data_source, i)
-            output,single_pass_mem = eval_model(data,mem = single_pass_mem)
-            output_flat = output.view(-1, ntokens)
-            total_loss += data.size(1) * criterion(output_flat, targets).item()
-            total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()
+            if use_deepspeed:
+                with autocast():
+                    output,single_pass_mem = eval_model(data,mem = single_pass_mem)
+                    output_flat = output.view(-1, ntokens)
+                    total_loss += data.size(1) * criterion(output_flat, targets).item()
+                    total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()
+            else:
+                output,single_pass_mem = eval_model(data,mem = single_pass_mem)
+                output_flat = output.view(-1, ntokens)
+                total_loss += data.size(1) * criterion(output_flat, targets).item()
+                total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()
     return total_loss / (data_source.size(2)), total_acc/data_source.size(2)
 
 while True:

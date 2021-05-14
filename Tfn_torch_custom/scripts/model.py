@@ -30,7 +30,7 @@ autocast = torch.cuda.amp.autocast
 torch.set_num_threads(12)
 torch.set_num_interop_threads(12)
 
-checkpointed = False
+checkpointed = True
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
