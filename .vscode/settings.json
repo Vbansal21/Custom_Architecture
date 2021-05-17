@@ -1,5 +1,5 @@
 {
-    "python.pythonPath": "/usr/bin/python3",
+    "python.pythonPath": "/home/vbansal21/bin/python",
     "python.jediMemoryLimit": 4096,
     "python.analysis.diagnosticMode": "workspace",
     "python.analysis.completeFunctionParens": true

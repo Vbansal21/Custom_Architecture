@@ -2,12 +2,9 @@
     "folders": [
         {
             "path": "."
-        },
-        {
-            "path": "../.."
-        },
-        {
-            "path": "../../../../app"
         }
-    ]
+    ],
+    "settings": {
+        "python.pythonPath": "/home/vbansal21/bin/python"
+    }
 }
