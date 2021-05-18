@@ -31,6 +31,6 @@ transformers
 torch-points3d
 pytorch-lightning
 ort-gpu-nightly
-pennylane --upgrade
+pennylane
 # -i https://test.pypi.org/simple/ ort-gpu-nightly
 # install pennylane --upgrade
