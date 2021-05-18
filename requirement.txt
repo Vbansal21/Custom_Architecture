@@ -1,5 +1,6 @@
 torch
 torchtext
+torchvision
 torchnlp
 pytorch-nlp
 pytorch_model_summary
@@ -8,7 +9,6 @@ local_attention
 apex
 pytorch-fast-transformers
 entmax
-torchvision
 inputimeout
 matplotlib 
 numpy
@@ -17,14 +17,17 @@ tqdm
 spacy
 tensorboardx
 deepspeed
-mpi4i
 # sudo pip3 install --force-reinstall Ninja
+# sudo apt-get install python-mpi4py
 # sudo apt install libaio-dev
 wandb
 mmcv
-cupy
+# insatall manually: cupy
 praw
 psaw
 trl
 transformers
 torch-points3d
+pytorch-lightning
+# -i https://test.pypi.org/simple/ ort-gpu-nightly
+# install pennylane --upgrade
