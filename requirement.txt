@@ -1,6 +1,7 @@
 torch
 torchtext
 torchvision
+torchaudio
 torchnlp
 pytorch-nlp
 pytorch_model_summary
@@ -22,12 +23,14 @@ deepspeed
 # sudo apt install libaio-dev
 wandb
 mmcv
-# insatall manually: cupy
+cupy
 praw
 psaw
 trl
 transformers
 torch-points3d
 pytorch-lightning
+ort-gpu-nightly
+pennylane --upgrade
 # -i https://test.pypi.org/simple/ ort-gpu-nightly
 # install pennylane --upgrade

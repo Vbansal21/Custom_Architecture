@@ -11,6 +11,6 @@
         }
     ],
     "settings": {
-        "python.pythonPath": "/home/vbansal21/anaconda3/envs/torchenv/bin/python"
+        "python.pythonPath": "/home/vbansal21/bin/python"
     }
 }

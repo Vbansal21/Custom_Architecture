@@ -19,6 +19,10 @@ from product_key_memory import PKM
 from hopfield_modules import Hopfield, HopfieldLayer, HopfieldPooling
 from performer_torch import SelfAttention
 
+from x_transformers.x_transformers import AbsolutePositionalEmbedding
+
+from fourier_neural_operator.fourier_1d import FNO1d
+
 from torchnlp.encoders.text import SubwordEncoder
 import torchnlp
 
@@ -31,7 +35,8 @@ torch.set_num_threads(12)
 torch.set_num_interop_threads(12)
 
 checkpointed = True
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 
 def ckpt(f,arg1,arg2=None,arg3=None,checkpointed = checkpointed):
@@ -91,14 +96,23 @@ class mem_norm(nn.Module):
         gru_out = self.gru(
             rearrange(x, 'b n d -> (b n) d'),
             rearrange(residual, 'b n d -> (b n) d')
-        ).reshape_as(x) * self.g
+        ).reshape_as(x)
         gated_output,gate = self.proj(gru_out).chunk(2,dim=-1)
-        x = (gated_output + x) * F.gelu(gate)
+        x = (gated_output * self.g + x) * F.gelu(gate)
         return self.norm(x)+residual
 
 class TransformerBlock(nn.Module):
 
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="gelu",context=False,mem_kv=8192):
+    def __init__(self,
+                     d_model,
+                     nhead, 
+                     dim_feedforward=2048, 
+                     dropout=0.5, 
+                     activation="gelu",
+                     context=False,
+                     mem_kv=8192,
+                     deberta_mode=False
+                ):
         super(TransformerBlock, self).__init__()
         #self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)        
         #attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
@@ -107,6 +121,8 @@ class TransformerBlock(nn.Module):
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
         self.dropout = Dropout(dropout)
+
+        self.deberta_mode = deberta_mode
 
         self.ffd1 = nn.Sequential(
             nn.Linear(d_model,dim_feedforward),
@@ -128,25 +144,99 @@ class TransformerBlock(nn.Module):
             _get_activation_fn(activation),
             )
         
-        
-        self.attn = EvolvedTransformerBlock(d_model,
-                            num_heads=nhead,
-                            attn=SelfAttention(d_model,
-                                                causal=False,
-                                                heads=nhead,
-                                                dim_head=d_model//nhead,
-                                                num_mem_kv=mem_kv,
-                                            ),
-                            ffd=nn.Sequential(
-                                                nn.Linear(d_model,dim_feedforward),
-                                                _get_activation_fn(activation),
-                                                nn.Linear(dim_feedforward,d_model),
-                                                _get_activation_fn(activation),
-                                                GEGLU(d_model,d_model),
-                                            ),
-                            context=context,
-                            pkm=copy.deepcopy(self.pkm1)
-                            )
+        if not deberta_mode:
+            self.attn = EvolvedTransformerBlock(d_model,
+                                num_heads=nhead,
+                                attn=SelfAttention(d_model,
+                                                    causal=False,
+                                                    heads=nhead,
+                                                    dim_head=d_model//nhead,
+                                                    num_mem_kv=mem_kv,
+                                                ),
+                                ffd=nn.Sequential(
+                                                    nn.Linear(d_model,dim_feedforward),
+                                                    _get_activation_fn(activation),
+                                                    nn.Linear(dim_feedforward,d_model),
+                                                    _get_activation_fn(activation),
+                                                    GEGLU(d_model,d_model),
+                                                ),
+                                context=context,
+                                pkm=copy.deepcopy(self.pkm1)
+                                )
+        else:
+            self.attn = EvolvedTransformerBlock(d_model,
+                                num_heads=nhead,
+                                attn=SelfAttention(d_model,
+                                                    causal=False,
+                                                    heads=nhead,
+                                                    dim_head=d_model//nhead,
+                                                    num_mem_kv=mem_kv,
+                                                    to_q=EvolvedTransformerBlock(
+                                                        d_model,
+                                                        nhead,
+                                                        attn=FNO1d(nhead,
+                                                                    d_model,
+                                                                    inp_dim=d_model,
+                                                                    out_dim=d_model,
+                                                                    ffd_dim=dim_feedforward
+                                                                ),
+                                                        ffd=nn.Sequential(
+                                                                            nn.Linear(d_model,dim_feedforward),
+                                                                            _get_activation_fn(activation),
+                                                                            nn.Linear(dim_feedforward,d_model),
+                                                                            _get_activation_fn(activation),
+                                                                            GEGLU(d_model,d_model),
+                                                                        ),
+                                                        context=False,
+                                                    ),
+                                                    to_k=EvolvedTransformerBlock(
+                                                        d_model,
+                                                        nhead,
+                                                        attn=FNO1d(nhead,
+                                                                    d_model,
+                                                                    inp_dim=d_model,
+                                                                    out_dim=d_model,
+                                                                    ffd_dim=dim_feedforward
+                                                                ),
+                                                        ffd=nn.Sequential(
+                                                                            nn.Linear(d_model,dim_feedforward),
+                                                                            _get_activation_fn(activation),
+                                                                            nn.Linear(dim_feedforward,d_model),
+                                                                            _get_activation_fn(activation),
+                                                                            GEGLU(d_model,d_model),
+                                                                        ),
+                                                        context=False,
+                                                    ),
+                                                    to_out=EvolvedTransformerBlock(
+                                                        d_model,
+                                                        nhead,
+                                                        attn=FNO1d(nhead,
+                                                                    d_model,
+                                                                    inp_dim=d_model,
+                                                                    out_dim=d_model,
+                                                                    ffd_dim=dim_feedforward
+                                                                ),
+                                                        ffd=nn.Sequential(
+                                                                            nn.Linear(d_model,dim_feedforward),
+                                                                            _get_activation_fn(activation),
+                                                                            nn.Linear(dim_feedforward,d_model),
+                                                                            _get_activation_fn(activation),
+                                                                            GEGLU(d_model,d_model),
+                                                                        ),
+                                                        context=False,
+                                                        pkm=copy.deepcopy(self.pkm1)
+                                                    )
+                                                ),
+                                ffd=nn.Sequential(
+                                                    nn.Linear(d_model,dim_feedforward),
+                                                    _get_activation_fn(activation),
+                                                    nn.Linear(dim_feedforward,d_model),
+                                                    _get_activation_fn(activation),
+                                                    GEGLU(d_model,d_model),
+                                                ),
+                                context=context,
+                                pkm=copy.deepcopy(self.pkm1)
+                                )
         self.self_hop_src = EvolvedTransformerBlock(d_model,
                             num_heads=nhead,
                             attn=nn.Sequential(
@@ -164,7 +254,8 @@ class TransformerBlock(nn.Module):
                             )
         
 
-        self.gate = mem_norm(d_model)
+        self.gate1 = mem_norm(d_model)
+        self.gate2 = mem_norm(d_model)
 
         self.context_exist = context
         if context:
@@ -206,7 +297,9 @@ class TransformerBlock(nn.Module):
 
         output = self.norm1(src)
         output = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.geglu1,output)
-        output = ckpt(self.self_hop_src,output) + output
+        output2 = ckpt(self.self_hop_src,output)
+        output = ckpt(self.gate1,output2,src)
+        del(output2)
 
         if self.context_exist:
             context = self.norm2(context)
@@ -214,21 +307,22 @@ class TransformerBlock(nn.Module):
             context_ = ckpt(self.self_hop_context,context)
             context = ckpt(self.context_gate,context,context_)
             del(context_)
-            context = Positional_Encoding(context)
+            context = Positional_Encoding(context) if not self.deberta_mode else context
 
-        output = Positional_Encoding(output)
+        output = Positional_Encoding(output) if not self.deberta_mode else output
         output = ckpt(self.attn,output,context)
         output = self.dropout(output)
-        src = ckpt(self.gate,output,src)
+        src = ckpt(self.gate2,output,src)
         del(output)
         return src
 
 class TransformerModule(nn.Module):
 
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False):
+    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2):
         super(TransformerModule, self).__init__()
 
         self.enable_encoder=enable_encoder
+        self.repeated_deberta_layers = repeated_deberta_layers
 
         if not enable_encoder:
             self.decoder = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout) for _ in range(num_layers)])
@@ -236,6 +330,10 @@ class TransformerModule(nn.Module):
             self.encoder = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout) for _ in range(num_layers)])
             self.decoder_self = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout) for _ in range(num_layers)])
             self.decoder_cross = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout,context=True) for _ in range(num_layers)])
+        
+        self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,2*17)
+        self.deberta_layers = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout,context=True,deberta_mode=True) for _ in range(deberta_layers)])
+
         d_model = d_model
         self.num_layers = num_layers
         
@@ -245,8 +343,16 @@ class TransformerModule(nn.Module):
             self.encoder = nn.ModuleList([copy.deepcopy(i) for i in self.encoder] * num)
             self.decoder_self = nn.ModuleList([copy.deepcopy(i) for i in self.decoder_self] * num)
             self.decoder_cross = nn.ModuleList([copy.deepcopy(i) for i in self.decoder_cross] * num)
+            self.deberta_layers = nn.ModuleList([copy.deepcopy(i) for i in self.deberta_layers] * num)
         else:
             self.decoder = nn.ModuleList([copy.deepcopy(i) for i in self.decoder] * num)
+            self.deberta_layers = nn.ModuleList([copy.deepcopy(i) for i in self.deberta_layers] * num)
+            
+    def convert_decoder_only_to_encoder_decoder(self):
+        self.enable_encoder = True
+        self.encoder = copy.deepcopy(self.decoder)
+        self.decoder_cross = copy.deepcopy(self.decoder)
+        self.decoder_self = self.decoder
 
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
@@ -262,7 +368,13 @@ class TransformerModule(nn.Module):
             for dec in self.decoder:
                 output = ckpt(dec,output)
 
-        return output
+        out = self.absolutepositionalembedding(output)
+
+        for _ in range(self.repeated_deberta_layers):
+            for enc in self.deberta_layers:
+                out = ckpt(enc,out,output)
+
+        return out
 
 class TransformerModel(nn.Module):
 
@@ -272,13 +384,15 @@ class TransformerModel(nn.Module):
                     nhead: int, 
                     nhid: int, 
                     nlayers: int,
-                    padding_idx: Optional[int] = 0,
-                    dropout: Optional[float] = 0.5,
-                    activation: Optional[str] = 'gelu',
-                    mem_token: Optional[int] = 00,
-                    context_mem_token: Optional[int] = 00,
-                    encoder_decoder: Optional[bool] = False,
-                    device: Optional[torch.DeviceObjType] = device
+                    padding_idx: int = 0,
+                    dropout: float = 0.5,
+                    activation: Literal['gelu','relu'] = 'gelu',
+                    mem_token: int = 00,
+                    context_mem_token: int = 00,
+                    encoder_decoder: bool = False,
+                    deberta_layers: int = 1,
+                    repeated_deberta_layers: int = 2,
+                    device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'

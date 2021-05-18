@@ -71,7 +71,7 @@ class EvolvedTransformerBlock(nn.Module):
             attended = self.attention(normed) + mid_result
         normed = self.layer_norms[3](attended)
         if self.pkm == None:
-            forwarded = self.feed_forward(normed)+attended
+            forwarded = self.feed_forward(attended) + normed
         else:
-            forwarded = self.feed_forward(normed)+self.pkm(normed)+attended
+            forwarded = self.feed_forward(attended)+self.pkm(attended)+normed
         return forwarded

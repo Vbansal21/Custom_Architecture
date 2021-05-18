@@ -14,8 +14,8 @@ from torchnlp.encoders.text import SubwordEncoder
 from torchtext.utils import download_from_url, extract_archive
 from typing import Tuple, Optional, Any, NoReturn, Union, Literal
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#device = torch.device("cpu")
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -49,13 +49,15 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 2048//4
+emsize = 2048//8
 nhid = emsize * 4
 nlayers = 1
-nhead = 16
+deberta_layers = 2
+repeated_deberta_layers = 4
+nhead = emsize//8
 dropout = 0.3
 mem_tokens = 256
-bptt = (1024*4+mem_tokens) - mem_tokens
+bptt = (1024+mem_tokens) - mem_tokens
 
 use_deepspeed = False
 
@@ -110,9 +112,9 @@ if use_deepspeed:
 
     with deepspeed.zero.Init(mem_efficient_linear=True,remote_device='nvme',config=deepspeed_args,enabled=False):
         #model = PerformerLM(num_tokens=ntokens,max_seq_len=2**17,dim=emsize,depth=nlayers,heads=nhead,causal=True,use_rezero=True,cross_attend=True)
-        model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens).half()
+        model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,mem_token=mem_tokens).half()
 else:
-    model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens,device=device).to(device)
+    model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,device=device).to(device)
 
 def random_mask_shuffle_encoder(
                             inp: Tensor,
