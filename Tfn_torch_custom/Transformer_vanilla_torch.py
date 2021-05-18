@@ -67,7 +67,7 @@ deepspeed_args = {
   "fp16": {
     "enabled": True,
     "loss_scale": 0.5,
-    "initial_scale_power": 7,
+    "initial_scale_power": 16,
     "loss_scale_window": 1000,
     "hysteresis": 2,
     "min_loss_scale": 1
@@ -75,20 +75,32 @@ deepspeed_args = {
   "gradient_clipping":0.5,
   "zero_optimization": {
     "stage": 3,
+    'allgather_partitions': True,
+    "allgather_bucket_size":1,
+    "reduce_bucket_size":1,
     "offload_param":{
-        "device": "nvme",
-        "nvme_path":"/mnt/nvme0n1p3/"
+        "device": "cpu",
+        "nvme_path":"/home/vbansal21/",
+        "buffer_count":5+nlayers,
+        "buffer_size":1,
+        "max_in_cpu":1e7
         },
     "offload_optimizer": {
-        "device": "nvme",
-        "nvme_path": "/mnt/nvme0n1p3/"
+        "device": "cpu",
+        "nvme_path": "/home/vbansal21/",
+        "buffer_count":5+nlayers,
+        #"fast_init":True
         },
     "stage3_gather_fp16_weights_on_model_save": True,
-        #"overlap_comm": True,
+    #"stage3_max_live_parameters":1e8,
+    #"stage3_max_reuse_distance":1e8,
+    "stage3_prefetch_bucket_size":1e6,
+        "overlap_comm": True,
         #"contiguous_gradients": True,
         "sub_group_size": 1,
-        #"stage3_param_persistence_threshold": 1e8,
+        "stage3_param_persistence_threshold": 1e7,
     },
+    "wall_clock_breakdown":True,
     "flops_profiler": {
     "enabled": False,
     "profile_step": 1,
@@ -99,7 +111,7 @@ deepspeed_args = {
     "activation_checkpointing": {
     "partition_activations": True,
     "cpu_checkpointing": True,
-    "contiguous_memory_optimization": True,
+    "contiguous_memory_optimization": False,
     "number_checkpoints": nlayers*2+4,
     "synchronize_checkpoint_boundary": True,
     "profile": False
@@ -110,7 +122,7 @@ deepspeed_args = {
 if use_deepspeed:
     import deepspeed
 
-    with deepspeed.zero.Init(mem_efficient_linear=True,remote_device='nvme',config=deepspeed_args,enabled=False):
+    with deepspeed.zero.Init(mem_efficient_linear=True,remote_device='cpu',config=deepspeed_args,enabled=True):
         #model = PerformerLM(num_tokens=ntokens,max_seq_len=2**17,dim=emsize,depth=nlayers,heads=nhead,causal=True,use_rezero=True,cross_attend=True)
         model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,mem_token=mem_tokens).half()
 else:

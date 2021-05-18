@@ -18,8 +18,8 @@ tqdm
 spacy
 tensorboardx
 deepspeed
+mpi4py # sudo apt install libopenmpi-dev
 # sudo pip3 install --force-reinstall Ninja
-# sudo apt-get install python-mpi4py
 # sudo apt install libaio-dev
 wandb
 mmcv
