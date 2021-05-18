@@ -19,6 +19,24 @@ from .utilities3 import *
 torch.manual_seed(0)
 np.random.seed(0)
 
+from torch.utils.checkpoint import checkpoint
+checkpointed = True
+
+def ckpt(f,arg1,arg2=None,arg3=None,checkpointed = checkpointed):
+    if checkpointed:
+        if arg2 == None and arg3 == None:
+            return checkpoint(f,arg1)
+        elif arg3 == None:
+            return checkpoint(f,arg1,arg2)
+        else:
+            return checkpoint(f,arg1,arg2,arg3)
+    else:
+        if arg2 == None and arg3 == None:
+            return f(arg1)
+        elif arg3 == None:
+            return f(arg1,arg2)
+        else:
+            return f(arg1,arg2,arg3)
 
 ################################################################
 #  1d fourier layer
@@ -46,14 +64,14 @@ class SpectralConv1d(nn.Module):
     def forward(self, x):
         batchsize = x.shape[0]
         #Compute Fourier coeffcients up to factor of e^(- something constant)
-        x_ft = torch.fft.rfft(x)
+        x_ft = ckpt(torch.fft.rfft,x)
 
         # Multiply relevant Fourier modes
         out_ft = torch.zeros(batchsize, self.out_channels, x.size(-1)//2 + 1,  device=x.device, dtype=torch.cfloat)
-        out_ft[:, :, :self.modes1] = self.compl_mul1d(x_ft[:, :, :self.modes1], self.weights1)
+        out_ft[:, :, :self.modes1] = ckpt(self.compl_mul1d,x_ft[:, :, :self.modes1], self.weights1)
 
         #Return to physical space
-        x = torch.fft.irfft(out_ft, n=x.size(-1))
+        x = ckpt(torch.fft.irfft,out_ft,x.size(-1))
         return x
 
 class FNO1d(nn.Module):
@@ -95,23 +113,23 @@ class FNO1d(nn.Module):
         x = self.fc0(x)
         x = x.permute(0, 2, 1)
 
-        x1 = self.conv0(x)
-        x2 = self.w0(x)
+        x1 = ckpt(self.conv0,x)
+        x2 = ckpt(self.w0,x)
         x = x1 + x2
         x = F.relu(x)
 
-        x1 = self.conv1(x)
-        x2 = self.w1(x)
+        x1 = ckpt(self.conv1,x)
+        x2 = ckpt(self.w1,x)
         x = x1 + x2
         x = F.relu(x)
 
-        x1 = self.conv2(x)
-        x2 = self.w2(x)
+        x1 = ckpt(self.conv2,x)
+        x2 = ckpt(self.w2,x)
         x = x1 + x2
         x = F.relu(x)
 
-        x1 = self.conv3(x)
-        x2 = self.w3(x)
+        x1 = ckpt(self.conv3,x)
+        x2 = ckpt(self.w3,x)
         x = x1 + x2
 
         x = x.permute(0, 2, 1)

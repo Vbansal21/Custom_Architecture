@@ -14,8 +14,8 @@ from torchnlp.encoders.text import SubwordEncoder
 from torchtext.utils import download_from_url, extract_archive
 from typing import Tuple, Optional, Any, NoReturn, Union, Literal
 
-#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#device = torch.device("cpu")
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -52,11 +52,11 @@ ntokens = tokenizer.vocab_size
 emsize = 2048//8
 nhid = emsize * 4
 nlayers = 1
-deberta_layers = 2
-repeated_deberta_layers = 4
-nhead = emsize//8
+deberta_layers = 1
+repeated_deberta_layers = 1
+nhead = emsize//4
 dropout = 0.3
-mem_tokens = 256
+mem_tokens = 512
 bptt = (1024+mem_tokens) - mem_tokens
 
 use_deepspeed = False

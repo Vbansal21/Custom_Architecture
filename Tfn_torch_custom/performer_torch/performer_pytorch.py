@@ -19,6 +19,25 @@ except:
 
 # helpers
 
+from torch.utils.checkpoint import checkpoint
+checkpointed = True
+
+def ckpt(f,arg1,arg2=None,arg3=None,checkpointed = checkpointed):
+    if checkpointed:
+        if arg2 == None and arg3 == None:
+            return checkpoint(f,arg1)
+        elif arg3 == None:
+            return checkpoint(f,arg1,arg2)
+        else:
+            return checkpoint(f,arg1,arg2,arg3)
+    else:
+        if arg2 == None and arg3 == None:
+            return f(arg1)
+        elif arg3 == None:
+            return f(arg1,arg2)
+        else:
+            return f(arg1,arg2,arg3)
+
 def exists(val):
     return val is not None
 
@@ -91,7 +110,9 @@ def generalized_kernel(data, *, projection_matrix, kernel_fn = nn.ReLU(), kernel
 
 def orthogonal_matrix_chunk(cols, qr_uniform_q = False, device = None):
     unstructured_block = torch.randn((cols, cols), device = device)
-    q, r = torch.qr(unstructured_block.cpu(), some = True)
+    #q, r = torch.qr(unstructured_block.cpu(), some = True)
+    # Q, R = torch.linalg.qr(A, 'reduced' if some else 'complete')
+    q, r = torch.linalg.qr(unstructured_block.cpu(), 'reduced')
     q, r = map(lambda t: t.to(device), (q, r))
 
     # proposed by @Parskatt
@@ -349,7 +370,7 @@ class SelfAttention(nn.Module):
 
         context_mask = default(context_mask, mask) if not cross_attend else context_mask
 
-        q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
+        q, k, v = ckpt(self.to_q,x), ckpt(self.to_k,context), ckpt(self.to_v,context)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 

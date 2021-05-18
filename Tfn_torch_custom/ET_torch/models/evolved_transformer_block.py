@@ -1,11 +1,31 @@
 #from ..models.embedder import Embedder, PositionalEncoder
 #import math
 import torch
+from einops import rearrange
 from typing import Optional
 from torch.functional import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 from ..models.gated_linear_unit import GLU
+
+from torch.utils.checkpoint import checkpoint
+checkpointed = True
+
+def ckpt(f,arg1,arg2=None,arg3=None,checkpointed = checkpointed):
+    if checkpointed:
+        if arg2 == None and arg3 == None:
+            return checkpoint(f,arg1)
+        elif arg3 == None:
+            return checkpoint(f,arg1,arg2)
+        else:
+            return checkpoint(f,arg1,arg2,arg3)
+    else:
+        if arg2 == None and arg3 == None:
+            return f(arg1)
+        elif arg3 == None:
+            return f(arg1,arg2)
+        else:
+            return f(arg1,arg2,arg3)
 
 class EvolvedTransformerBlock(nn.Module):
     def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,context = True,pkm=None):
@@ -44,34 +64,35 @@ class EvolvedTransformerBlock(nn.Module):
     def forward(self,x:Tensor,context: Optional[Tensor] = None) -> Tensor:
 
         if context != None:
-            x = torch.cat((x.unsqueeze(1),context.unsqueeze(1)),dim=1)
-        glued = self.glu(self.layer_norms[0](x))+x
+            x = rearrange(torch.cat((x.unsqueeze(0),context.unsqueeze(0)),dim=0), 't b n d -> (t b) n d')
+        glued = ckpt(self.glu,self.layer_norms[0](x))+x
         glu_normed = self.layer_norms[1](glued)
 
-        left_branch = self.left_net(glu_normed)
-        right_branch = self.right_net(glu_normed.transpose(1,2)).transpose(1,2)
+        left_branch = ckpt(self.left_net,glu_normed)
+        right_branch = ckpt(self.right_net,glu_normed.transpose(1,2)).transpose(1,2)
         right_branch = F.pad(input=right_branch, pad=(0,left_branch.shape[2]-right_branch.shape[2],0,0,0,0), mode='constant', value=0)
 
         mid_result = left_branch+right_branch
-        mid_result = self.mid_layer_norm(mid_result)
-        mid_result = self.sep_conv(mid_result.transpose(1,2)).transpose(1,2)
+        mid_result = ckpt(self.mid_layer_norm,mid_result)
+        mid_result = ckpt(self.sep_conv,mid_result.transpose(1,2)).transpose(1,2)
 
         mid_result = mid_result + glued
 
         normed = self.layer_norms[2](mid_result)
         if context != None:
-            context = normed[:,1]
-            normed = normed[:,0]
-            mid_result = mid_result[:,0]
+            normed = rearrange(normed,'(t b) n d -> t b n d',t=2)
+            context = normed[1]
+            normed = normed[0]
+            mid_result = mid_result[0]
         else:
             context = normed
         if self.context_pass:
-            attended = self.attention(normed,context) + mid_result 
+            attended = ckpt(self.attention,normed,context) + mid_result 
         else:
-            attended = self.attention(normed) + mid_result
+            attended = ckpt(self.attention,normed) + mid_result
         normed = self.layer_norms[3](attended)
         if self.pkm == None:
-            forwarded = self.feed_forward(attended) + normed
+            forwarded = ckpt(self.feed_forward,normed) + attended
         else:
-            forwarded = self.feed_forward(attended)+self.pkm(attended)+normed
+            forwarded = ckpt(self.feed_forward,normed)+ckpt(self.pkm,normed)+attended
         return forwarded
