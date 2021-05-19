@@ -6,10 +6,10 @@ import random
 import torch.nn.functional as F
 
 import copy
-from typing import Tuple, Optional, Any, NoReturn, Union, Literal
+from typing import Tuple, Optional, Any, NoReturn, Union, Literal, List
 
 from torch import Tensor
-from torch.nn.modules.container import ModuleList
+from torch.nn.modules.container import ModuleList, Module
 from torch.nn.modules.dropout import Dropout
 
 from einops import repeat,rearrange
@@ -18,19 +18,6 @@ from ET_torch.models.evolved_transformer_block import EvolvedTransformerBlock
 from product_key_memory import PKM
 from hopfield_modules import Hopfield, HopfieldLayer, HopfieldPooling
 from performer_torch import SelfAttention
-
-class AbsolutePositionalEmbedding(nn.Module):
-    def __init__(self, dim, max_seq_len):
-        super().__init__()
-        self.emb = nn.Embedding(max_seq_len, dim)
-        self.init_()
-
-    def init_(self):
-        nn.init.normal_(self.emb.weight, std = 0.02)
-
-    def forward(self, x):
-        n = torch.arange(x.size(1), device = x.device)
-        return repeat(self.emb(n),'n d -> b n d',b=x.size(0))
 
 from fourier_neural_operator.fourier_1d import FNO1d
 
@@ -74,7 +61,20 @@ def _get_activation_fn(activation):
 
     raise RuntimeError("activation should be relu/gelu, not {}".format(activation))
 
-class RMSNorm(nn.Module):
+def Positional_Encoding(x: Tensor,
+                            device: Optional[torch.DeviceObjType] = device
+                        ) -> Tensor :
+    max_len = x.size(1)
+    d_model = x.size(2)
+    pe = torch.zeros(max_len, d_model)
+    position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    pe = pe.unsqueeze(0).to(device)
+    return x + pe[:]
+
+class RMSNorm(Module):
     def __init__(self, dim, eps = 1e-8):
         super().__init__()
         self.scale = dim ** -0.5
@@ -85,7 +85,7 @@ class RMSNorm(nn.Module):
         norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
         return x / norm.clamp(min = self.eps) * self.g
 
-class GEGLU(nn.Module):
+class GEGLU(Module):
     def __init__(self, dim_in, dim_out):
         super().__init__()
         self.proj = nn.Linear(dim_in, dim_out * 2)
@@ -94,11 +94,10 @@ class GEGLU(nn.Module):
         x, gate = self.proj(x).chunk(2, dim = -1)
         return x * F.gelu(gate)
 
-class mem_norm(nn.Module):
+class mem_norm(Module):
     def __init__(self, dim):
         super().__init__()
         self.gru = nn.GRUCell(dim, dim)
-        #self.proj = nn.Linear(dim,dim*2)
         self.proj = HopfieldLayer(dim,output_size=dim*2)
         self.g = nn.Parameter(torch.zeros(1))
         self.norm = RMSNorm(dim)
@@ -112,7 +111,32 @@ class mem_norm(nn.Module):
         x = (gated_output * self.g + x) * F.gelu(gate)
         return self.norm(x)+residual
 
-class TransformerBlock(nn.Module):
+
+class AbsolutePositionalEmbedding(Module):
+    def __init__(self, dim, max_seq_len):
+        super().__init__()
+        self.emb = nn.Embedding(max_seq_len, dim)
+        self.max_seq_len = max_seq_len
+        self.init_()
+
+    def init_(self):
+        nn.init.normal_(self.emb.weight, std = 0.02)
+
+    def forward(self, x):
+        if x.size(1) < self.max_seq_len:
+            n = torch.arange(x.size(1), device = x.device)
+            return repeat(self.emb(n),'n d -> b n d',b=x.size(0))
+        else:
+            n_0 = torch.arange(self.max_seq_len-1, device = x.device)
+            n_1 = torch.arange(x.size(1)-self.max_seq_len+1, device = x.device)
+            n_0 = repeat(self.emb(n_0),'n d -> b n d',b=x.size(0)) / (2**0.5)
+            n_1 = repeat(self.emb(n_1),'n d -> b n d',b=x.size(0)) * (2**0.5)
+            assert n_0.size(1)+n_1.size(1) == x.size(1)
+            return torch.cat((n_0,n_1),dim=1)
+
+
+
+class TransformerBlock(Module):
 
     def __init__(self,
                      d_model,
@@ -320,9 +344,9 @@ class TransformerBlock(nn.Module):
         del(output)
         return src
 
-class TransformerModule(nn.ModuleList):
+class TransformerModule(ModuleList):
 
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2):
+    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17):
         super(TransformerModule, self).__init__()
 
         self.enable_encoder=enable_encoder
@@ -335,7 +359,7 @@ class TransformerModule(nn.ModuleList):
             self.decoder_self = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout) for _ in range(num_layers)])
             self.decoder_cross = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout,context=True) for _ in range(num_layers)])
         
-        self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,2**17)
+        self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
         self.deberta_layers = nn.ModuleList([TransformerBlock(d_model, nhead, nhid, dropout,context=True,deberta_mode=True) for _ in range(deberta_layers)])
 
         d_model = d_model
@@ -380,7 +404,7 @@ class TransformerModule(nn.ModuleList):
 
         return out
 
-class TransformerModel(nn.Module):
+class TransformerModel(Module):
 
     def __init__(self, 
                     ntoken: int, 
@@ -396,12 +420,13 @@ class TransformerModel(nn.Module):
                     encoder_decoder: bool = False,
                     deberta_layers: int = 1,
                     repeated_deberta_layers: int = 2,
+                    max_seq_len=2**17,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
         self.encoder_decoder = encoder_decoder
-        self.transformer_encoder = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers)
+        self.transformer_encoder = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len)
         
         embedding_encoder = nn.Sequential(
             nn.Embedding(ntoken, ninp,padding_idx=padding_idx),
@@ -644,9 +669,10 @@ class TransformerModel(nn.Module):
                     mem: Optional[Tensor] = None, 
                     context_mem: Optional[Tensor] = None,
                     alt_mem_with_primary_key: Optional[bool] = None,
-                    assign_to_alt_mem: Optional[bool] = True,
-                    return_mem: Optional[bool] = True,
-                ) -> Tuple[Union[Tensor,Optional[Tensor]]]:
+                    assign_to_alt_mem: bool = True,
+                    return_mem: bool = True,
+                    return_logits_before_lm_head: bool = False,
+                ) -> Tuple[Tensor,Optional[Tensor],Optional[Tensor]]:
         
         b,s = src.size(0),src.size(1)
 
@@ -722,23 +748,14 @@ class TransformerModel(nn.Module):
         output = output[:,output.size(1)-s:] if type(mem) != None or self.mem_exist else output
 
 
-        output = ckpt(self.decoder,output)
+        out = ckpt(self.decoder,output)
+
+        if return_logits_before_lm_head:
+            output = [out,output]
+        else:
+            output = out
         
         if return_mem:
             return output,mem
         else:
             return output
-
-
-def Positional_Encoding(x: Tensor,
-                            device: Optional[torch.DeviceObjType] = device
-                        ) -> Tensor :
-    max_len = x.size(1)
-    d_model = x.size(2)
-    pe = torch.zeros(max_len, d_model)
-    position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-    div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-    pe[:, 0::2] = torch.sin(position * div_term)
-    pe[:, 1::2] = torch.cos(position * div_term)
-    pe = pe.unsqueeze(0).to(device)
-    return x + pe[:]

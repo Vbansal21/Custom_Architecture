@@ -7,6 +7,7 @@ import random,wandb
 from torch import nn
 import scripts.model
 from torch import Tensor
+from einops import rearrange
 #from performer_torch import PerformerLM
 from pytorch_model_summary import summary
 from scripts.model import TransformerModel
@@ -51,13 +52,14 @@ eval_batch_size = batch_size
 ntokens = tokenizer.vocab_size
 emsize = 2048//4
 nhid = emsize * 4
-nlayers = 1
-deberta_layers = 1
+nlayers = 4
+deberta_layers = 4
 repeated_deberta_layers = 1
 nhead = emsize//32
 dropout = 0.3
 mem_tokens = 512
 bptt = (1024+mem_tokens) - mem_tokens
+max_seq_len = 2**16
 
 use_deepspeed = False
 
@@ -79,14 +81,14 @@ deepspeed_args = {
     "allgather_bucket_size":1,
     "reduce_bucket_size":1,
     "offload_param":{
-        "device": "cpu",
+        "device": "nvme",
         "nvme_path":"/home/vbansal21/",
         "buffer_count":5+nlayers,
         "buffer_size":1,
         "max_in_cpu":1e7
         },
     "offload_optimizer": {
-        "device": "cpu",
+        "device": "nvme",
         "nvme_path": "/home/vbansal21/",
         "buffer_count":5+nlayers,
         #"fast_init":True
@@ -122,11 +124,11 @@ deepspeed_args = {
 if use_deepspeed:
     import deepspeed
 
-    with deepspeed.zero.Init(mem_efficient_linear=True,remote_device='cpu',config=deepspeed_args,enabled=True):
+    with deepspeed.zero.Init(mem_efficient_linear=True,remote_device='nvme',config=deepspeed_args,enabled=True):
         #model = PerformerLM(num_tokens=ntokens,max_seq_len=2**17,dim=emsize,depth=nlayers,heads=nhead,causal=True,use_rezero=True,cross_attend=True)
-        model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,mem_token=mem_tokens).half()
+        model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,mem_token=mem_tokens,max_seq_len=max_seq_len).half()
 else:
-    model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,device=device).to(device)
+    model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_seq_len=max_seq_len,device=device).to(device)
 
 def random_mask_shuffle_encoder(
                             inp: Tensor,
@@ -207,8 +209,12 @@ def prepare_batch(source):
     return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
 
 def get_batch(source,j,bptt=bptt):
-    seq_len = min(bptt, source.size(2) - j -1)
-    return random_mask_shuffle_encoder(source[0,:,j:j+seq_len],mask_percentage=20,mask_together_nos=10,shuffle_percentage=10).to(device).contiguous(),source[1,:,j:j+seq_len].reshape(-1).to(device).contiguous()
+    seq_len = min(bptt -1 -1, source.size(2) - j -1 -1 -1)
+    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=20,mask_together_nos=10,mask_continuous_pos=-21,shuffle_percentage=10).to(device)
+    data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
+    targets = source[1,:,j:j+seq_len].to(device)
+    targets = torch.cat((targets,torch.full((targets.size(0),1),3,dtype=torch.long,device=device),torch.full((targets.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+    return data,targets
 
 #print(sum(p.numel() for p in model.parameters()))
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
@@ -216,8 +222,10 @@ path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
 lr = 0.0175
-#optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
+if not use_deepspeed:
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+else:
+    optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
 a = 5000000
 b = 500
 c = 0.0
@@ -343,24 +351,27 @@ except:
 torch.cuda.empty_cache()
 model.to(device)
 
-print(summary(model, torch.zeros([5,10],dtype=torch.long).to(device)))
+print(summary(model, torch.zeros([1,bptt],dtype=torch.long).to(device)))
 
-
-def inference(text,size=128,eval_model = best_model):
+# TODO: Setup 'curses' module to print colored text for inference output
+#import curses
+def inference(text,size=128,eval_model = best_model,reccurent_mem=None):
     model.eval()
-    text_input = torch.cat((data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device )
+    text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device )
     #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
     if use_deepspeed:
         with autocast():
-            out,_= eval_model(text_input)
+            out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
     else:
-        out,_= eval_model(text_input)
+        out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
     out = torch.argmax(out.view(-1, ntokens),dim=-1)
     result = tokenizer.decode(out)
-    return [tokenizer.decode(text_input.view(-1)),result]
+    print("Your input:\n\t",tokenizer.decode(text_input.view(-1)))
+    print("Model's Output:\n\t",result)
+    return mem
 
 
-print(inference("Hello World!!! This is inference function on the currently trained model"))
+_ = inference("Hello World!!! This is inference function on the currently trained model")
 
 
 def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_batch_size=20,step=step):
@@ -372,7 +383,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
     #model.alt_mem_tokens(None,False)
     acc = 0
     total_acc = 0
-    for batch, i in enumerate(range(0, processed_train_data.size(2), bptt)):
+    for batch, i in enumerate(range(0, processed_train_data.size(2), bptt-1-1)):
         if resume_batch != None:
             if batch < resume_batch:
                 continue
@@ -382,10 +393,10 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
         if use_deepspeed:
             with autocast():
                 output,single_pass_mem = model(data,mem=single_pass_mem)
-                loss = criterion(output.view(-1, ntokens), targets)
+                loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
         else:
             output,single_pass_mem = model(data,mem=single_pass_mem)
-            loss = criterion(output.view(-1, ntokens), targets)
+            loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
 
         if use_deepspeed:
             #scaler.scale(loss).backward()
@@ -394,7 +405,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
         else:
             loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        acc = ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()/output.size(1)
+        acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
         try:
             ppl = math.exp(loss.item())
         except:
@@ -484,7 +495,7 @@ def evaluate(eval_model, data_source):
     total_acc = 0.
     single_pass_mem = None
     with torch.no_grad():
-        for i in range(0, data_source.size(2), bptt):
+        for i in range(0, data_source.size(2), bptt-1-1):
             data, targets = get_batch(data_source, i)
             if use_deepspeed:
                 with autocast():
@@ -557,11 +568,12 @@ print('| End of training | test acc {:3.2f}% | test loss {:5.3f} | test ppl {:10
     test_loss, math.exp(test_loss)))
 print('=' * 110)
 
-print(inference("Hello World!!! This is inference function on the currently trained model"))
+_ = inference("Hello World!!! This is inference function on the currently trained model")
 
 while True:
-    i = int(input("enter 1 for inference, 0 for exiting:"))
+    i = int(input("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:"))
     if i == 0:
         break
     inp = input("input text, 1 string at a time, for inference:")
-    print(inference(inp))
+    mem = None if i==1 else mem
+    mem = inference(inp,reccurent_mem=mem)
