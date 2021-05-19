@@ -59,6 +59,10 @@ class SpectralConv1d(nn.Module):
     # Complex multiplication
     def compl_mul1d(self, input, weights):
         # (batch, in_channel, x ), (in_channel, out_channel, x) -> (batch, out_channel, x)
+        if input.size(-1)<weights.size(-1):
+            weights = weights[:,:,:input.size(-1)]
+        if input.size(-2)<weights.size(-2):
+            weights = weights[:,:input.size(-2),:]
         return torch.einsum("bix,iox->box", input, weights)
 
     def forward(self, x):
@@ -71,7 +75,7 @@ class SpectralConv1d(nn.Module):
         out_ft[:, :, :self.modes1] = ckpt(self.compl_mul1d,x_ft[:, :, :self.modes1], self.weights1)
 
         #Return to physical space
-        x = ckpt(torch.fft.irfft,out_ft,x.size(-1))
+        x = torch.fft.irfft(out_ft,x.size(-1))
         return x
 
 class FNO1d(nn.Module):

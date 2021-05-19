@@ -26,9 +26,11 @@ autocast = torch.cuda.amp.autocast
 scripts.model.checkpointed = True
 scripts.model.device = device
 
-
-url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
-#url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
+file = "wikitextv103"
+if file == "wikitextv2":
+    url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
+elif file == "wikitextv103":
+    url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 try:
     tokenizer = torch.load("models/tokenizer.tar")
@@ -52,10 +54,10 @@ eval_batch_size = batch_size
 ntokens = tokenizer.vocab_size
 emsize = 2048//4
 nhid = emsize * 4
-nlayers = 4
-deberta_layers = 4
+nlayers = 3
+deberta_layers = 6
 repeated_deberta_layers = 1
-nhead = emsize//32
+nhead = 16
 dropout = 0.3
 mem_tokens = 512
 bptt = (1024+mem_tokens) - mem_tokens
@@ -264,10 +266,14 @@ wandb.init(project=project_name,config={
     "ffd":nhid,
     "layers":nlayers,
     "heads":nhead,
+    "deberta_layers":deberta_layers,
+    "repeated_deberta_layers":repeated_deberta_layers,
     "dropout":dropout,
     "memory_tokens":mem_tokens,
     "total_epochs":epochs,
-    "Sequence_length":bptt
+    "Sequence_length":bptt,
+    "max_seq_len":max_seq_len,
+    "seq_scale_down":8
 })
 
 
@@ -323,9 +329,9 @@ def data_process(raw_text_iter):
   return torch.tensor(data)
 
 try:
-    processed_train_data = torch.load("models/data/train.tar")
-    processed_test_data = torch.load("models/data/test.tar")
-    processed_val_data = torch.load("models/data/val.tar")
+    processed_train_data = torch.load("models/data/"+file+"_train.tar")
+    processed_test_data = torch.load("models/data/"+file+"_test.tar")
+    processed_val_data = torch.load("models/data/"+file+"_val.tar")
 except:
 
     train_data = data_process(io.open(train_filepath, encoding="utf8").read()).to(device)
@@ -344,9 +350,9 @@ except:
 
     del(train_data,test_data,val_data)
 
-    torch.save(processed_train_data,"models/data/train.tar")
-    torch.save(processed_test_data,"models/data/test.tar")
-    torch.save(processed_val_data,"models/data/val.tar")
+    torch.save(processed_train_data,"models/data/"+file+"_train.tar")
+    torch.save(processed_test_data,"models/data/"+file+"_test.tar")
+    torch.save(processed_val_data,"models/data/"+file+"_val.tar")
 
 torch.cuda.empty_cache()
 model.to(device)
@@ -414,7 +420,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
             {
                 "loss":loss.item(),
                 "step":step,
-                "accuracy":acc,
+                "accuracy(%)":acc*100,
                 "epoch":epoch,
                 "batch":batch,
                 "perplexity":ppl,
