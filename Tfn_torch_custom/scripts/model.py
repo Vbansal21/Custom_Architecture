@@ -364,6 +364,7 @@ class TransformerModel(Module):
                     deberta_layers: int = 1,
                     repeated_deberta_layers: int = 2,
                     max_seq_len=2**17,
+                    discriminator: bool = False,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
@@ -371,25 +372,43 @@ class TransformerModel(Module):
         self.encoder_decoder = encoder_decoder
         self.transformer_encoder = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len)
         
-        embedding_encoder = nn.Sequential(
-            nn.Embedding(ntoken, ninp,padding_idx=padding_idx),
-            _get_activation_fn(activation),
-            nn.Linear(ninp,nhid*2),
-            _get_activation_fn(activation),
-            nn.Linear(nhid*2,ninp),
-            _get_activation_fn(activation),
-        )
+        if not discriminator:
+            self.embedding_encoder = nn.Sequential(
+                nn.Embedding(ntoken, ninp,padding_idx=padding_idx),
+                _get_activation_fn(activation),
+                nn.Linear(ninp,nhid*2),
+                _get_activation_fn(activation),
+                nn.Linear(nhid*2,ninp),
+                _get_activation_fn(activation),
+            )
+        else:
+            self.embedding_encoder = nn.Sequential(
+                _get_activation_fn(activation),
+                nn.Linear(ninp,nhid*2),
+                _get_activation_fn(activation),
+                nn.Linear(nhid*2,ninp),
+                _get_activation_fn(activation),
+            )
         
         self.ninp = ninp
         self.ntokens = ntoken
         
-        self.decoder = nn.Sequential(
-            nn.Linear(ninp,nhid*2),
-            _get_activation_fn(activation),
-            nn.Linear(nhid*2,ninp),
-            _get_activation_fn(activation),
-            nn.Linear(ninp,ntoken)
-        )
+        if not discriminator:
+            self.decoder = nn.Sequential(
+                nn.Linear(ninp,nhid*2),
+                _get_activation_fn(activation),
+                nn.Linear(nhid*2,ninp),
+                _get_activation_fn(activation),
+                nn.Linear(ninp,ntoken)
+            )
+        else:
+            self.decoder = nn.Sequential(
+                nn.Linear(ninp,nhid*2),
+                _get_activation_fn(activation),
+                nn.Linear(nhid*2,ninp),
+                _get_activation_fn(activation),
+                nn.Linear(ninp,2)
+            )
 
         self.ffd1 = nn.Sequential(
             nn.Linear(ninp,nhid*2),
@@ -401,8 +420,6 @@ class TransformerModel(Module):
 
         self.norm1 = RMSNorm(ninp)
         self.norm2 = RMSNorm(ninp)
-
-        self.embedding_encoder = embedding_encoder
 
         self.mem_exist = True if mem_token else False
         if self.mem_exist:
@@ -636,6 +653,7 @@ class TransformerModel(Module):
         b,s_ = src.size(0),src.size(1)
 
         src = ckpt(self.embedding_encoder,src)
+        src.requires_grad_(True)
         src = src * math.sqrt(self.ninp)
         src = rearrange(src,'b n d -> b d n')
         if src.size(1)%8 != 0:
@@ -728,12 +746,10 @@ class TransformerModel(Module):
 
         out = ckpt(self.decoder,output)
 
-        if return_logits_before_lm_head:
-            output = [out,output]
-        else:
-            output = out
-        
         if return_mem:
-            return output,mem
+            if return_logits_before_lm_head:
+                return out,mem,output
+            else:
+                return out, mem
         else:
             return output
