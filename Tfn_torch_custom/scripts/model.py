@@ -1,4 +1,5 @@
 import math
+from sympy import Nand
 import torch
 from torch import tensor
 import torch.nn as nn
@@ -482,6 +483,11 @@ class TransformerModel(Module):
     def multiply_pretrained_transformer_layers(self,num: Optional[int] = 1) -> NoReturn :
         self.transformer_encoder.pretrained_layer_multiplier(num)
 
+    def convert_decoder_only_to_encoder_decoder(self) -> NoReturn:
+        self.transformer_encoder.convert_decoder_only_to_encoder_decoder()
+        if self.discriminator_enabled:
+            self.discriminator.convert_decoder_only_to_encoder_decoder()
+
     def alt_mem_tokens(self,mem: Tensor,alt_mem_with_primary_mem: Optional[bool] = True) -> NoReturn :
         self.alt_mem = mem
         self.alt_mem_with_primary_mem = alt_mem_with_primary_mem
@@ -520,16 +526,16 @@ class TransformerModel(Module):
             return self.tokenizer
 
     def random_mask_shuffle_encoder(self,
-                                inp: Tensor,
-                                mask: bool = True,
-                                mask_percentage: float = 15.0,
-                                mask_together_nos: int = 3,
-                                mask_continuous_pos: float = -101.0,
-                                shuffle: bool = True,
-                                shuffle_percentage: float = 15,
-                                shuffle_together_nos: int = 3,
-                                shuffle_continuous_pos: float = -101
-                            ) -> Tensor:
+                                    inp: Tensor,
+                                    mask: bool = True,
+                                    mask_percentage: float = 15.0,
+                                    mask_together_nos: int = 3,
+                                    mask_continuous_pos: float = -101.0,
+                                    shuffle: bool = True,
+                                    shuffle_percentage: float = 15,
+                                    shuffle_together_nos: int = 3,
+                                    shuffle_continuous_pos: float = -101
+                                ) -> Tensor:
         inp_2: Tensor = inp.clone().detach()
         for i in range(inp.size(0)):
             count: int = 0
@@ -543,12 +549,12 @@ class TransformerModel(Module):
                 elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
                     shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
                     if shuffle_continuous_pos < 0:
-                        if (inp.size(1)-j+1)/inp.size(1) >= ((-1)*shuffle_continuous_pos):
-                            rnd: float = 0
+                        if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                            rnd: float = shuffle_percentage/2
                     else:
-                        if (j+1)/inp.size(1) >= shuffle_continuous_pos:
-                            rnd: float = 0
-                if (((rnd>=0 and rnd<shuffle_percentage) or together_count<shuffle_together_nos) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage)):
+                        if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
+                            rnd: float = shuffle_percentage/2
+                if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
                     while True:
                         r = random.randint(0,inp.size(1)-1)
                         if r!=j:
@@ -563,31 +569,34 @@ class TransformerModel(Module):
             together_count: int = 0
             for j in range(inp.size(1)):
                 rnd: float = -1
-                if mask_continuous_pos < -100 or mask_continuous_pos > 100:
+                if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
                     rnd: float = random.randint(0,100000)/1000
                 elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
                     mask_together_nos = mask_percentage * (inp.size(1)/100)
                     if mask_continuous_pos < 0:
-                        if (inp.size(1)-j+1)/inp.size(1) >= ((-1)*mask_continuous_pos):
-                            rnd: float = 0
+                        if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                            rnd: float = mask_percentage/2
                     else:
-                        if (j+1)/inp.size(1) >= mask_continuous_pos:
-                            rnd: float = 0
-                if (((rnd>=0 and rnd<mask_percentage) or together_count<mask_together_nos) and mask and (((count+1)/inp.size(1))<=mask_percentage)):
+                        if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
+                            rnd: float = mask_percentage/2
+                if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
                     inp_2[i,j] = 5
                     count += 1
                     together_count += 1
                 elif together_count>=mask_together_nos:
                     together_count = 0
-        return inp_2
+        return inp_2.clone().detach()
 
     def encode_text(self,
                         *args: Union[str,Tensor],
-                        append_pad_at_start: Union[bool,int] = True,
-                        append_pad_at_end: Union[bool,int] = True,
-                        padding: Union[int,bool] = 8,
-                        pad_to_make_len_a_multiple: bool = True,
+                        append_pad_at_start: Union[bool,int] = False,
+                        append_pad_at_end: Union[bool,int] = False,
+                        padding: Union[int,bool] = 0,
                         pad_idx: int = 0,
+                        append_sos: bool = True,
+                        sos_idx: int = 2,
+                        append_eos: bool = True,
+                        eos_idx: int = 3,
                         concatenate_all: bool = False,
                         concatenate_dim: int = 1,
                         append_segment_seperator: bool = True,
@@ -600,11 +609,13 @@ class TransformerModel(Module):
                         shuffle_percentage: float = 15.,
                         shuffle_together_nos: int = 3,
                         shuffle_continuous_pos: float = -101.
-                    ) -> Union[list,Tensor] :
+                    ) -> List[Tensor] :
         encoded_text = []
         for txt in args:
             if type(txt) == str:
-                tmp = self.tokenizer.batch_encode(txt)
+                tmp = self.tokenizer.encode(txt)
+            else:
+                assert type(tmp) == Tensor
             if mask_at_random or shuffle_at_random:
                 tmp =   self.random_mask_shuffle_encoder(tmp,
                                                             mask=mask_at_random,
@@ -616,7 +627,27 @@ class TransformerModel(Module):
                                                             shuffle_together_nos=shuffle_together_nos,
                                                             shuffle_continuous_pos=shuffle_continuous_pos
                                                         )
-            #tmp = torch.cat((torch.tensor([[pad_idx]]),tmp),dim=1)
+
+            if append_sos:
+                tmp = torch.cat((torch.full((tmp.size(0),1),sos_idx,dtype=torch.long,device=device),tmp),dim=1).contiguous()
+
+            if append_eos:
+                tmp = torch.cat((tmp,torch.full((tmp.size(0),1),eos_idx,dtype=torch.long,device=device)),dim=1).contiguous()
+
+            if append_pad_at_end or append_pad_at_end:
+                if type(append_pad_at_start) == int:
+                    tmp = torch.cat((torch.full((tmp.size(0),append_pad_at_start),pad_idx,dtype=torch.long,device=self.device),tmp),dim=1)
+                if type(append_pad_at_end) == int:
+                    tmp = torch.cat((tmp,torch.full((tmp.size(0),append_pad_at_end),pad_idx,dtype=torch.long,device=self.device)),dim=1)
+                if type(append_pad_at_start) == bool and type(append_pad_at_end) == bool:
+                    if padding%2==0:
+                        pad_l = pad_r = padding//2
+                    else:
+                        pad_l = padding//2
+                        pad_r = (padding//2) + 1
+                    tmp = torch.cat((torch.full((tmp.size(0),pad_l),pad_idx,dtype=torch.long,device=self.device),tmp,torch.full((tmp.size(0),pad_r),pad_idx,dtype=torch.long,device=self.device)),dim=1)
+                elif not (type(append_pad_at_end) == bool and type(append_pad_at_start) == bool):
+                    tmp = torch.cat((torch.full((tmp.size(0),padding),pad_idx,dtype=torch.long,device=self.device),tmp),dim=1)
 
             if append_segment_seperator:
                 tmp = torch.cat((tmp,torch.tensor([[segment_idx]])),dim=1)
@@ -639,11 +670,73 @@ class TransformerModel(Module):
                 txt = torch.argmax(txt,dim=-1)
 
             if to_text:
-                if txt.size(0) > 1:
-                    txt = self.tokenizer.batch_decode(txt)
+                if txt.size(0)>1:
+                    tmp = []
+                    for i in txt:
+                        tmp.append(self.tokenizer.decode(i))
+                    txt = tmp
                 else:
                     txt = self.tokenizer.decode(txt)
             decoded_text.append(txt)
+        return decoded_text
+
+    def init_optimizer(self,
+                            opt: Optional[Literal['Torch_optimizer']] = None,
+                            opt_disc: Optional[Literal['Torch_optimizer']] = None,
+                            lr: Union[None,float,dict] = None,
+                            lr_disc: Union[None,float,dict] = None,
+                            scheduler: Optional[Literal['Torch_LRscheduler']] = None,
+                            lambdaLR: Optional[Literal['lambda_function']] = None,
+                            scheduler_disc: Optional[Literal['Torch_LRscheduler']] = None,
+                            lambdaLR_disc: Optional[Literal['lambda_function']] = None,
+                            return_opt_schd: bool = False
+                        ) -> Union[NoReturn,Tuple[Literal['Torch_optimizer'],Literal['Torch_LRscheduler']]]:
+        if opt != None:
+            self.optimizer = opt
+            if self.discriminator_enabled:
+                self.optimizer_disc = opt_disc
+        else:
+            assert lr!=None
+            if not self.discriminator_enabled:
+                self.optimizer = torch.optim.SGD(self.parameters(), lr=lr)
+            else:
+                for p in self.discriminator.parameters():
+                    p.requires_grad_(False)
+                self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=lr)
+                for p in self.parameters():
+                    p.requires_grad_(False)
+                for p in self.discriminator.parameters():
+                    p.requires_grad_(True)
+                if lr_disc == None:
+                    lr_disc = lr
+                self.optimizer_disc = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=lr_disc)
+                for p in self.parameters():
+                    p.requires_grad_(True)
+
+        if scheduler != None:
+            self.scheduler = scheduler
+            if self.discriminator_enabled:
+                self.scheduler_disc = scheduler_disc
+        else:
+            if lambdaLR == None or lambdaLR_disc == None:
+                a = 5000000
+                b = 500
+                c = 0.0
+                if lambdaLR==None:
+                    lambdaLR = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
+                if lambdaLR_disc==None and self.discriminator_enabled:
+                    lambdaLR_disc = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=self.optimizer,lr_lambda=lambdaLR)
+            if self.discriminator_enabled:
+                self.scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=self.optimizer_disc,lr_lambda=lambdaLR_disc)
+        if return_opt_schd:
+            if self.discriminator_enabled:
+                return self.optimizer, self.optimizer_disc, self.scheduler, self.scheduler_disc
+            else:
+                return self.optimizer,self.scheduler
+
+    def train_step():
+        pass
 
     #@autocast()
     def forward(self,
