@@ -26,7 +26,7 @@ autocast = torch.cuda.amp.autocast
 scripts.model.checkpointed = True
 scripts.model.device = device
 
-file = "wikitextv103"
+file = "wikitextv2"
 if file == "wikitextv2":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
 elif file == "wikitextv103":
@@ -54,14 +54,14 @@ eval_batch_size = batch_size
 ntokens = tokenizer.vocab_size
 emsize = 2048//4
 nhid = emsize * 4
-nlayers = 1
+nlayers = 2
 deberta_layers = 2
 repeated_deberta_layers = 1
 nhead = 16
 dropout = 0.3
-mem_tokens = 128
+mem_tokens = 256
 bptt = (1024-1) - mem_tokens
-max_seq_len = 2**11
+max_seq_len = 2**16
 
 use_deepspeed = False
 
@@ -156,11 +156,11 @@ def random_mask_shuffle_encoder(
             elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
                 shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
                 if shuffle_continuous_pos < 0:
-                    if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((-1)*shuffle_continuous_pos/100):
-                        rnd: float = 0
+                    if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                        rnd: float = shuffle_percentage/2
                 else:
-                    if (j+1)/inp.size(1) >= shuffle_continuous_pos:
-                        rnd: float = -1
+                    if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
+                        rnd: float = shuffle_percentage/2
             if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
                 while True:
                     r = random.randint(0,inp.size(1)-1)
@@ -176,23 +176,23 @@ def random_mask_shuffle_encoder(
         together_count: int = 0
         for j in range(inp.size(1)):
             rnd: float = -1
-            if mask_continuous_pos < -100 or mask_continuous_pos > 100:
+            if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
                 rnd: float = random.randint(0,100000)/1000
             elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
                 mask_together_nos = mask_percentage * (inp.size(1)/100)
                 if mask_continuous_pos < 0:
-                    if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((-1)*mask_continuous_pos/100):
-                        rnd: float = 0
+                    if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                        rnd: float = mask_percentage/2
                 else:
-                    if (j+1)/inp.size(1) >= mask_continuous_pos:
-                        rnd: float = 0
+                    if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
+                        rnd: float = mask_percentage/2
             if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
                 inp_2[i,j] = 5
                 count += 1
                 together_count += 1
             elif together_count>=mask_together_nos:
                 together_count = 0
-    return inp_2
+    return inp_2.clone().detach()
 
 def random_mask_encoder(inp):
     inp_2 = inp.clone().detach()
@@ -211,11 +211,11 @@ def prepare_batch(source):
     return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
 
 def get_batch(source,j,bptt=bptt):
-    seq_len = min(bptt -1 -1, source.size(2) - j -1 -1 -1)
-    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=20,mask_together_nos=10,mask_continuous_pos=-21,shuffle_percentage=3,shuffle_together_nos=5).to(device)
-    data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
+    seq_len = min(bptt -1 , source.size(2) - j -1 -1)
+    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=15,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=2,shuffle_together_nos=5).to(device)
+    data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
     targets = source[1,:,j:j+seq_len].to(device)
-    targets = torch.cat((targets,torch.full((targets.size(0),1),3,dtype=torch.long,device=device),torch.full((targets.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+    targets = torch.cat((targets,torch.full((targets.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
     return data,targets
 
 #print(sum(p.numel() for p in model.parameters()))
@@ -223,7 +223,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.0175
+lr = 0.01
 if not use_deepspeed:
     for p in model.discriminator.parameters():
         p.requires_grad_(False)
@@ -307,9 +307,11 @@ try:
             print("Exception",e)
             
     optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
+    optimizer_disc.load_state_dict(checkpoint_['optimizer_disc_state_dict'])
     step = checkpoint_['step_number']
     if load_scheduler:
         scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
+        scheduler_disc.load_state_dict(checkpoint_['scheduler_disc_state_dict'])
     else:
         lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
@@ -394,6 +396,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     model.train() 
     total_loss = 0.
     total_loss_d = 0.
+    total_ppl = 0.
     start_time = time.time()
     intermediate_save_time = time.time()
     single_pass_mem = None
@@ -403,7 +406,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     acc_d = 0
     total_acc = 0
     total_acc_d = 0
-    for batch, i in enumerate(range(0, processed_train_data.size(2), bptt-1-1)):
+    for batch, i in enumerate(range(0, processed_train_data.size(2), bptt-1)):
         if resume_batch != None:
             if batch < resume_batch:
                 continue
@@ -431,15 +434,14 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             loss_d_real = criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
             loss_d_real.backward()
 
-            out_d_fake = model(data.detach(),return_mem=False,discriminator=True)
-            loss_d_fake = criterion(rearrange(out_d_fake,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
-            loss_d_fake.backward()
+            out_gan = model(data.detach(),mem=single_pass_mem,return_mem=False,discriminator=True)
+            loss_d_fake = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
+            loss_d_fake.backward(retain_graph=True)
 
             optimizer_disc.step()
             model.zero_grad()
 
-            out_gen = model(data,mem=single_pass_mem,return_mem=False,discriminator=True)
-            loss_gen = criterion(rearrange(out_gen,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
+            loss_gen = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
             loss_gen.backward()
 
             output,single_pass_mem = model(data,mem=single_pass_mem)
@@ -450,8 +452,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
 
         acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
         acc_d = ((torch.argmax(out_d_real,dim=-1)) == real_label).sum().item()/out_d_real.size(1)
-        acc_d += ((torch.argmax(out_d_fake,dim=-1)) == fake_label).sum().item()/out_d_fake.size(1)
-        acc += ((torch.argmax(out_gen,dim=-1)) == real_label_gen).sum().item()/out_gen.size(1)
+        acc_d += ((torch.argmax(out_gan,dim=-1)) == fake_label).sum().item()/out_gan.size(1)
+        acc += ((torch.argmax(out_gan,dim=-1)) == real_label_gen).sum().item()/out_gan.size(1)
         
 
         total_acc += acc/2
@@ -464,6 +466,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             ppl = math.exp(loss.item())
         except:
             ppl = -1.0
+
+        total_ppl += ppl
         loss_g = (loss.item() + loss_gen.item())/2
         loss_d = ((loss_d_fake.item() + loss_d_real.item())/2)
         inputs = "\n".join([tokenizer.decode(i) for i in data])
@@ -473,8 +477,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 "Loss Generator":loss_g,
                 "Loss Discriminator":loss_d,
                 "step":step,
-                "Accuracy Generator(%)":acc*100,
-                "Accuracy Discriminator(%)":acc_d*100,
+                "Accuracy Generator(%)":acc*100/2,
+                "Accuracy Discriminator(%)":acc_d*100/2,
                 "epoch":epoch,
                 "batch":batch,
                 "Perplexity of Generator":ppl,
@@ -497,6 +501,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 'optimizer_state_dict': optimizer.state_dict(),
                 'optimizer_disc_state_dict': optimizer_disc.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
+                'scheduler_disc_state_dict':scheduler_disc.state_dict(),
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
                 'tokenizer': tokenizer,
@@ -524,16 +529,15 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             intermediate_save_time = time.time()
         if step_scheduler != None:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(2)//bptt < step_scheduler):
+                scheduler.step(step)
+                scheduler_disc.step(step)
                 scheduler.step()
                 scheduler_disc.step()
                 step += 1
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
-            try:
-                ppl = math.exp(cur_loss)
-            except:
-                ppl = -1.0
+            total_ppl /= log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
                   'lr_g {:04.5f} | lr_d {:04.5f} | ms/batch {:08.3f} | acc_g {:3.2f}% | '
@@ -541,7 +545,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
                     scheduler_disc.get_lr()[0],
                     elapsed * 1000 / log_interval,total_acc*100/log_interval,
-                    cur_loss,total_acc_d*100/log_interval,cur_loss_d,ppl ))
+                    cur_loss,total_acc_d*100/log_interval,cur_loss_d,total_ppl ))
             total_loss = 0.
             total_acc = 0.
             total_loss_d = 0.
@@ -554,7 +558,7 @@ def evaluate(eval_model, data_source):
     total_acc = 0.
     single_pass_mem = None
     with torch.no_grad():
-        for i in range(0, data_source.size(2), bptt-1-1):
+        for i in range(0, data_source.size(2), bptt-1):
             data, targets = get_batch(data_source, i)
             if use_deepspeed:
                 with autocast():
@@ -595,7 +599,9 @@ while True:
                 'model_state_dict': model.state_dict(),
                 'best_model_state_dict': best_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'optimizer_disc_state_dict': optimizer_disc.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
+                'scheduler_disc_state_dict':scheduler_disc.state_dict(),
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
                 'tokenizer': tokenizer,
@@ -604,7 +610,7 @@ while True:
                 'step_number': step
             },
             path
-        )
+            )
         """
         ckpt_id = epoch*(processed_train_data.size(-1)//bptt) + batch
         model.save_checkpoint(path,ckpt_id,client_sd = {
