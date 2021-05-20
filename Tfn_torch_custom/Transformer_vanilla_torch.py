@@ -52,16 +52,16 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 2048//8
+emsize = 2048//4
 nhid = emsize * 4
-nlayers = 4
-deberta_layers = 4
-repeated_deberta_layers = 4
+nlayers = 1
+deberta_layers = 2
+repeated_deberta_layers = 1
 nhead = 16
 dropout = 0.3
-mem_tokens = 512*2
-bptt = (1024*4 - 3 + mem_tokens) - mem_tokens
-max_seq_len = 2**16
+mem_tokens = 128
+bptt = (1024-1) - mem_tokens
+max_seq_len = 2**11
 
 use_deepspeed = False
 
@@ -130,7 +130,7 @@ if use_deepspeed:
         #model = PerformerLM(num_tokens=ntokens,max_seq_len=2**17,dim=emsize,depth=nlayers,heads=nhead,causal=True,use_rezero=True,cross_attend=True)
         model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,mem_token=mem_tokens,max_seq_len=max_seq_len).half()
 else:
-    model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_seq_len=max_seq_len,device=device).to(device)
+    model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_seq_len=max_seq_len,discriminator=True,device=device).to(device)
 
 def random_mask_shuffle_encoder(
                             inp: Tensor,
@@ -212,7 +212,7 @@ def prepare_batch(source):
 
 def get_batch(source,j,bptt=bptt):
     seq_len = min(bptt -1 -1, source.size(2) - j -1 -1 -1)
-    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=20,mask_together_nos=10,mask_continuous_pos=-21,shuffle_percentage=10).to(device)
+    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=20,mask_together_nos=10,mask_continuous_pos=-21,shuffle_percentage=3,shuffle_together_nos=5).to(device)
     data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
     targets = source[1,:,j:j+seq_len].to(device)
     targets = torch.cat((targets,torch.full((targets.size(0),1),3,dtype=torch.long,device=device),torch.full((targets.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
@@ -225,7 +225,16 @@ path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
 criterion = nn.CrossEntropyLoss()
 lr = 0.0175
 if not use_deepspeed:
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    for p in model.discriminator.parameters():
+        p.requires_grad_(False)
+    optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+    for p in model.parameters():
+        p.requires_grad_(False)
+    for p in model.discriminator.parameters():
+        p.requires_grad_(True)
+    optimizer_disc = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+    for p in model.parameters():
+        p.requires_grad_(True)
 else:
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
 a = 5000000
@@ -234,6 +243,7 @@ c = 0.0
 step = 1
 lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
+scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1)
 load_scheduler = True
 epoch = 0
 best_val_loss = float("inf")
@@ -357,7 +367,7 @@ except:
 torch.cuda.empty_cache()
 model.to(device)
 
-print(summary(model, torch.zeros([1,bptt],dtype=torch.long).to(device)))
+print(summary(model, torch.zeros([1,bptt],dtype=torch.long).to(device),None,None,None,None,False,False,True,True))
 
 # TODO: Setup 'curses' module to print colored text for inference output
 #import curses
@@ -373,23 +383,26 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None):
     out = torch.argmax(out.view(-1, ntokens),dim=-1)
     result = tokenizer.decode(out)
     print("Your input:\n\t",tokenizer.decode(text_input.view(-1)))
-    print("Model's Output:\n\t\t",result)
+    print("Model's Output:\n\t\t\b\b",result)
     return mem
 
 
 _ = inference("Hello World!!! This is inference function on the currently trained model")
 
 
-def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,mini_batch_size=20,step=step):
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,step=step):
     model.train() 
     total_loss = 0.
+    total_loss_d = 0.
     start_time = time.time()
     intermediate_save_time = time.time()
     single_pass_mem = None
     #model.alt_mem = None
     #model.alt_mem_tokens(None,False)
     acc = 0
+    acc_d = 0
     total_acc = 0
+    total_acc_d = 0
     for batch, i in enumerate(range(0, processed_train_data.size(2), bptt-1-1)):
         if resume_batch != None:
             if batch < resume_batch:
@@ -397,52 +410,83 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         if epoch%2==0:
             single_pass_mem = None
         data, targets = get_batch(processed_train_data, i)
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+
         if use_deepspeed:
             with autocast():
                 output,single_pass_mem = model(data,mem=single_pass_mem)
                 loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
+            model.backward(loss)
+            model.step()
+            model.zero_grad()
         else:
+            model.zero_grad()
+                
+            real_label = torch.full(targets.size(),0,dtype=torch.long,device=device)
+            real_label_gen = torch.full(data.size(),0,dtype=torch.long,device=device)
+            fake_label = torch.full(data.size(),1,dtype=torch.long,device=device)
+
+            out_d_real = model(targets.detach(),return_mem=False,discriminator=True,generator=False)
+            loss_d_real = criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
+            loss_d_real.backward()
+
+            out_d_fake = model(data.detach(),return_mem=False,discriminator=True)
+            loss_d_fake = criterion(rearrange(out_d_fake,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
+            loss_d_fake.backward()
+
+            optimizer_disc.step()
+            model.zero_grad()
+
+            out_gen = model(data,mem=single_pass_mem,return_mem=False,discriminator=True)
+            loss_gen = criterion(rearrange(out_gen,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
+            loss_gen.backward()
+
             output,single_pass_mem = model(data,mem=single_pass_mem)
             loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
-
-        if use_deepspeed:
-            #scaler.scale(loss).backward()
-            #loss.backward(reatain_graph=True)
-            model.backward(loss)
-        else:
             loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+
+            optimizer.step()
+
         acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
+        acc_d = ((torch.argmax(out_d_real,dim=-1)) == real_label).sum().item()/out_d_real.size(1)
+        acc_d += ((torch.argmax(out_d_fake,dim=-1)) == fake_label).sum().item()/out_d_fake.size(1)
+        acc += ((torch.argmax(out_gen,dim=-1)) == real_label_gen).sum().item()/out_gen.size(1)
+        
+
+        total_acc += acc/2
+        total_acc_d += acc_d/2
+        total_loss += (loss.item() + loss_gen.item())/2
+        total_loss_d += (loss_d_fake.item() + loss_d_real.item())/2
+        log_interval = 20
+
         try:
             ppl = math.exp(loss.item())
         except:
             ppl = -1.0
+        loss_g = (loss.item() + loss_gen.item())/2
+        loss_d = ((loss_d_fake.item() + loss_d_real.item())/2)
+        inputs = "\n".join([tokenizer.decode(i) for i in data])
+        req_targets = "\n".join([tokenizer.decode(i) for i in targets])
         wandb.log(
             {
-                "loss":loss.item(),
+                "Loss Generator":loss_g,
+                "Loss Discriminator":loss_d,
                 "step":step,
-                "accuracy(%)":acc*100,
+                "Accuracy Generator(%)":acc*100,
+                "Accuracy Discriminator(%)":acc_d*100,
                 "epoch":epoch,
                 "batch":batch,
-                "perplexity":ppl,
-                'Learning_Rate':scheduler.get_lr()[0]
-                #"input":wandb.Html(tokenizer.decode(data)),
-                #"target":wandb.Html(tokenizer.decode(targets)),
+                "Perplexity of Generator":ppl,
+                'Learning_Rate':scheduler.get_lr()[0],
+                "input":wandb.Html(inputs),
+                "target":wandb.Html(req_targets),
             }
         )
-        if batch % mini_batch_size == 0 or i == processed_train_data.size(2)-1:
-            if use_deepspeed:
-                model.step()
-                model.zero_grad()
-            else:
-                optimizer.step()
-                optimizer.zero_grad()
+
         del(data,targets)
         torch.cuda.empty_cache()
 
-        total_acc += acc
-        total_loss += loss.item()
-        log_interval = 200
         if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
             
             torch.save(
@@ -451,6 +495,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 'model_state_dict': model.state_dict(),
                 'best_model_state_dict': best_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'optimizer_disc_state_dict': optimizer_disc.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
@@ -480,22 +525,27 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         if step_scheduler != None:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(2)//bptt < step_scheduler):
                 scheduler.step()
+                scheduler_disc.step()
                 step += 1
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
+            cur_loss_d = total_loss_d / log_interval
             try:
                 ppl = math.exp(cur_loss)
             except:
                 ppl = -1.0
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr {:04.5f} | ms/batch {:08.3f} | acc {:3.2f}% | '
-                  'loss {:5.3f} | ppl {:10.3f}'.format(
+                  'lr_g {:04.5f} | lr_d {:04.5f} | ms/batch {:08.3f} | acc_g {:3.2f}% | '
+                  'loss_g {:5.3f} | acc_d {:3.2f}% | loss_d {:5.3f} | ppl {:10.3f}'.format(
                     epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
+                    scheduler_disc.get_lr()[0],
                     elapsed * 1000 / log_interval,total_acc*100/log_interval,
-                    cur_loss,ppl ))
-            total_loss = 0
-            total_acc = 0
+                    cur_loss,total_acc_d*100/log_interval,cur_loss_d,ppl ))
+            total_loss = 0.
+            total_acc = 0.
+            total_loss_d = 0.
+            total_acc_d = 0.
             start_time = time.time()
 
 def evaluate(eval_model, data_source):
@@ -526,7 +576,7 @@ while True:
         epoch +=1
     step=step
     epoch_start_time = time.time()
-    train(resume_batch=resume_batch,mini_batch_size= 1)
+    train(resume_batch=resume_batch)
     resume_batch = 0
     val_loss, val_acc = evaluate(model, processed_val_data)
     print('-' * 110)

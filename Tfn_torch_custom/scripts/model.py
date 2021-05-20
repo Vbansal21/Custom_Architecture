@@ -372,8 +372,7 @@ class TransformerModel(Module):
         self.encoder_decoder = encoder_decoder
         self.transformer_encoder = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len)
         
-        if not discriminator:
-            self.embedding_encoder = nn.Sequential(
+        self.embedding_encoder = nn.Sequential(
                 nn.Embedding(ntoken, ninp,padding_idx=padding_idx),
                 _get_activation_fn(activation),
                 nn.Linear(ninp,nhid*2),
@@ -381,33 +380,17 @@ class TransformerModel(Module):
                 nn.Linear(nhid*2,ninp),
                 _get_activation_fn(activation),
             )
-        else:
-            self.embedding_encoder = nn.Sequential(
-                _get_activation_fn(activation),
-                nn.Linear(ninp,nhid*2),
-                _get_activation_fn(activation),
-                nn.Linear(nhid*2,ninp),
-                _get_activation_fn(activation),
-            )
+
         
         self.ninp = ninp
         self.ntokens = ntoken
         
-        if not discriminator:
-            self.decoder = nn.Sequential(
+        self.decoder = nn.Sequential(
                 nn.Linear(ninp,nhid*2),
                 _get_activation_fn(activation),
                 nn.Linear(nhid*2,ninp),
                 _get_activation_fn(activation),
                 nn.Linear(ninp,ntoken)
-            )
-        else:
-            self.decoder = nn.Sequential(
-                nn.Linear(ninp,nhid*2),
-                _get_activation_fn(activation),
-                nn.Linear(nhid*2,ninp),
-                _get_activation_fn(activation),
-                nn.Linear(ninp,2)
             )
 
         self.ffd1 = nn.Sequential(
@@ -441,6 +424,22 @@ class TransformerModel(Module):
                 elif type(context_mem_token) == Tensor:
                     assert context_mem_token.size(-1)==ninp
                     self.context_mem = nn.Parameter(context_mem_token)
+
+        self.discriminator_enabled = discriminator
+        if discriminator:
+            self.discriminator = nn.Sequential(
+                nn.Linear(ninp,nhid*2),
+                _get_activation_fn(activation),
+                nn.Linear(nhid*2,ninp),
+                _get_activation_fn(activation),
+                TransformerModule(nhead, nhid, nlayers*2, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers*2,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len),
+                _get_activation_fn(activation),
+                nn.Linear(ninp,nhid*2),
+                _get_activation_fn(activation),
+                nn.Linear(nhid*2,ninp),
+                _get_activation_fn(activation),
+                nn.Linear(ninp,2)
+            )
         
         self.alt_mem = None
         self.alt_mem_with_primary_mem = False
@@ -647,7 +646,8 @@ class TransformerModel(Module):
                     alt_mem_with_primary_key: Optional[bool] = None,
                     assign_to_alt_mem: bool = True,
                     return_mem: bool = True,
-                    return_logits_before_lm_head: bool = False,
+                    generator: bool = True,
+                    discriminator: bool = False,
                 ) -> Tuple[Tensor,Optional[Tensor],Optional[Tensor]]:
         
         b,s_ = src.size(0),src.size(1)
@@ -655,101 +655,106 @@ class TransformerModel(Module):
         src = ckpt(self.embedding_encoder,src)
         src.requires_grad_(True)
         src = src * math.sqrt(self.ninp)
-        src = rearrange(src,'b n d -> b d n')
-        if src.size(2)%8 != 0:
-            src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=8-src.size(2)%8).to(self.device)),dim=2)
 
-        src = ckpt(self.scale_down_conv,src)
-        src = rearrange(src,'b d n -> b n d')
-        s = src.size(1)
+        if generator:
+            src = rearrange(src,'b n d -> b d n')
+            if src.size(2)%8 != 0:
+                src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=8-src.size(2)%8).to(self.device)),dim=2)
 
-        if self.encoder_decoder:
-            context = ckpt(self.embedding_encoder,context)
-            context = context * math.sqrt(self.ninp)
-            if context.size(2)%8!=0:
-                context = torch.cat((rearrange(context,'b n d -> b d n'),repeat(self.padding_for_conv_scale,'d -> b d n',b=context.size(0),n=8-context.size(2)%8).to(self.device)),dim=2)
+            src = ckpt(self.scale_down_conv,src)
+            src = rearrange(src,'b d n -> b n d')
+            s = src.size(1)
 
-            context = ckpt(self.scale_down_conv,context)
-            context = rearrange(context,'b d n -> b n d')
+            if self.encoder_decoder:
+                context = ckpt(self.embedding_encoder,context)
+                context = context * math.sqrt(self.ninp)
+                if context.size(2)%8!=0:
+                    context = torch.cat((rearrange(context,'b n d -> b d n'),repeat(self.padding_for_conv_scale,'d -> b d n',b=context.size(0),n=8-context.size(2)%8).to(self.device)),dim=2)
+
+                context = ckpt(self.scale_down_conv,context)
+                context = rearrange(context,'b d n -> b n d')
+                
+
+
+            self.alt_mem_with_primary_mem = alt_mem_with_primary_key if type(alt_mem_with_primary_key) == bool else self.alt_mem_with_primary_mem
+
+            if mem != None and self.mem_exist:
+                if self.alt_mem_with_primary_mem and self.alt_mem != None:
+                    output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+                else:
+                    output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+            elif self.mem_exist:
+                if self.alt_mem_with_primary_mem and self.alt_mem != None:
+                    output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+                elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
+                    output = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+                else:
+                    output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+            else:
+                output = src
             
 
+            if self.encoder_decoder:
+                if context_mem != None and self.context_mem_exist:
+                    if self.alt_mem_with_primary_mem and self.alt_mem != None:
+                        context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+                    else:
+                        context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+                elif self.context_mem_exist:
+                    if self.alt_mem_with_primary_mem and self.alt_mem != None:
+                        context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+                    elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
+                        context = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+                    else:
+                        context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
 
-        self.alt_mem_with_primary_mem = alt_mem_with_primary_key if type(alt_mem_with_primary_key) == bool else self.alt_mem_with_primary_mem
 
-        if mem != None and self.mem_exist:
-            if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            else:
-                output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-        elif self.mem_exist:
-            if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
-                output = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            else:
-                output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-        else:
-            output = src
-        
+            #output = Positional_Encoding(output,device=self.device)
+            if self.encoder_decoder:
+                #context = Positional_Encoding(context,device=self.device)
+                context = context.contiguous()
 
-        if self.encoder_decoder:
-            if context_mem != None and self.context_mem_exist:
-                if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                    context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+            output = output.contiguous()
+
+            src = ckpt(self.scale_down_fno,src)
+            output2 = ckpt(self.ffd1,output)
+            output = ckpt(self.norm1,output2) + output
+
+            if self.encoder_decoder:
+                context = ckpt(self.scale_down_fno,context)
+                context2 = ckpt(self.ffd3,context)
+                context = ckpt(self.norm1, context2) + context
+
+            output = ckpt(self.transformer_encoder,output,context)
+
+            output2 = ckpt(self.ffd2,output)
+            output = ckpt(self.norm2,output2) + output
+
+
+            for i in range(b):
+                if i == 0:
+                    mem = output[i,:output.size(1)-s]
                 else:
-                    context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
-            elif self.context_mem_exist:
-                if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                    context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
-                elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
-                    context = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
-                else:
-                    context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+                    mem += output[i,:output.size(1)-s]
+            mem = mem if type(mem) == torch.tensor else None
+            self.alt_mem = mem if assign_to_alt_mem else None
 
+            output = output[:,output.size(1)-s:] if type(mem) != None or self.mem_exist else output
 
-        #output = Positional_Encoding(output,device=self.device)
-        if self.encoder_decoder:
-            #context = Positional_Encoding(context,device=self.device)
-            context = context.contiguous()
+            output = ckpt(self.scale_up_conv,rearrange(output,'b n d -> b d n'))
+            output = rearrange(output,'b d n -> b n d')
+            output = ckpt(self.scale_up_fno,output)
+            out = output[:,:s_]
 
-        output = output.contiguous()
+            output = ckpt(self.decoder,out)
 
-        src = ckpt(self.scale_down_fno,src)
-        output2 = ckpt(self.ffd1,output)
-        output = ckpt(self.norm1,output2) + output
+        if discriminator and not generator:
+            out = src
 
-        if self.encoder_decoder:
-            context = ckpt(self.scale_down_fno,context)
-            context2 = ckpt(self.ffd3,context)
-            context = ckpt(self.norm1, context2) + context
-
-        output = ckpt(self.transformer_encoder,output,context)
-
-        output2 = ckpt(self.ffd2,output)
-        output = ckpt(self.norm2,output2) + output
-
-
-        for i in range(b):
-            if i == 0:
-                mem = output[i,:output.size(1)-s]
-            else:
-                mem += output[i,:output.size(1)-s]
-        mem = mem if type(mem) == torch.tensor else None
-        self.alt_mem = mem if assign_to_alt_mem else None
-
-        output = output[:,output.size(1)-s:] if type(mem) != None or self.mem_exist else output
-
-        output = ckpt(self.scale_up_conv,rearrange(output,'b n d -> b d n'))
-        output = rearrange(output,'b d n -> b n d')
-        output = ckpt(self.scale_up_fno,output)
-        output = output[:,:s_]
-
-        out = ckpt(self.decoder,output)
+        if discriminator:
+            output = ckpt(self.discriminator,out,context)
 
         if return_mem:
-            if return_logits_before_lm_head:
-                return out,mem,output
-            else:
-                return out, mem
+            return output, mem
         else:
             return output
