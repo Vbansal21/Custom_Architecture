@@ -1,12 +1,6 @@
 {
     "folders": [
         {
-            "path": "."
-        },
-        {
-            "path": ".."
-        },
-        {
             "path": "Tfn_torch_custom"
         }
     ],

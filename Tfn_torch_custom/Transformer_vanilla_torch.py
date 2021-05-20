@@ -52,15 +52,15 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 2048//4
+emsize = 2048//8
 nhid = emsize * 4
-nlayers = 3
-deberta_layers = 6
-repeated_deberta_layers = 1
+nlayers = 4
+deberta_layers = 4
+repeated_deberta_layers = 4
 nhead = 16
 dropout = 0.3
-mem_tokens = 512
-bptt = (1024+mem_tokens) - mem_tokens
+mem_tokens = 512*2
+bptt = (1024*4 - 3 + mem_tokens) - mem_tokens
 max_seq_len = 2**16
 
 use_deepspeed = False
@@ -256,7 +256,7 @@ else:
 print(torch.argmax((out.view(-1,ntokens)),dim=-1))
 del(out,mem,inp)
 
-best_model = None
+best_model = model
 
 project_name = "Tfn_X"
 
@@ -310,7 +310,7 @@ try:
     except Exception as e:
         print("Exception",e)
     try:
-        #best_model = checkpoint_['best_model'].to(torch.device('cpu'))
+        best_model.load_state_dict(checkpoint_['best_model_state_dict'],strict=False).to(torch.device('cpu'))
         pass
     except Exception as e:
         print("Exception",e)
@@ -373,17 +373,18 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None):
     out = torch.argmax(out.view(-1, ntokens),dim=-1)
     result = tokenizer.decode(out)
     print("Your input:\n\t",tokenizer.decode(text_input.view(-1)))
-    print("Model's Output:\n\t",result)
+    print("Model's Output:\n\t\t",result)
     return mem
 
 
 _ = inference("Hello World!!! This is inference function on the currently trained model")
 
 
-def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_batch_size=20,step=step):
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,mini_batch_size=20,step=step):
     model.train() 
     total_loss = 0.
     start_time = time.time()
+    intermediate_save_time = time.time()
     single_pass_mem = None
     #model.alt_mem = None
     #model.alt_mem_tokens(None,False)
@@ -442,29 +443,13 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
         total_acc += acc
         total_loss += loss.item()
         log_interval = 200
-        if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
-            cur_loss = total_loss / log_interval
-            try:
-                ppl = math.exp(cur_loss)
-            except:
-                ppl = -1.0
-            elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr {:04.5f} | ms/batch {:08.3f} | acc {:3.2f}% | '
-                  'loss {:5.3f} | ppl {:10.3f}'.format(
-                    epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
-                    elapsed * 1000 / log_interval,total_acc*100/log_interval,
-                    cur_loss,ppl ))
-            total_loss = 0
-            total_acc = 0
-            start_time = time.time()
-        if batch % save_intermediate_intervel == 0 and batch > 0:
+        if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
             
             torch.save(
             {
                 'epoch': epoch,
-                'model_state_dict': best_model.state_dict(),
-                'best_model': best_model,
+                'model_state_dict': model.state_dict(),
+                'best_model_state_dict': best_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
@@ -489,11 +474,29 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,mini_b
                 'resume_batch':batch,
                 'train_eval_events': train_eval_event,
                 'step_number': step
-            })"""
+            })
+            """
+            intermediate_save_time = time.time()
         if step_scheduler != None:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(2)//bptt < step_scheduler):
                 scheduler.step()
                 step += 1
+        if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
+            cur_loss = total_loss / log_interval
+            try:
+                ppl = math.exp(cur_loss)
+            except:
+                ppl = -1.0
+            elapsed = time.time() - start_time
+            print('| epoch {:3d} | {:5d}/{:5d} batches | '
+                  'lr {:04.5f} | ms/batch {:08.3f} | acc {:3.2f}% | '
+                  'loss {:5.3f} | ppl {:10.3f}'.format(
+                    epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
+                    elapsed * 1000 / log_interval,total_acc*100/log_interval,
+                    cur_loss,ppl ))
+            total_loss = 0
+            total_acc = 0
+            start_time = time.time()
 
 def evaluate(eval_model, data_source):
     eval_model.eval()
@@ -539,8 +542,8 @@ while True:
         torch.save(
             {
                 'epoch': epoch,
-                'model_state_dict': best_model.state_dict(),
-                'best_model': best_model,
+                'model_state_dict': model.state_dict(),
+                'best_model_state_dict': best_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,

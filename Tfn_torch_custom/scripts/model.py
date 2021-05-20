@@ -656,8 +656,8 @@ class TransformerModel(Module):
         src.requires_grad_(True)
         src = src * math.sqrt(self.ninp)
         src = rearrange(src,'b n d -> b d n')
-        if src.size(1)%8 != 0:
-            src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=src.size(1)%8)),dim=1)
+        if src.size(2)%8 != 0:
+            src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=8-src.size(2)%8).to(self.device)),dim=2)
 
         src = ckpt(self.scale_down_conv,src)
         src = rearrange(src,'b d n -> b n d')
@@ -666,8 +666,8 @@ class TransformerModel(Module):
         if self.encoder_decoder:
             context = ckpt(self.embedding_encoder,context)
             context = context * math.sqrt(self.ninp)
-            if context.size(1)%8!=0:
-                context = torch.cat((rearrange(context,'b n d -> b d n'),repeat(self.padding_for_conv_scale,'d -> b d n',b=context.size(0),n=context.size(1)%8)),dim=1)
+            if context.size(2)%8!=0:
+                context = torch.cat((rearrange(context,'b n d -> b d n'),repeat(self.padding_for_conv_scale,'d -> b d n',b=context.size(0),n=8-context.size(2)%8).to(self.device)),dim=2)
 
             context = ckpt(self.scale_down_conv,context)
             context = rearrange(context,'b d n -> b n d')

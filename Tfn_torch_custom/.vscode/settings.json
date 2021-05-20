@@ -1,6 +1,6 @@
 {
     "python.pythonPath": "/home/vbansal21/anaconda3/envs/torchenv/bin/python",
-    "python.jediMemoryLimit": 4096,
+    "python.jediMemoryLimit": 1024,
     "python.analysis.diagnosticMode": "workspace",
     "python.analysis.completeFunctionParens": true,
     "prettier.enableDebugLogs": true,
@@ -8,5 +8,8 @@
     "prettier.tabWidth": 4,
     "prettier.useTabs": true,
     "editor.definitionLinkOpensInPeek": true,
-    "editor.defaultFormatter": "lacroixdavid1.vscode-format-context-menu"
+    "editor.defaultFormatter": "lacroixdavid1.vscode-format-context-menu",
+    "[jsonc]": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode"
+    }
 }
