@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from torch import Tensor
+from torch.tensor import Tensor
 from typing import Optional, Tuple, Union
 
 

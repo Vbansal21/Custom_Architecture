@@ -99,8 +99,18 @@ class mem_norm(Module):
     def __init__(self, dim):
         super().__init__()
         self.gru = nn.GRUCell(dim, dim)
-        self.proj = HopfieldLayer(dim,output_size=dim*2)
-        self.g = nn.Parameter(torch.zeros(1))
+        self.proj = nn.Sequential(
+                                nn.Linear(dim,dim//4),
+                                HopfieldLayer(
+                                            input_size=dim//4,
+                                            pattern_size=dim//4,
+                                            num_heads=dim//16,
+                                            dropout=0
+                                        ),
+                                nn.Linear(dim//4,dim*2)
+                                )
+        self.g_0 = nn.Parameter(torch.zeros(1))
+        self.g_1 = nn.Parameter(torch.zeros(1))
         self.norm = RMSNorm(dim)
 
     def forward(self, x, residual):
@@ -109,7 +119,7 @@ class mem_norm(Module):
             rearrange(residual, 'b n d -> (b n) d')
         ).reshape_as(x)
         gated_output,gate = self.proj(gru_out).chunk(2,dim=-1)
-        x = (gated_output * self.g + x) * F.gelu(gate)
+        x = ((gated_output * self.g_0) + x) * (F.gelu(gate) * self.g_1)
         return self.norm(x)+residual
 
 
@@ -146,14 +156,12 @@ class TransformerBlock(Module):
                      dropout=0.5, 
                      activation="gelu",
                      context=False,
-                     mem_kv=8192,
+                     mem_kv=64,
+                     hop_pattern_size=64,
                      pkm_keys=64,
                      deberta_mode=False
                 ):
         super(TransformerBlock, self).__init__()
-        #self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)        
-        #attn = SelfAttention(d_model,heads=nhead,dim_head=d_model//nhead)
-        #hopfield = Hopfield(input_size=d_model,num_heads=nhead)
 
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
@@ -171,13 +179,35 @@ class TransformerBlock(Module):
         self.geglu1 = GEGLU(d_model,d_model)
 
         self.pkm1 = nn.Sequential(
-            nn.Linear(d_model,d_model//2),
+            nn.Linear(d_model,d_model//4),
             _get_activation_fn(activation),
-            PKM(d_model//2,heads=nhead,num_keys=pkm_keys,dim_head=d_model//nhead),
-            nn.Linear(d_model//2,d_model),
+            PKM(d_model//4,heads=nhead//4,num_keys=pkm_keys,dim_head=d_model//nhead),
+            nn.Linear(d_model//4,d_model),
             _get_activation_fn(activation),
             )
-        
+
+        hop_attn = nn.Sequential(
+                                nn.Linear(d_model,d_model//4),
+                                HopfieldLayer(
+                                            input_size=d_model//4,
+                                            pattern_size=hop_pattern_size,
+                                            num_heads=nhead//4,
+                                            dropout=dropout
+                                        ),
+                                nn.Linear(d_model//4,d_model)
+                                )
+        fno = EvolvedTransformerBlock(
+                                        d_model,
+                                        nhead,
+                                        attn=FNO1d(nhead,
+                                                    nhead,
+                                                    inp_dim=d_model,
+                                                    out_dim=d_model,
+                                                    ffd_dim=d_model
+                                                ),
+                                        ffd=GEGLU(d_model,d_model),
+                                        context=False,
+                                    )
         if not deberta_mode:
             self.attn = EvolvedTransformerBlock(d_model,
                                 num_heads=nhead,
@@ -186,24 +216,18 @@ class TransformerBlock(Module):
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
+                                                    generalized_attention=True,
+                                                    to_k=copy.deepcopy(fno),
+                                                    to_q=copy.deepcopy(fno),
+                                                    to_v=copy.deepcopy(hop_attn)
                                                 ),
                                 ffd=copy.deepcopy(self.geglu1),
                                 context=context,
-                                pkm=copy.deepcopy(self.pkm1)
+                                pkm=copy.deepcopy(self.pkm1),
+
                                 )
         else:
-            fno = EvolvedTransformerBlock(
-                                        d_model,
-                                        nhead,
-                                        attn=FNO1d(d_model,
-                                                    d_model,
-                                                    inp_dim=d_model,
-                                                    out_dim=d_model,
-                                                    ffd_dim=dim_feedforward
-                                                ),
-                                        ffd=GEGLU(d_model,d_model),
-                                        context=False,
-                                    )
+            
             self.attn = EvolvedTransformerBlock(d_model,
                                 num_heads=nhead,
                                 attn=SelfAttention(d_model,
@@ -211,8 +235,10 @@ class TransformerBlock(Module):
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
+                                                    generalized_attention=True,
                                                     to_q=fno,
                                                     to_k=copy.deepcopy(fno),
+                                                    to_v=copy.deepcopy(hop_attn),
                                                     to_out=copy.deepcopy(fno)
                                                 ),
                                 ffd=copy.deepcopy(self.geglu1),
@@ -220,15 +246,6 @@ class TransformerBlock(Module):
                                 pkm=copy.deepcopy(self.pkm1)
                                 )
 
-        hop_attn = nn.Sequential(
-                                nn.Linear(d_model,d_model//2),
-                                HopfieldLayer(
-                                            input_size=d_model//2,
-                                            num_heads=nhead,
-                                            dropout=dropout
-                                        ),
-                                nn.Linear(d_model//2,d_model)
-                                )
         self.self_hop_src = EvolvedTransformerBlock(d_model,
                             num_heads=nhead,
                             attn=hop_attn,
@@ -236,7 +253,6 @@ class TransformerBlock(Module):
                             context=False,
                             pkm=copy.deepcopy(self.pkm1)
                             )
-        
 
         self.gate1 = mem_norm(d_model)
         self.gate2 = mem_norm(d_model)
@@ -265,18 +281,18 @@ class TransformerBlock(Module):
         output = self.norm1(src)
         output = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.geglu1,output)
         output2 = ckpt(self.self_hop_src,output)
-        output = ckpt(self.gate1,output2,src)
+        output = ckpt(self.gate1,output2,output)
         del(output2)
 
         if self.context_exist:
             context = self.norm2(context)
             context = ckpt(self.ffd2,context) + ckpt(self.pkm2,context) + ckpt(self.geglu2,context)
             context_ = ckpt(self.self_hop_context,context)
-            context = ckpt(self.context_gate,context,context_)
+            context = ckpt(self.context_gate,context_,context)
             del(context_)
-            context = Positional_Encoding(context) if not self.deberta_mode else context
+            context = Positional_Encoding(context)
 
-        output = Positional_Encoding(output) if not self.deberta_mode else output
+        output = Positional_Encoding(output)
         output = ckpt(self.attn,output,context)
         output = self.dropout(output)
         src = ckpt(self.gate2,output,src)
@@ -366,6 +382,7 @@ class TransformerModel(Module):
                     repeated_deberta_layers: int = 2,
                     max_seq_len=2**17,
                     discriminator: bool = False,
+                    seq_scale_down: int = 8,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
@@ -453,8 +470,10 @@ class TransformerModel(Module):
         self.alt_mem = None
         self.alt_mem_with_primary_mem = False
 
+        self.seq_scale_down = seq_scale_down
+
         self.scale_down_conv = nn.Sequential(
-            nn.Conv1d(ninp,ninp,24,8),
+            nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
             nn.Conv1d(ninp,ninp,1),
         )
         self.scale_down_fno = FNO1d(nhead,nhead,inp_dim=ninp,out_dim=ninp,ffd_dim=nhid)
@@ -463,7 +482,7 @@ class TransformerModel(Module):
 
         self.scale_up_conv = nn.Sequential(
             nn.Conv1d(ninp,ninp,1),
-            nn.ConvTranspose1d(ninp,ninp,24,8),
+            nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
             nn.Conv1d(ninp,ninp,1),
         )
 
@@ -745,7 +764,7 @@ class TransformerModel(Module):
                     mem: Optional[Tensor] = None, 
                     context_mem: Optional[Tensor] = None,
                     alt_mem_with_primary_key: Optional[bool] = None,
-                    assign_to_alt_mem: bool = True,
+                    assign_to_alt_mem: bool = False,
                     return_mem: bool = True,
                     generator: bool = True,
                     discriminator: bool = False,
@@ -759,8 +778,8 @@ class TransformerModel(Module):
 
         if generator:
             src = rearrange(src,'b n d -> b d n')
-            if src.size(2)%8 != 0:
-                src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=8-src.size(2)%8).to(self.device)),dim=2)
+            if src.size(2)%self.seq_scale_down != 0:
+                src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=self.seq_scale_down-src.size(2)%self.seq_scale_down).to(self.device)),dim=2)
 
             src = ckpt(self.scale_down_conv,src)
             src = rearrange(src,'b d n -> b n d')
@@ -769,8 +788,8 @@ class TransformerModel(Module):
             if self.encoder_decoder:
                 context = ckpt(self.embedding_encoder,context)
                 context = context * math.sqrt(self.ninp)
-                if context.size(2)%8!=0:
-                    context = torch.cat((rearrange(context,'b n d -> b d n'),repeat(self.padding_for_conv_scale,'d -> b d n',b=context.size(0),n=8-context.size(2)%8).to(self.device)),dim=2)
+                if context.size(2)%self.seq_scale_down!=0:
+                    context = torch.cat((rearrange(context,'b n d -> b d n'),repeat(self.padding_for_conv_scale,'d -> b d n',b=context.size(0),n=self.seq_scale_down-context.size(2)%self.seq_scale_down).to(self.device)),dim=2)
 
                 context = ckpt(self.scale_down_conv,context)
                 context = rearrange(context,'b d n -> b n d')

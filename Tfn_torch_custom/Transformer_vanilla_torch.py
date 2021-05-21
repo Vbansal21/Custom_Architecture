@@ -36,7 +36,7 @@ try:
     tokenizer = torch.load("models/tokenizer.tar")
 except:
     tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**16,reserved_tokens=[
-    '<pad>','<unk>','<s>','</s>','<copy>','<mask>','<segment>','</segment>','<non_text_content>','</non_text_content>'
+    '[pad]','[unk]','[s]','[_s]','[copy]','[mask]','[segment]','[_segment]','[non_text_content]','[_non_text_content]'
     ])
     torch.save(tokenizer,"models/tokenizer.tar")
 vocab = tokenizer.vocab
@@ -54,14 +54,16 @@ eval_batch_size = batch_size
 ntokens = tokenizer.vocab_size
 emsize = 2048//4
 nhid = emsize * 4
-nlayers = 2
-deberta_layers = 2
+nlayers = 4
+deberta_layers = 8
 repeated_deberta_layers = 1
 nhead = 16
 dropout = 0.3
-mem_tokens = 256
-bptt = (1024-1) - mem_tokens
+mem_tokens = 128
+bptt = (1024-1+mem_tokens) - mem_tokens
 max_seq_len = 2**16
+discriminator_enabled = False
+seq_scale_down = 8
 
 use_deepspeed = False
 
@@ -128,9 +130,38 @@ if use_deepspeed:
 
     with deepspeed.zero.Init(mem_efficient_linear=True,remote_device='nvme',config=deepspeed_args,enabled=True):
         #model = PerformerLM(num_tokens=ntokens,max_seq_len=2**17,dim=emsize,depth=nlayers,heads=nhead,causal=True,use_rezero=True,cross_attend=True)
-        model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,mem_token=mem_tokens,max_seq_len=max_seq_len).half()
+        model = TransformerModel(ntokens, 
+                                        emsize, 
+                                        nhead, 
+                                        nhid, 
+                                        nlayers, 
+                                        dropout=dropout,
+                                        deberta_layers=deberta_layers,
+                                        repeated_deberta_layers=repeated_deberta_layers,
+                                        mem_token=mem_tokens,
+                                        discriminator=discriminator_enabled,
+                                        seq_scale_down=seq_scale_down,
+                                        max_seq_len=max_seq_len
+                                ).half()
 else:
-    model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout=dropout,mem_token=mem_tokens,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_seq_len=max_seq_len,discriminator=True,device=device).to(device)
+    model = TransformerModel(ntokens, 
+                                    emsize, 
+                                    nhead, 
+                                    nhid, 
+                                    nlayers, 
+                                    dropout=dropout,
+                                    mem_token=mem_tokens,
+                                    deberta_layers=deberta_layers,
+                                    repeated_deberta_layers=repeated_deberta_layers,
+                                    max_seq_len=max_seq_len,
+                                    discriminator=discriminator_enabled,
+                                    seq_scale_down=seq_scale_down,
+                                    device=device
+                            ).to(device)
+
+def data_process(raw_text_iter):
+  data = tokenizer.encode(raw_text_iter)
+  return torch.tensor(data)
 
 def random_mask_shuffle_encoder(
                             inp: Tensor,
@@ -212,8 +243,8 @@ def prepare_batch(source):
 
 def get_batch(source,j,bptt=bptt):
     seq_len = min(bptt -1 , source.size(2) - j -1 -1)
-    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=15,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=2,shuffle_together_nos=5).to(device)
-    data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=2,shuffle_together_nos=5).to(device)
+    data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device)),dim=1).contiguous()
     targets = source[1,:,j:j+seq_len].to(device)
     targets = torch.cat((targets,torch.full((targets.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
     return data,targets
@@ -223,27 +254,34 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.01
+lr = 0.001
 if not use_deepspeed:
-    for p in model.discriminator.parameters():
-        p.requires_grad_(False)
-    optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-    for p in model.parameters():
-        p.requires_grad_(False)
-    for p in model.discriminator.parameters():
-        p.requires_grad_(True)
-    optimizer_disc = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-    for p in model.parameters():
-        p.requires_grad_(True)
+    if discriminator_enabled:
+        for p in model.discriminator.parameters():
+            p.requires_grad_(False)
+        optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+        for p in model.parameters():
+            p.requires_grad_(False)
+        for p in model.discriminator.parameters():
+            p.requires_grad_(True)
+        optimizer_disc = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+        for p in model.parameters():
+            p.requires_grad_(True)
+    else:
+        optimizer = torch.optim.SGD(model.parameters(),lr=lr)
+        optimizer_disc = None
 else:
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
+
 a = 5000000
 b = 500
 c = 0.0
 step = 1
 lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
+
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
-scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1)
+scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
+
 load_scheduler = True
 epoch = 0
 best_val_loss = float("inf")
@@ -283,7 +321,8 @@ wandb.init(project=project_name,config={
     "total_epochs":epochs,
     "Sequence_length":bptt,
     "max_seq_len":max_seq_len,
-    "seq_scale_down":8
+    "seq_scale_down":seq_scale_down,
+    "discriminator_enabled":discriminator_enabled
 })
 
 
@@ -307,28 +346,40 @@ try:
             print("Exception",e)
             
     optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
-    optimizer_disc.load_state_dict(checkpoint_['optimizer_disc_state_dict'])
+    if discriminator_enabled:
+        optimizer_disc.load_state_dict(checkpoint_['optimizer_disc_state_dict'])
+
     step = checkpoint_['step_number']
+
     if load_scheduler:
         scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
-        scheduler_disc.load_state_dict(checkpoint_['scheduler_disc_state_dict'])
+
+        if discriminator_enabled:
+            scheduler_disc.load_state_dict(checkpoint_['scheduler_disc_state_dict'])
+
     else:
         lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
+
+        if discriminator_enabled:
+            scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1)
 
     try:
         resume_batch = checkpoint_['resume_batch']
         train_eval_event = checkpoint_['train_eval_events'] + [date_time]
     except Exception as e:
         print("Exception",e)
+        
     try:
         best_model.load_state_dict(checkpoint_['best_model_state_dict'],strict=False).to(torch.device('cpu'))
-        pass
     except Exception as e:
-        print("Exception",e)
-        pass
+        try:
+            best_model = checkpoint_['best_model'].to(torch.device('cpu'))
+        except Exception as f:
+            print("Exception",e,f)
     del(checkpoint_)
     torch.cuda.empty_cache()
+
 except Exception as e:
     print("Exception",e)
     pass
@@ -336,16 +387,11 @@ except Exception as e:
 if best_model==None:
     best_model=model
 
-def data_process(raw_text_iter):
-  data = tokenizer.encode(raw_text_iter)
-  return torch.tensor(data)
-
 try:
     processed_train_data = torch.load("models/data/"+file+"_train.tar")
     processed_test_data = torch.load("models/data/"+file+"_test.tar")
     processed_val_data = torch.load("models/data/"+file+"_val.tar")
 except:
-
     train_data = data_process(io.open(train_filepath, encoding="utf8").read()).to(device)
     val_data = data_process(io.open(valid_filepath, encoding="utf8").read()).to(device)
     test_data = data_process(io.open(test_filepath, encoding="utf8").read()).to(device)
@@ -353,8 +399,6 @@ except:
     train_data = batchify(train_data, batch_size)
     val_data = batchify(val_data, eval_batch_size)
     test_data = batchify(test_data, eval_batch_size)
-
-
 
     processed_train_data = prepare_batch(train_data)
     processed_test_data = prepare_batch(test_data)
@@ -369,14 +413,14 @@ except:
 torch.cuda.empty_cache()
 model.to(device)
 
-print(summary(model, torch.zeros([1,bptt],dtype=torch.long).to(device),None,None,None,None,False,False,True,True))
+print(summary(model, torch.zeros([1,bptt],dtype=torch.long).to(device),None,None,None,None,False,False,True,discriminator_enabled))
 
 # TODO: Setup 'curses' module to print colored text for inference output
 #import curses
-def inference(text,size=128,eval_model = best_model,reccurent_mem=None):
+def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_mem=True):
     model.eval()
+    torch.cuda.empty_cache()
     text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device )
-    #mask = eval_model.generate_square_subsequent_mask(text_input.size(1)).to(device)
     if use_deepspeed:
         with autocast():
             out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
@@ -386,10 +430,12 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None):
     result = tokenizer.decode(out)
     print("Your input:\n\t",tokenizer.decode(text_input.view(-1)))
     print("Model's Output:\n\t\t\b\b",result)
-    return mem
+    torch.cuda.empty_cache()
+    if return_mem:
+        return mem
 
 
-_ = inference("Hello World!!! This is inference function on the currently trained model")
+inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 
 
 def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,step=step):
@@ -407,6 +453,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     total_acc = 0
     total_acc_d = 0
     for batch, i in enumerate(range(0, processed_train_data.size(2), bptt-1)):
+        step_time = time.time()
         if resume_batch != None:
             if batch < resume_batch:
                 continue
@@ -424,42 +471,57 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             model.step()
             model.zero_grad()
         else:
-            model.zero_grad()
-                
-            real_label = torch.full(targets.size(),0,dtype=torch.long,device=device)
-            real_label_gen = torch.full(data.size(),0,dtype=torch.long,device=device)
-            fake_label = torch.full(data.size(),1,dtype=torch.long,device=device)
+            if discriminator_enabled:
+                model.zero_grad()
+                    
+                real_label = torch.full(targets.size(),0,dtype=torch.long,device=device)
+                real_label_gen = torch.full(data.size(),0,dtype=torch.long,device=device)
+                fake_label = torch.full(data.size(),1,dtype=torch.long,device=device)
 
-            out_d_real = model(targets.detach(),return_mem=False,discriminator=True,generator=False)
-            loss_d_real = criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
-            loss_d_real.backward()
+                out_d_real = model(targets.detach(),return_mem=False,discriminator=True,generator=False)
+                loss_d_real = criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
+                loss_d_real.backward()
 
-            out_gan = model(data.detach(),mem=single_pass_mem,return_mem=False,discriminator=True)
-            loss_d_fake = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
-            loss_d_fake.backward(retain_graph=True)
+                out_gan = model(data.detach(),mem=single_pass_mem,return_mem=False,discriminator=True)
+                loss_d_fake = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
+                loss_d_fake.backward(retain_graph=True)
 
-            optimizer_disc.step()
-            model.zero_grad()
+                optimizer_disc.step()
+                model.zero_grad()
 
-            loss_gen = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
-            loss_gen.backward()
+                loss_gen = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
+                loss_gen.backward()
 
-            output,single_pass_mem = model(data,mem=single_pass_mem)
-            loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
-            loss.backward()
+                output,single_pass_mem = model(data,mem=single_pass_mem)
+                loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
+                loss.backward()
 
-            optimizer.step()
+                optimizer.step()
+            else:
+                model.zero_grad()
+                output,single_pass_mem = model(data,mem=single_pass_mem)
+                loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
+                loss.backward()
 
-        acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
-        acc_d = ((torch.argmax(out_d_real,dim=-1)) == real_label).sum().item()/out_d_real.size(1)
-        acc_d += ((torch.argmax(out_gan,dim=-1)) == fake_label).sum().item()/out_gan.size(1)
-        acc += ((torch.argmax(out_gan,dim=-1)) == real_label_gen).sum().item()/out_gan.size(1)
-        
+                optimizer.step()
 
-        total_acc += acc/2
-        total_acc_d += acc_d/2
-        total_loss += (loss.item() + loss_gen.item())/2
-        total_loss_d += (loss_d_fake.item() + loss_d_real.item())/2
+        if discriminator_enabled:
+            acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
+            acc_d = ((torch.argmax(out_d_real,dim=-1)) == real_label).sum().item()/out_d_real.size(1)
+            acc_d += ((torch.argmax(out_gan,dim=-1)) == fake_label).sum().item()/out_gan.size(1)
+            acc += ((torch.argmax(out_gan,dim=-1)) == real_label_gen).sum().item()/out_gan.size(1)
+
+            total_acc += acc/2
+            total_acc_d += acc_d/2
+            total_loss += (loss.item() + loss_gen.item())/2
+            total_loss_d += (loss_d_fake.item() + loss_d_real.item())/2
+        else:
+            acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
+            total_acc += acc
+            total_loss += loss.item()
+            total_acc_d = 0
+            total_loss_d = 0
+
         log_interval = 20
 
         try:
@@ -468,49 +530,58 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             ppl = -1.0
 
         total_ppl += ppl
-        loss_g = (loss.item() + loss_gen.item())/2
-        loss_d = ((loss_d_fake.item() + loss_d_real.item())/2)
+        if discriminator_enabled:
+            loss_g = (loss.item() + loss_gen.item())/2
+            loss_d = ((loss_d_fake.item() + loss_d_real.item())/2)
+        else:
+            loss_g = loss.item()
+            loss_d = 0
         inputs = "\n".join([tokenizer.decode(i) for i in data])
+        outputs = "\n".join([tokenizer.decode(torch.argmax(i,dim=-1)) for i in output])
         req_targets = "\n".join([tokenizer.decode(i) for i in targets])
-        wandb.log(
-            {
-                "Loss Generator":loss_g,
-                "Loss Discriminator":loss_d,
-                "step":step,
-                "Accuracy Generator(%)":acc*100/2,
-                "Accuracy Discriminator(%)":acc_d*100/2,
-                "epoch":epoch,
-                "batch":batch,
-                "Perplexity of Generator":ppl,
-                'Learning_Rate':scheduler.get_lr()[0],
-                "input":wandb.Html(inputs),
-                "target":wandb.Html(req_targets),
-            }
-        )
-
         del(data,targets)
         torch.cuda.empty_cache()
 
         if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
             
-            torch.save(
-            {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'best_model_state_dict': best_model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'optimizer_disc_state_dict': optimizer_disc.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'scheduler_disc_state_dict':scheduler_disc.state_dict(),
-                'best_val_loss': best_val_loss,
-                'vocab': vocab,
-                'tokenizer': tokenizer,
-                'resume_batch':batch,
-                'train_eval_events': train_eval_event,
-                'step_number': step
-            },
-            path
-            )
+            if discriminator_enabled:
+                torch.save(
+                {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'best_model_state_dict': best_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'optimizer_disc_state_dict': optimizer_disc.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scheduler_disc_state_dict':scheduler_disc.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'vocab': vocab,
+                    'tokenizer': tokenizer,
+                    'resume_batch':batch,
+                    'train_eval_events': train_eval_event,
+                    'step_number': step
+                },
+                path
+                )
+            else:
+                torch.save(
+                {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'best_model_state_dict': best_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'optimizer_disc_state_dict': None,
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scheduler_disc_state_dict':None,
+                    'best_val_loss': best_val_loss,
+                    'vocab': vocab,
+                    'tokenizer': tokenizer,
+                    'resume_batch':batch,
+                    'train_eval_events': train_eval_event,
+                    'step_number': step
+                },
+                path
+                )
             """
             ckpt_id = epoch*(processed_train_data.size(-1)//bptt) + batch
             model.save_checkpoint(path,ckpt_id,client_sd = {
@@ -530,27 +601,70 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         if step_scheduler != None:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(2)//bptt < step_scheduler):
                 scheduler.step(step)
-                scheduler_disc.step(step)
-                scheduler.step()
-                scheduler_disc.step()
+                if discriminator_enabled:
+                    scheduler_disc.step(step)
                 step += 1
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
             total_ppl /= log_interval
             elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr_g {:04.5f} | lr_d {:04.5f} | ms/batch {:08.3f} | acc_g {:3.2f}% | '
-                  'loss_g {:5.3f} | acc_d {:3.2f}% | loss_d {:5.3f} | ppl {:10.3f}'.format(
-                    epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
-                    scheduler_disc.get_lr()[0],
-                    elapsed * 1000 / log_interval,total_acc*100/log_interval,
-                    cur_loss,total_acc_d*100/log_interval,cur_loss_d,total_ppl ))
+            if discriminator_enabled:
+                print('| epoch {:3d} | {:5d}/{:5d} batches | '
+                    'lr_g {:04.5f} | lr_d {:04.5f} | ms/batch {:08.3f} | acc_g {:3.2f}% | '
+                    'loss_g {:5.3f} | acc_d {:3.2f}% | loss_d {:5.3f} | ppl {:10.3f}'.format(
+                        epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
+                        scheduler_disc.get_lr()[0],
+                        elapsed * 1000 / log_interval,total_acc*100/log_interval,
+                        cur_loss,total_acc_d*100/log_interval,cur_loss_d,total_ppl ))
+            else:
+                print('| epoch {:3d} | {:5d}/{:5d} batches | '
+                    'lr {:04.5f} | ms/batch {:08.3f} | acc {:3.2f}% | '
+                    'loss {:5.3f} | ppl {:10.3f}'.format(
+                        epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
+                        elapsed * 1000 / log_interval,total_acc*100/log_interval,
+                        cur_loss,total_ppl ))
             total_loss = 0.
             total_acc = 0.
             total_loss_d = 0.
             total_acc_d = 0.
             start_time = time.time()
+        
+        if discriminator_enabled:
+            wandb.log(
+                {
+                    "Loss Generator":loss_g,
+                    "Loss Discriminator":loss_d,
+                    "step":step,
+                    "Accuracy Generator(%)":acc*100/2,
+                    "Accuracy Discriminator(%)":acc_d*100/2,
+                    "epoch":epoch,
+                    "batch":batch,
+                    "Perplexity of Generator":ppl,
+                    'Learning_Rate':scheduler.get_lr()[0],
+                    'Time per Step':(time.time() - step_time),
+                    "input":wandb.Html(inputs),
+                    "output":wandb.Html(outputs),
+                    "target":wandb.Html(req_targets),
+                }
+            )
+        else:
+            wandb.log(
+                {
+                    "Loss Generator":loss_g,
+                    "step":step,
+                    "Accuracy Generator(%)":acc*100/2,
+                    "epoch":epoch,
+                    "batch":batch,
+                    "Perplexity of Generator":ppl,
+                    'Learning_Rate':scheduler.get_lr()[0],
+                    'Time per Step':(time.time() - step_time),
+                    "input":wandb.Html(inputs),
+                    "output":wandb.Html(outputs),
+                    "target":wandb.Html(req_targets),
+                }
+            )
+
 
 def evaluate(eval_model, data_source):
     eval_model.eval()
@@ -563,14 +677,12 @@ def evaluate(eval_model, data_source):
             if use_deepspeed:
                 with autocast():
                     output,single_pass_mem = eval_model(data,mem = single_pass_mem)
-                    output_flat = output.view(-1, ntokens)
-                    total_loss += data.size(1) * criterion(output_flat, targets).item()
-                    total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()
+                    total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
+                    total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
             else:
                 output,single_pass_mem = eval_model(data,mem = single_pass_mem)
-                output_flat = output.view(-1, ntokens)
-                total_loss += data.size(1) * criterion(output_flat, targets).item()
-                total_acc += ((torch.argmax(output.view(-1,ntokens),dim=-1)) == targets).sum().item()
+                total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
+                total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
     return total_loss / (data_source.size(2)), total_acc/data_source.size(2)
 
 while True:
@@ -593,7 +705,8 @@ while True:
         best_val_loss = val_loss
         best_model = model
 
-        torch.save(
+        if discriminator_enabled:
+            torch.save(
             {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -602,6 +715,25 @@ while True:
                 'optimizer_disc_state_dict': optimizer_disc.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'scheduler_disc_state_dict':scheduler_disc.state_dict(),
+                'best_val_loss': best_val_loss,
+                'vocab': vocab,
+                'tokenizer': tokenizer,
+                'resume_batch':0,
+                'train_eval_events': train_eval_event,
+                'step_number': step
+            },
+            path
+            )
+        else:
+            torch.save(
+            {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'best_model_state_dict': best_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'optimizer_disc_state_dict': None,
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scheduler_disc_state_dict':None,
                 'best_val_loss': best_val_loss,
                 'vocab': vocab,
                 'tokenizer': tokenizer,
