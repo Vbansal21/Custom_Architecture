@@ -24,6 +24,7 @@ from mogrifier import Mogrifier
 from .evolved_transformer_block import EvolvedTransformerBlock
 from .product_key_memory import PKM
 from .hopfield_modules import Hopfield, HopfieldLayer, HopfieldPooling
+from .hopfield_modules.transformer import HopfieldEncoderLayer
 from .performer_pytorch import SelfAttention
 
 from .fourier_1d import FNO1d
@@ -149,7 +150,7 @@ class GRUGating(nn.Module):
 class mem_norm(Module):
     def __init__(self, dim):
         super().__init__()
-        self.gru = GRUGating(dim, HopfieldLayer(input_size=dim,pattern_size=max(dim//16,32)))
+        self.gru = GRUGating(dim,HopfieldEncoderLayer(HopfieldLayer(input_size=dim,pattern_size=max(dim//16,32))) )
         self.proj =nn.Sequential(
                                 EvolvedTransformerBlock(
                                     dim,
@@ -198,7 +199,7 @@ class AbsolutePositionalEmbedding(Module):
             s = x.size(1)
             multiplier = 1/(2**0.5)
             n = []
-            
+
             for i in range(0,s,self.max_seq_len):
                 tmp = torch.arange(i,self.max_seq_len+i, device = x.device)
                 n.append(repeat(self.emb(tmp),'n d -> b n d',b=x.size(0)) * multiplier)
@@ -220,6 +221,7 @@ class TransformerBlock(Module):
                      nhead, 
                      dim_feedforward=2048, 
                      dropout=0.5, 
+                     dropout_hopfield=0.7,
                      activation="gelu",
                      context=False,
                      mem_kv=64*2,
@@ -254,14 +256,15 @@ class TransformerBlock(Module):
             )
 
         hop_attn = nn.Sequential(
-                                nn.Linear(d_model,d_model//4),
-                                HopfieldLayer(
-                                            input_size=d_model//4,
+                                nn.Linear(d_model,d_model),
+                                HopfieldEncoderLayer(HopfieldLayer(
+                                            input_size=d_model,
                                             pattern_size=hop_pattern_size,
-                                            num_heads=nhead//4,
-                                            dropout=dropout
+                                            num_heads=nhead,
+                                            dropout=dropout_hopfield
                                         ),
-                                nn.Linear(d_model//4,d_model)
+                                        dim_feedforward=dim_feedforward),
+                                nn.Linear(d_model,d_model)
                                 )
         fno = EvolvedTransformerBlock(
                                         d_model,
@@ -272,7 +275,7 @@ class TransformerBlock(Module):
                                                     out_dim=d_model,
                                                     ffd_dim=d_model
                                                 ),
-                                        ffd=GEGLU(d_model,d_model),
+                                        ffd=copy.deepcopy(self.geglu1),
                                         context=False,
                                     )
         if not deberta_mode:
@@ -286,7 +289,8 @@ class TransformerBlock(Module):
                                                     generalized_attention=True,
                                                     to_k=copy.deepcopy(fno),
                                                     to_q=copy.deepcopy(fno),
-                                                    to_v=copy.deepcopy(hop_attn)
+                                                    to_v=copy.deepcopy(hop_attn),
+                                                    to_out=copy.deepcopy(fno)
                                                 ),
                                 ffd=copy.deepcopy(self.geglu1),
                                 context=context,
@@ -302,14 +306,14 @@ class TransformerBlock(Module):
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
-                                                    generalized_attention=True,
+                                                    generalized_attention=False,
                                                     to_q=fno,
                                                     to_k=copy.deepcopy(fno),
                                                     to_v=copy.deepcopy(hop_attn),
                                                     to_out=copy.deepcopy(fno)
                                                 ),
                                 ffd=copy.deepcopy(self.geglu1),
-                                context=context,
+                                context=True,
                                 pkm=copy.deepcopy(self.pkm1)
                                 )
 
@@ -406,13 +410,14 @@ class TransformerModule(ModuleList):
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
         output = src
+        ctxt = context
 
         if self.enable_encoder:
             for enc in self.encoder:
-                context = ckpt(enc,context)
+                ctxt = ckpt(enc,ctxt)
             for i in range(self.num_layers):
                 output = ckpt(self.decoder_self[i],output)
-                output = ckpt(self.decoder_cross[i],output,context)
+                output = ckpt(self.decoder_cross[i],output,ctxt)
         else:
             for dec in self.decoder:
                 output = ckpt(dec,output)
