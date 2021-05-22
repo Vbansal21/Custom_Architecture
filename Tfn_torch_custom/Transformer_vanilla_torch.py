@@ -1,32 +1,29 @@
 import io
 import time
-import copy
+#import copy
 import math
 import torch
 import random,wandb
 from torch import nn
-import scripts.model
 from torch import Tensor
 from einops import rearrange
 #from performer_torch import PerformerLM
 from pytorch_model_summary import summary
-from scripts.model import TransformerModel
 from torchnlp.encoders.text import SubwordEncoder
 from torchtext.utils import download_from_url, extract_archive
-from typing import Tuple, Optional, Any, NoReturn, Union, Literal
+#from typing import Tuple, Optional, Any, NoReturn, Union, Literal
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #device = torch.device("cpu")
+torch.cuda._lazy_init()
 
 torch.autograd.set_detect_anomaly(True)
 
 #scaler = torch.cuda.amp.GradScaler(init_scale=2**3)
 autocast = torch.cuda.amp.autocast
 
-scripts.model.checkpointed = True
-scripts.model.device = device
 
-file = "wikitextv2"
+file = "wikitextv103"
 if file == "wikitextv2":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
 elif file == "wikitextv103":
@@ -36,11 +33,10 @@ try:
     tokenizer = torch.load("models/tokenizer.tar")
 except:
     tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**16,reserved_tokens=[
-    '[pad]','[unk]','[s]','[_s]','[copy]','[mask]','[segment]','[_segment]','[non_text_content]','[_non_text_content]'
+    '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
     ])
     torch.save(tokenizer,"models/tokenizer.tar")
 vocab = tokenizer.vocab
-
 
 def batchify(data, bsz):
     nbatch = data.size(0) // bsz
@@ -51,19 +47,21 @@ def batchify(data, bsz):
 batch_size = 1
 eval_batch_size = batch_size
 
+from scripts.model import TransformerModel
+
 ntokens = tokenizer.vocab_size
 emsize = 2048//4
-nhid = emsize * 4
-nlayers = 4
-deberta_layers = 8
+nhid = emsize * 8
+nlayers = 1
+deberta_layers = 3
 repeated_deberta_layers = 1
 nhead = 16
 dropout = 0.3
-mem_tokens = 128
-bptt = (1024-1+mem_tokens) - mem_tokens
+mem_tokens = 512
+bptt = (1024*1-1+mem_tokens) - mem_tokens
 max_seq_len = 2**16
 discriminator_enabled = False
-seq_scale_down = 8
+seq_scale_down = 32
 
 use_deepspeed = False
 
@@ -251,10 +249,10 @@ def get_batch(source,j,bptt=bptt):
 
 #print(sum(p.numel() for p in model.parameters()))
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
-path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
+path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.001
+lr = 1 * 3
 if not use_deepspeed:
     if discriminator_enabled:
         for p in model.discriminator.parameters():
@@ -274,7 +272,7 @@ else:
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
 
 a = 5000000
-b = 500
+b = 1000
 c = 0.0
 step = 1
 lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
@@ -325,6 +323,8 @@ wandb.init(project=project_name,config={
     "discriminator_enabled":discriminator_enabled
 })
 
+wandb.watch(model)
+
 
 try:
     try:
@@ -371,7 +371,8 @@ try:
         print("Exception",e)
         
     try:
-        best_model.load_state_dict(checkpoint_['best_model_state_dict'],strict=False).to(torch.device('cpu'))
+        best_model.load_state_dict(checkpoint_['best_model_state_dict'],strict=False)
+        best_model = best_model.to(torch.device('cpu'))
     except Exception as e:
         try:
             best_model = checkpoint_['best_model'].to(torch.device('cpu'))
@@ -436,9 +437,9 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
 
 
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
+model_train_step_inbuilt = True
 
-
-def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,step=step):
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,step_=step):
     model.train() 
     total_loss = 0.
     total_loss_d = 0.
@@ -461,85 +462,93 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             single_pass_mem = None
         data, targets = get_batch(processed_train_data, i)
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        if not model_train_step_inbuilt:
+            # TODO: Remove and convert to fully inbuilt module
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
-        if use_deepspeed:
-            with autocast():
-                output,single_pass_mem = model(data,mem=single_pass_mem)
-                loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
-            model.backward(loss)
-            model.step()
-            model.zero_grad()
-        else:
-            if discriminator_enabled:
+            if use_deepspeed:
+                with autocast():
+                    output,single_pass_mem = model(data,mem=single_pass_mem)
+                    loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
+                model.backward(loss)
+                model.step()
                 model.zero_grad()
-                    
-                real_label = torch.full(targets.size(),0,dtype=torch.long,device=device)
-                real_label_gen = torch.full(data.size(),0,dtype=torch.long,device=device)
-                fake_label = torch.full(data.size(),1,dtype=torch.long,device=device)
-
-                out_d_real = model(targets.detach(),return_mem=False,discriminator=True,generator=False)
-                loss_d_real = criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
-                loss_d_real.backward()
-
-                out_gan = model(data.detach(),mem=single_pass_mem,return_mem=False,discriminator=True)
-                loss_d_fake = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
-                loss_d_fake.backward(retain_graph=True)
-
-                optimizer_disc.step()
-                model.zero_grad()
-
-                loss_gen = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
-                loss_gen.backward()
-
-                output,single_pass_mem = model(data,mem=single_pass_mem)
-                loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
-                loss.backward()
-
-                optimizer.step()
             else:
-                model.zero_grad()
-                output,single_pass_mem = model(data,mem=single_pass_mem)
-                loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
-                loss.backward()
+                if discriminator_enabled:
+                    model.zero_grad()
+                        
+                    real_label = torch.full(targets.size(),0,dtype=torch.long,device=device)
+                    real_label_gen = torch.full(data.size(),0,dtype=torch.long,device=device)
+                    fake_label = torch.full(data.size(),1,dtype=torch.long,device=device)
 
-                optimizer.step()
+                    out_d_real = model(targets.detach(),return_mem=False,discriminator=True,generator=False)
+                    loss_d_real = criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
+                    loss_d_real.backward()
 
-        if discriminator_enabled:
-            acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
-            acc_d = ((torch.argmax(out_d_real,dim=-1)) == real_label).sum().item()/out_d_real.size(1)
-            acc_d += ((torch.argmax(out_gan,dim=-1)) == fake_label).sum().item()/out_gan.size(1)
-            acc += ((torch.argmax(out_gan,dim=-1)) == real_label_gen).sum().item()/out_gan.size(1)
+                    out_gan = model(data.detach(),mem=single_pass_mem,return_mem=False,discriminator=True)
+                    loss_d_fake = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
+                    loss_d_fake.backward(retain_graph=True)
 
-            total_acc += acc/2
-            total_acc_d += acc_d/2
-            total_loss += (loss.item() + loss_gen.item())/2
-            total_loss_d += (loss_d_fake.item() + loss_d_real.item())/2
+                    optimizer_disc.step()
+                    model.zero_grad()
+
+                    loss_gen = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
+                    loss_gen.backward()
+
+                    output,single_pass_mem = model(data,mem=single_pass_mem)
+                    loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
+                    loss.backward()
+
+                    optimizer.step()
+                else:
+                    model.zero_grad()
+                    output,single_pass_mem = model(data,mem=single_pass_mem)
+                    torch.cuda.empty_cache()
+                    loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
+                    loss.backward()
+
+                    optimizer.step()
+
+            if discriminator_enabled:
+                acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
+                acc_d = ((torch.argmax(out_d_real,dim=-1)) == real_label).sum().item()/out_d_real.size(1)
+                acc_d += ((torch.argmax(out_gan,dim=-1)) == fake_label).sum().item()/out_gan.size(1)
+                acc += ((torch.argmax(out_gan,dim=-1)) == real_label_gen).sum().item()/out_gan.size(1)
+
+                total_acc += acc/2
+                total_acc_d += acc_d/2
+                total_loss += (loss.item() + loss_gen.item())/2
+                total_loss_d += (loss_d_fake.item() + loss_d_real.item())/2
+            else:
+                acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
+                total_acc += acc
+                total_loss += loss.item()
+                total_acc_d = 0
+                total_loss_d = 0
+            if discriminator_enabled:
+                loss_g = (loss.item() + loss_gen.item())/2
+                loss_d = ((loss_d_fake.item() + loss_d_real.item())/2)
+            else:
+                loss_g = loss.item()
+                loss_d = 0
+            try:
+                ppl = math.exp(loss.item())
+            except:
+                ppl = -1.0
         else:
-            acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
-            total_acc += acc
-            total_loss += loss.item()
-            total_acc_d = 0
-            total_loss_d = 0
+            outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_ = model.train_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer)
 
-        log_interval = 20
+            try:
+                ppl = math.exp(losses['loss'])
+            except:
+                ppl = -1.0
 
-        try:
-            ppl = math.exp(loss.item())
-        except:
-            ppl = -1.0
-
+        log_interval = 200
         total_ppl += ppl
-        if discriminator_enabled:
-            loss_g = (loss.item() + loss_gen.item())/2
-            loss_d = ((loss_d_fake.item() + loss_d_real.item())/2)
-        else:
-            loss_g = loss.item()
-            loss_d = 0
         inputs = "\n".join([tokenizer.decode(i) for i in data])
-        outputs = "\n".join([tokenizer.decode(torch.argmax(i,dim=-1)) for i in output])
+        outputs = "\n".join([tokenizer.decode(torch.argmax(i,dim=-1)) for i in outputs['output']])
         req_targets = "\n".join([tokenizer.decode(i) for i in targets])
-        del(data,targets)
+        del(data,targets,outputs,losses)
         torch.cuda.empty_cache()
 
         if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
@@ -559,7 +568,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     'tokenizer': tokenizer,
                     'resume_batch':batch,
                     'train_eval_events': train_eval_event,
-                    'step_number': step
+                    'step_number': step_
                 },
                 path
                 )
@@ -578,7 +587,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     'tokenizer': tokenizer,
                     'resume_batch':batch,
                     'train_eval_events': train_eval_event,
-                    'step_number': step
+                    'step_number': step_
                 },
                 path
                 )
@@ -600,10 +609,11 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             intermediate_save_time = time.time()
         if step_scheduler != None:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(2)//bptt < step_scheduler):
-                scheduler.step(step)
+                scheduler.step(step_)
                 if discriminator_enabled:
-                    scheduler_disc.step(step)
-                step += 1
+                    scheduler_disc.step(step_)
+                step_ += 1
+                step = step_
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
@@ -613,21 +623,22 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '
                     'lr_g {:04.5f} | lr_d {:04.5f} | ms/batch {:08.3f} | acc_g {:3.2f}% | '
                     'loss_g {:5.3f} | acc_d {:3.2f}% | loss_d {:5.3f} | ppl {:10.3f}'.format(
-                        epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
-                        scheduler_disc.get_lr()[0],
+                        epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_last_lr()[0],
+                        scheduler_disc.get_last_lr()[0],
                         elapsed * 1000 / log_interval,total_acc*100/log_interval,
                         cur_loss,total_acc_d*100/log_interval,cur_loss_d,total_ppl ))
             else:
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '
                     'lr {:04.5f} | ms/batch {:08.3f} | acc {:3.2f}% | '
                     'loss {:5.3f} | ppl {:10.3f}'.format(
-                        epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_lr()[0],
+                        epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_last_lr()[0],
                         elapsed * 1000 / log_interval,total_acc*100/log_interval,
                         cur_loss,total_ppl ))
             total_loss = 0.
             total_acc = 0.
             total_loss_d = 0.
             total_acc_d = 0.
+            total_ppl = 0.
             start_time = time.time()
         
         if discriminator_enabled:
@@ -635,13 +646,13 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 {
                     "Loss Generator":loss_g,
                     "Loss Discriminator":loss_d,
-                    "step":step,
+                    "step":step_,
                     "Accuracy Generator(%)":acc*100/2,
                     "Accuracy Discriminator(%)":acc_d*100/2,
                     "epoch":epoch,
                     "batch":batch,
                     "Perplexity of Generator":ppl,
-                    'Learning_Rate':scheduler.get_lr()[0],
+                    'Learning_Rate':scheduler.get_last_lr()[0],
                     'Time per Step':(time.time() - step_time),
                     "input":wandb.Html(inputs),
                     "output":wandb.Html(outputs),
@@ -652,12 +663,12 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             wandb.log(
                 {
                     "Loss Generator":loss_g,
-                    "step":step,
+                    "step":step_,
                     "Accuracy Generator(%)":acc*100/2,
                     "epoch":epoch,
                     "batch":batch,
                     "Perplexity of Generator":ppl,
-                    'Learning_Rate':scheduler.get_lr()[0],
+                    'Learning_Rate':scheduler.get_last_lr()[0],
                     'Time per Step':(time.time() - step_time),
                     "input":wandb.Html(inputs),
                     "output":wandb.Html(outputs),
@@ -692,7 +703,7 @@ while True:
         epoch +=1
     step=step
     epoch_start_time = time.time()
-    train(resume_batch=resume_batch)
+    train(resume_batch=resume_batch,step_=step)
     resume_batch = 0
     val_loss, val_acc = evaluate(model, processed_val_data)
     print('-' * 110)

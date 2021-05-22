@@ -1,10 +1,14 @@
 import math
+#import profile
 from sympy import Nand
 import torch
 from torch import tensor
 import torch.nn as nn
 import random
 import torch.nn.functional as F
+import time
+
+from memory_profiler import profile
 
 import copy
 from typing import Tuple, Optional, Any, NoReturn, Union, Literal, List
@@ -14,13 +18,14 @@ from torch.nn.modules.container import ModuleList, Module
 from torch.nn.modules.dropout import Dropout
 
 from einops import repeat,rearrange
+from mogrifier import Mogrifier
 
-from ET_torch.models.evolved_transformer_block import EvolvedTransformerBlock
-from product_key_memory import PKM
-from hopfield_modules import Hopfield, HopfieldLayer, HopfieldPooling
-from performer_torch import SelfAttention
+from .evolved_transformer_block import EvolvedTransformerBlock
+from .product_key_memory import PKM
+from .hopfield_modules import Hopfield, HopfieldLayer, HopfieldPooling
+from .performer_pytorch import SelfAttention
 
-from fourier_neural_operator.fourier_1d import FNO1d
+from .fourier_1d import FNO1d
 
 from torchnlp.encoders.text import SubwordEncoder
 import torchnlp
@@ -94,33 +99,85 @@ class GEGLU(Module):
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim = -1)
         return x * F.gelu(gate)
+        
+
+class nBRC(nn.Module):
+    def __init__(self, dims, hidden_dims):
+        super().__init__()
+        self.Ua = nn.Linear(dims, hidden_dims)
+        self.Wa = nn.Linear(dims, hidden_dims)
+        self.Uc = nn.Linear(dims, hidden_dims)
+        self.Wc = nn.Linear(dims, hidden_dims)
+        self.U  = nn.Linear(dims, hidden_dims)
+
+    def forward(self, x, h):
+        l = lambda linear, tensor: F.linear(tensor, linear.weight.clone(), linear.bias.clone())
+
+        a = 1 + torch.tanh(l(self.Ua, x) + l(self.Wa, h))
+        c = torch.sigmoid(l(self.Uc, x) + l(self.Wc, h))
+        return c * h + (1 - c) * torch.tanh(l(self.U, x) + a * h)
+
+class GRUGating(nn.Module):
+    def __init__(self, dim, fn, mogrify = False):
+        super().__init__()
+        self.dim = dim
+        self.fn = fn
+        self.gru = nBRC(dim, dim)
+        self.mogrify = Mogrifier(dim, factorize_k = dim // 4) if mogrify else None
+
+    def forward(self, x, z=None, **kwargs):
+        shape = x.shape
+        dim = self.dim
+
+        if z==None:
+            z = x
+
+        y = self.fn(z, **kwargs)
+
+        if self.mogrify is not None:
+            y, x = self.mogrify(y, x)
+
+        gated_output = self.gru(
+            y.reshape(-1, dim),
+            x.reshape(-1, dim)
+        )
+
+        return gated_output.reshape(shape)
+
 
 class mem_norm(Module):
     def __init__(self, dim):
         super().__init__()
-        self.gru = nn.GRUCell(dim, dim)
-        self.proj = nn.Sequential(
-                                nn.Linear(dim,dim//4),
-                                HopfieldLayer(
-                                            input_size=dim//4,
-                                            pattern_size=dim//4,
-                                            num_heads=dim//16,
-                                            dropout=0
-                                        ),
-                                nn.Linear(dim//4,dim*2)
+        self.gru = GRUGating(dim, HopfieldLayer(input_size=dim,pattern_size=max(dim//16,32)))
+        self.proj =nn.Sequential(
+                                EvolvedTransformerBlock(
+                                    dim,
+                                    attn=FNO1d(dim//4,
+                                                    dim//4,
+                                                    inp_dim=dim,
+                                                    out_dim=dim,
+                                                    ffd_dim=dim
+                                                ),
+                                    ffd=GEGLU(dim,dim),
+                                    context=False,
+                                    pkm=PKM(dim,num_keys=max(dim//16,32))
+                                ),
+                                nn.Linear(dim,dim*2)
                                 )
         self.g_0 = nn.Parameter(torch.zeros(1))
         self.g_1 = nn.Parameter(torch.zeros(1))
         self.norm = RMSNorm(dim)
 
     def forward(self, x, residual):
-        gru_out = self.gru(
-            rearrange(x, 'b n d -> (b n) d'),
-            rearrange(residual, 'b n d -> (b n) d')
-        ).reshape_as(x)
-        gated_output,gate = self.proj(gru_out).chunk(2,dim=-1)
-        x = ((gated_output * self.g_0) + x) * (F.gelu(gate) * self.g_1)
-        return self.norm(x)+residual
+        gru_out = ckpt(self.gru,
+            #rearrange(x, 'b n d -> (b n) d'),
+            #rearrange(res, 'b n d -> (b n) d')
+            x,
+            residual
+        ).reshape_as(x) * self.g_1
+        gated_output,gate = ckpt(self.proj,gru_out).chunk(2,dim=-1)
+        x = ((gated_output * self.g_0) * F.gelu(gate)) + x
+        return ckpt(self.norm,x)+residual
 
 
 class AbsolutePositionalEmbedding(Module):
@@ -156,15 +213,16 @@ class TransformerBlock(Module):
                      dropout=0.5, 
                      activation="gelu",
                      context=False,
-                     mem_kv=64,
-                     hop_pattern_size=64,
-                     pkm_keys=64,
+                     mem_kv=64*2,
+                     hop_pattern_size=64*2,
+                     pkm_keys=64*2,
                      deberta_mode=False
                 ):
         super(TransformerBlock, self).__init__()
 
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
+        self.norm3 = RMSNorm(d_model)
         self.dropout = Dropout(dropout)
 
         self.deberta_mode = deberta_mode
@@ -255,7 +313,6 @@ class TransformerBlock(Module):
                             )
 
         self.gate1 = mem_norm(d_model)
-        self.gate2 = mem_norm(d_model)
 
         self.context_exist = context
         if context:
@@ -272,30 +329,30 @@ class TransformerBlock(Module):
                                 context=False,
                                 pkm=copy.deepcopy(self.pkm1)
                                 )
-            self.context_gate = mem_norm(d_model)
+            self.ctxt_norm = copy.deepcopy(self.norm1)
         
 
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
 
         output = self.norm1(src)
+        output = Positional_Encoding(output)
         output = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.geglu1,output)
         output2 = ckpt(self.self_hop_src,output)
-        output = ckpt(self.gate1,output2,output)
+        output = ckpt(self.norm3,(output+output2))
         del(output2)
 
         if self.context_exist:
             context = self.norm2(context)
+            context = Positional_Encoding(context)
             context = ckpt(self.ffd2,context) + ckpt(self.pkm2,context) + ckpt(self.geglu2,context)
             context_ = ckpt(self.self_hop_context,context)
-            context = ckpt(self.context_gate,context_,context)
+            context = ckpt(self.ctxt_norm,(context_+context))
             del(context_)
-            context = Positional_Encoding(context)
 
-        output = Positional_Encoding(output)
         output = ckpt(self.attn,output,context)
         output = self.dropout(output)
-        src = ckpt(self.gate2,output,src)
+        src = ckpt(self.gate1,output,src)
         del(output)
         return src
 
@@ -325,16 +382,16 @@ class TransformerModule(ModuleList):
         d_model = d_model
         self.num_layers = num_layers
         
-    def pretrained_layer_multiplier(self,num=1):
+    def pretrained_layer_multiplier(self,num=1,deb_num=1):
         self.num_layers *= num
         if self.enable_encoder:
             self.encoder = nn.ModuleList([copy.deepcopy(i) for i in self.encoder] * num)
             self.decoder_self = nn.ModuleList([copy.deepcopy(i) for i in self.decoder_self] * num)
             self.decoder_cross = nn.ModuleList([copy.deepcopy(i) for i in self.decoder_cross] * num)
-            self.deberta_layers = nn.ModuleList([copy.deepcopy(i) for i in self.deberta_layers] * num)
+            self.deberta_layers = nn.ModuleList([copy.deepcopy(i) for i in self.deberta_layers] * deb_num)
         else:
             self.decoder = nn.ModuleList([copy.deepcopy(i) for i in self.decoder] * num)
-            self.deberta_layers = nn.ModuleList([copy.deepcopy(i) for i in self.deberta_layers] * num)
+            self.deberta_layers = nn.ModuleList([copy.deepcopy(i) for i in self.deberta_layers] * deb_num)
             
     def convert_decoder_only_to_encoder_decoder(self):
         self.enable_encoder = True
@@ -366,6 +423,7 @@ class TransformerModule(ModuleList):
 
 class TransformerModel(Module):
 
+    @profile
     def __init__(self, 
                     ntoken: int, 
                     ninp: int, 
@@ -393,9 +451,9 @@ class TransformerModel(Module):
         self.embedding_encoder = nn.Sequential(
                 nn.Embedding(ntoken, ninp,padding_idx=padding_idx),
                 _get_activation_fn(activation),
-                nn.Linear(ninp,nhid*2),
+                nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
-                nn.Linear(nhid*2,ninp),
+                nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
             )
 
@@ -404,17 +462,17 @@ class TransformerModel(Module):
         self.ntokens = ntoken
         
         self.decoder = nn.Sequential(
-                nn.Linear(ninp,nhid*2),
+                nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
-                nn.Linear(nhid*2,ninp),
+                nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
                 nn.Linear(ninp,ntoken)
             )
 
         self.ffd1 = nn.Sequential(
-            nn.Linear(ninp,nhid*2),
+            nn.Linear(ninp,nhid),
             _get_activation_fn(activation),
-            nn.Linear(nhid*2,ninp),
+            nn.Linear(nhid,ninp),
             _get_activation_fn(activation)
         )
         self.ffd2 = copy.deepcopy(self.ffd1)
@@ -446,23 +504,23 @@ class TransformerModel(Module):
         self.discriminator_enabled = discriminator
         if discriminator:
             self.discriminator = nn.Sequential(
-                nn.Linear(ninp,nhid*2),
+                nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
-                nn.Linear(nhid*2,ninp),
+                nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
-                nn.Linear(ninp,nhid*2),
+                nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
-                nn.Linear(nhid*2,ninp),
+                nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
                 TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len),
                 _get_activation_fn(activation),
-                nn.Linear(ninp,nhid*2),
+                nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
-                nn.Linear(nhid*2,ninp),
+                nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
-                nn.Linear(ninp,nhid*2),
+                nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
-                nn.Linear(nhid*2,ninp),
+                nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
                 nn.Linear(ninp,2)
             )
@@ -476,7 +534,7 @@ class TransformerModel(Module):
             nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
             nn.Conv1d(ninp,ninp,1),
         )
-        self.scale_down_fno = FNO1d(nhead,nhead,inp_dim=ninp,out_dim=ninp,ffd_dim=nhid)
+        self.scale_down_fno = FNO1d(nhead,nhead,inp_dim=ninp,out_dim=ninp,ffd_dim=ninp)
 
         self.padding_for_conv_scale = nn.Parameter(torch.randn((1,ninp))).reshape(-1)
 
@@ -486,9 +544,9 @@ class TransformerModel(Module):
             nn.Conv1d(ninp,ninp,1),
         )
 
-        self.scale_up_fno = FNO1d(nhead,nhead,inp_dim=ninp,out_dim=ninp,ffd_dim=nhid)
+        self.scale_up_fno = FNO1d(nhead,nhead,inp_dim=ninp,out_dim=ninp,ffd_dim=ninp)
 
-        self.to(device)
+        #self.to(device)
         self.device = device
         self.init_weights()
 
@@ -499,8 +557,8 @@ class TransformerModel(Module):
     def __len__(self) -> int:
         return sum(p.numel() for p in self.parameters())
             
-    def multiply_pretrained_transformer_layers(self,num: Optional[int] = 1) -> NoReturn :
-        self.transformer_encoder.pretrained_layer_multiplier(num)
+    def multiply_pretrained_transformer_layers(self,num: int = 1,deb_num: int = 1) -> NoReturn :
+        self.transformer_encoder.pretrained_layer_multiplier(num,deb_num)
 
     def convert_decoder_only_to_encoder_decoder(self) -> NoReturn:
         self.transformer_encoder.convert_decoder_only_to_encoder_decoder()
@@ -754,8 +812,127 @@ class TransformerModel(Module):
             else:
                 return self.optimizer,self.scheduler
 
-    def train_step():
-        pass
+    def train_step(self,
+                    data,
+                    targets,
+                    loss_criterion,
+                    total_acc=0.,
+                    total_acc_d=0.,
+                    total_loss=0.,
+                    total_loss_d=0.,
+                    mem_tokens=None,
+                    opt=None,
+                    opt_disc=None,
+                    grad_clip=4.0,
+                    deepspeed_enabled=False,
+                    autocast_enabled=False,
+                ):
+
+        self.train()
+        step_start_time = time.time()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+
+        if opt == None:
+            optimizer = self.optimizer
+        else:
+            optimizer = opt
+
+        if self.discriminator_enabled:
+            if opt_disc == None:
+                optimizer_disc = self.optimizer_disc
+            else:
+                optimizer_disc = opt_disc
+
+
+        def step_optimizer(input_data=data,output_targets=targets):
+            outputs = {}
+            losses = {}
+            labels = {}
+            if self.discriminator_enabled:
+                self.zero_grad()
+                    
+                real_label = torch.full(output_targets.size(),0,dtype=torch.long,device=device)
+                real_label_gen = torch.full(input_data.size(),0,dtype=torch.long,device=device)
+                fake_label = torch.full(input_data.size(),1,dtype=torch.long,device=device)
+
+                labels['real_label'] = real_label
+                labels['real_label_gen'] = real_label_gen
+                labels['fake_label'] = fake_label
+
+                out_d_real = self.forward(output_targets.detach(),return_mem=False,discriminator=True,generator=False)
+                loss_d_real = loss_criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
+                loss_d_real.backward()
+
+                out_gan = self.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True)
+                loss_d_fake = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
+                loss_d_fake.backward(retain_graph=True)
+
+                optimizer_disc.step()
+                self.zero_grad()
+
+                loss_gen = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
+                loss_gen.backward()
+
+                output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
+                loss = loss_criterion(rearrange(output,'b n c -> n c b'), rearrange(output_targets,'b n -> n b'))
+                loss.backward()
+
+                optimizer.step()
+                self.zero_grad()
+
+                outputs['out_d_real'] = out_d_real
+                outputs['out_gan'] = out_gan
+                outputs['output'] = output
+
+                losses['loss_d_real'] = loss_d_real.item()
+                losses['loss_d_fake'] = loss_d_fake.item()
+                losses['loss_gen'] = loss_gen.item()
+                losses['loss'] = loss.item()
+            else:
+                self.zero_grad()
+                output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
+                torch.cuda.empty_cache()
+                loss = loss_criterion(rearrange(output,'b n c -> n c b'), rearrange(output_targets,'b n -> n b'))
+                loss.backward()
+
+                optimizer.step()
+                outputs['output'] = output
+
+                losses['loss'] = loss.item()
+            return outputs,losses,labels,single_pass_mem
+        
+        if deepspeed_enabled or autocast_enabled:
+            with autocast():
+                outputs,losses,labels,mem_ = step_optimizer(data,targets)
+        else:
+            outputs,losses,labels,mem_ = step_optimizer(data,targets)
+        
+        acc_gen = 0.0
+        loss_g = 0.0
+        loss_d = 0.0
+
+        if self.discriminator_enabled:
+            acc = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
+            acc_d = ((torch.argmax(outputs['out_d_real'],dim=-1)) == labels['real_label']).sum().item()/outputs['out_d_real'].size(1)
+            acc_d += ((torch.argmax(outputs['out_gan'],dim=-1)) == labels['fake_label']).sum().item()/outputs['out_gan'].size(1)
+            acc_gen = ((torch.argmax(outputs['out_gan'],dim=-1)) == labels['real_label_gen']).sum().item()/outputs['out_gan'].size(1)
+            acc += acc_gen
+
+            total_acc += acc/2
+            total_acc_d += acc_d/2
+            loss_g = (losses['loss'] + losses['loss_gen'])/2
+            total_loss += loss_g
+            loss_d = (losses['loss_d_fake'] + losses['loss_d_real'])/2
+            total_loss_d += loss_d
+        else:
+            acc_gen = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
+            total_acc += acc_gen
+            total_loss += losses['loss']
+            total_acc_d = 0
+            total_loss_d = 0
+
+        return outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc_gen,(step_start_time-time.time()),optimizer,optimizer_disc
+
 
     #@autocast()
     def forward(self,
@@ -772,8 +949,8 @@ class TransformerModel(Module):
         
         b,s_ = src.size(0),src.size(1)
 
-        src = ckpt(self.embedding_encoder,src)
-        src.requires_grad_(True)
+        #src.requires_grad_(True)
+        src = self.embedding_encoder(src)
         src = src * math.sqrt(self.ninp)
 
         if generator:
@@ -863,8 +1040,8 @@ class TransformerModel(Module):
 
             output = ckpt(self.scale_up_conv,rearrange(output,'b n d -> b d n'))
             output = rearrange(output,'b d n -> b n d')
-            output = ckpt(self.scale_up_fno,output)
             out = output[:,:s_]
+            output = ckpt(self.scale_up_fno,output)
 
             output = ckpt(self.decoder,out)
 

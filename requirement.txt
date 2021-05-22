@@ -32,5 +32,6 @@ torch-points3d
 pytorch-lightning
 ort-gpu-nightly
 pennylane
+memory-profiler
 # -i https://test.pypi.org/simple/ ort-gpu-nightly
 # install pennylane --upgrade

@@ -13,7 +13,7 @@ class involution(nn.Module):
         self.stride = stride
         self.channels = channels
         reduction_ratio = 4
-        self.group_channels = 16
+        self.group_channels = min(16,channels)
         self.groups = self.channels // self.group_channels
         self.conv1 = ConvModule(
             in_channels=channels,
