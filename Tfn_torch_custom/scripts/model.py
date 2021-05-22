@@ -7,6 +7,7 @@ import torch.nn as nn
 import random
 import torch.nn.functional as F
 import time
+import warnings
 
 from memory_profiler import profile
 
@@ -132,7 +133,7 @@ class GRUGating(nn.Module):
         if z==None:
             z = x
 
-        y = self.fn(z, **kwargs)
+        y = self.fn(z, **kwargs) + z
 
         if self.mogrify is not None:
             y, x = self.mogrify(y, x)
@@ -170,14 +171,12 @@ class mem_norm(Module):
 
     def forward(self, x, residual):
         gru_out = ckpt(self.gru,
-            #rearrange(x, 'b n d -> (b n) d'),
-            #rearrange(res, 'b n d -> (b n) d')
             x,
             residual
-        ).reshape_as(x) * self.g_1
+        ).reshape_as(x) * self.g_0
         gated_output,gate = ckpt(self.proj,gru_out).chunk(2,dim=-1)
-        x = ((gated_output * self.g_0) * F.gelu(gate)) + x
-        return ckpt(self.norm,x)+residual
+        x = (gated_output * F.gelu(gate)) + x
+        return (ckpt(self.norm,x) * self.g_1)+residual
 
 
 class AbsolutePositionalEmbedding(Module):
@@ -195,12 +194,22 @@ class AbsolutePositionalEmbedding(Module):
             n = torch.arange(x.size(1), device = x.device)
             return repeat(self.emb(n),'n d -> b n d',b=x.size(0))
         else:
-            n_0 = torch.arange(self.max_seq_len-1, device = x.device)
-            n_1 = torch.arange(x.size(1)-self.max_seq_len+1, device = x.device)
-            n_0 = repeat(self.emb(n_0),'n d -> b n d',b=x.size(0)) / (2**0.5)
-            n_1 = repeat(self.emb(n_1),'n d -> b n d',b=x.size(0)) * (2**0.5)
-            assert n_0.size(1)+n_1.size(1) == x.size(1)
-            return torch.cat((n_0,n_1),dim=1)
+            warnings.warn("Consider Upgrading ABSOLUTEPOSITIONALEMBEDDING's 'max_seq_length' parameter (and possibly retrain it)")
+            s = x.size(1)
+            multiplier = 1/(2**0.5)
+            n = []
+            
+            for i in range(0,s,self.max_seq_len):
+                tmp = torch.arange(i,self.max_seq_len+i, device = x.device)
+                n.append(repeat(self.emb(tmp),'n d -> b n d',b=x.size(0)) * multiplier)
+                multiplier *= (2**0.5)
+            else:
+                tmp = torch.arange(i+self.max_seq_len,s-1, device = x.device)
+                n.append(repeat(self.emb(tmp),'n d -> b n d',b=x.size(0)) * multiplier)
+
+            tmp = torch.cat(n,dim=1)
+            assert tmp.size(1) == s
+            return tmp
 
 
 
@@ -304,14 +313,6 @@ class TransformerBlock(Module):
                                 pkm=copy.deepcopy(self.pkm1)
                                 )
 
-        self.self_hop_src = EvolvedTransformerBlock(d_model,
-                            num_heads=nhead,
-                            attn=hop_attn,
-                            ffd=copy.deepcopy(self.geglu1),
-                            context=False,
-                            pkm=copy.deepcopy(self.pkm1)
-                            )
-
         self.gate1 = mem_norm(d_model)
 
         self.context_exist = context
@@ -322,9 +323,15 @@ class TransformerBlock(Module):
 
             self.pkm2 = copy.deepcopy(self.pkm1)
         
-            self.self_hop_context = EvolvedTransformerBlock(d_model,
+            self.self_attn_context = EvolvedTransformerBlock(d_model,
                                 num_heads=nhead,
-                                attn=copy.deepcopy(hop_attn),
+                                attn=SelfAttention(d_model,
+                                                    causal=False,
+                                                    heads=nhead,
+                                                    dim_head=d_model//nhead,
+                                                    num_mem_kv=mem_kv,
+                                                    to_out=copy.deepcopy(fno)
+                                                ),
                                 ffd=copy.deepcopy(self.geglu1),
                                 context=False,
                                 pkm=copy.deepcopy(self.pkm1)
@@ -338,23 +345,20 @@ class TransformerBlock(Module):
         output = self.norm1(src)
         output = Positional_Encoding(output)
         output = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.geglu1,output)
-        output2 = ckpt(self.self_hop_src,output)
-        output = ckpt(self.norm3,(output+output2))
-        del(output2)
+        output = ckpt(self.norm3,output)
 
         if self.context_exist:
             context = self.norm2(context)
             context = Positional_Encoding(context)
             context = ckpt(self.ffd2,context) + ckpt(self.pkm2,context) + ckpt(self.geglu2,context)
-            context_ = ckpt(self.self_hop_context,context)
+            context_ = ckpt(self.self_attn_context,context)
             context = ckpt(self.ctxt_norm,(context_+context))
             del(context_)
 
         output = ckpt(self.attn,output,context)
         output = self.dropout(output)
-        src = ckpt(self.gate1,output,src)
-        del(output)
-        return src
+        output = ckpt(self.gate1,output,src)
+        return output
 
 class TransformerModule(ModuleList):
 
