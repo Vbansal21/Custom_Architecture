@@ -29,6 +29,10 @@ from .performer_pytorch import SelfAttention
 
 from .fourier_1d import FNO1d
 
+from .dynamic_conv import Dynamic_conv1d
+from .Dynamic_Convolutional_Layer import ConvBasis2d
+from .involution.involution_naive import involution
+
 from torchnlp.encoders.text import SubwordEncoder
 import torchnlp
 
@@ -82,6 +86,27 @@ def Positional_Encoding(x: Tensor,
     pe = pe.unsqueeze(0).to(device)
     return x + pe[:]
 
+class convolutional_embedding(Module):
+
+    def __init__(self,
+        channels,
+        kernal_size=1,
+        stride_size=1
+        ):
+        super(convolutional_embedding,self).__init__()
+        self.involution_layer = involution(channels,kernal_size,stride_size)
+        self.dyn_conv_1d = Dynamic_conv1d(channels,channels,kernal_size,stride_size)
+        self.norm = nn.LayerNorm(channels)
+    
+    def forward(self,x):
+        out = rearrange(x,"b n d -> b d n").unsqueeze(-1).contiguous()
+        out = ckpt(self.involution_layer,out)
+        out = rearrange(out,'b d n o -> b (n o) d').contiguous()
+        out2 = rearrange(x,'b n d -> b d n').contiguous()
+        out2 = ckpt(self.dyn_conv_1d,out2)
+        out2 = rearrange(out2,'b d n -> b n d').contiguous()
+        return self.norm(out+out2) + x
+
 class RMSNorm(Module):
     def __init__(self, dim, eps = 1e-8):
         super().__init__()
@@ -100,8 +125,7 @@ class GEGLU(Module):
 
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim = -1)
-        return x * F.gelu(gate)
-        
+        return x * F.gelu(gate)   
 
 class nBRC(nn.Module):
     def __init__(self, dims, hidden_dims):
@@ -211,7 +235,6 @@ class AbsolutePositionalEmbedding(Module):
             tmp = torch.cat(n,dim=1)
             assert tmp.size(1) == s
             return tmp
-
 
 
 class TransformerBlock(Module):
@@ -348,7 +371,7 @@ class TransformerBlock(Module):
 
         output = self.norm1(src)
         output = Positional_Encoding(output)
-        output = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.geglu1,output)
+        output = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.geglu1,output) + output
         output = ckpt(self.norm3,output)
 
         if self.context_exist:
@@ -464,6 +487,7 @@ class TransformerModel(Module):
                 _get_activation_fn(activation),
                 nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
+                convolutional_embedding(ninp),
             )
 
         
@@ -821,7 +845,7 @@ class TransformerModel(Module):
             else:
                 return self.optimizer,self.scheduler
 
-    def train_step(self,
+    def training_step(self,
                     data,
                     targets,
                     loss_criterion,
@@ -851,6 +875,8 @@ class TransformerModel(Module):
                 optimizer_disc = self.optimizer_disc
             else:
                 optimizer_disc = opt_disc
+        else:
+            optimizer_disc = None
 
 
         def step_optimizer(input_data=data,output_targets=targets):
@@ -937,6 +963,7 @@ class TransformerModel(Module):
             acc_gen = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
             total_acc += acc_gen
             total_loss += losses['loss']
+            loss_g = losses['loss']
             total_acc_d = 0
             total_loss_d = 0
 
@@ -962,7 +989,7 @@ class TransformerModel(Module):
         src = self.embedding_encoder(src)
         src = src * math.sqrt(self.ninp)
 
-        if generator:
+        if generator or not self.discriminator_enabled:
             src = rearrange(src,'b n d -> b d n')
             if src.size(2)%self.seq_scale_down != 0:
                 src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=self.seq_scale_down-src.size(2)%self.seq_scale_down).to(self.device)),dim=2)

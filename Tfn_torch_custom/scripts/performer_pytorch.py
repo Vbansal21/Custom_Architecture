@@ -312,6 +312,27 @@ class FeedForward(nn.Module):
         x = self.w2(x)
         return x
 
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, x, seq_dim = 1):
+        t = torch.arange(x.shape[seq_dim], device = x.device).type_as(self.inv_freq)
+        freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        return emb[None, :, :]
+
+def rotate_half(x):
+    x = rearrange(x, '... (j d) -> ... j d', j = 2)
+    x1, x2 = x.unbind(dim = -2)
+    return torch.cat((-x2, x1), dim = -1)
+
+def apply_rotary_pos_emb(q, k, freqs):
+    q, k = map(lambda t: (t * freqs.cos()) + (rotate_half(t) * freqs.sin()), (q, k))
+    return q, k
+
 class SelfAttention(nn.Module):
     def __init__(self,
                  dim,
@@ -332,7 +353,8 @@ class SelfAttention(nn.Module):
                  to_k = None,
                  to_v = None,
                  to_out = None,
-                 running_attn = False
+                 running_attn = False,
+                 rotary_pos_emb=True
                  ):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
@@ -350,6 +372,8 @@ class SelfAttention(nn.Module):
         self.to_v = default(nn.Linear(dim, inner_dim),to_v)
         self.to_out = default(nn.Linear(inner_dim, dim),to_out)
         self.dropout = nn.Dropout(dropout)
+
+        self.rotary_pos_emb = RotaryEmbedding(dim) if rotary_pos_emb else None
 
         self.num_mem_kv = num_mem_kv
         if num_mem_kv > 0:
@@ -371,6 +395,14 @@ class SelfAttention(nn.Module):
         context_mask = default(context_mask, mask) if not cross_attend else context_mask
 
         q, k, v = ckpt(self.to_q,x), ckpt(self.to_k,context), ckpt(self.to_v,context)
+
+        if exists(self.rotary_pos_emb):
+            rotary_pos_emb = self.rotary_pos_emb(x)
+            l = rotary_pos_emb.shape[-1]
+            (ql, qr), (kl, kr) = map(lambda t: (t[..., :l], t[..., l:]), (q, k))
+            ql, kl = apply_rotary_pos_emb(ql, kl, rotary_pos_emb)
+            q = torch.cat((ql, qr), dim = -1)
+            k = torch.cat((kl, kr), dim = -1)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 

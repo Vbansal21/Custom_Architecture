@@ -2,6 +2,9 @@
     "folders": [
         {
             "path": "Tfn_torch_custom"
+        },
+        {
+            "path": "."
         }
     ],
     "settings": {

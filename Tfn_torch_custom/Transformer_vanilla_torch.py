@@ -157,6 +157,8 @@ else:
                                     device=device
                             ).to(device)
 
+print("Model Parameters: ",len(model),"\n")
+
 def data_process(raw_text_iter):
   data = tokenizer.encode(raw_text_iter)
   return torch.tensor(data)
@@ -320,10 +322,11 @@ wandb.init(project=project_name,config={
     "Sequence_length":bptt,
     "max_seq_len":max_seq_len,
     "seq_scale_down":seq_scale_down,
-    "discriminator_enabled":discriminator_enabled
+    "discriminator_enabled":discriminator_enabled,
+    "Number of Parameters":len(model)
 })
 
-wandb.watch(model)
+#wandb.watch(model,criterion=criterion,log_freq=20)
 
 
 try:
@@ -414,7 +417,8 @@ except:
 torch.cuda.empty_cache()
 model.to(device)
 
-print(summary(model, torch.zeros([1,bptt],dtype=torch.long).to(device),None,None,None,None,False,False,True,discriminator_enabled))
+#inp = torch.zeros([1,bptt],dtype=torch.long).to(device)
+#print(summary(model, inp,None,None,None,None,False,False,True,discriminator_enabled))
 
 # TODO: Setup 'curses' module to print colored text for inference output
 #import curses
@@ -431,6 +435,7 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
     result = tokenizer.decode(out)
     print("Your input:\n\t",tokenizer.decode(text_input.view(-1)))
     print("Model's Output:\n\t\t\b\b",result)
+    print('')
     torch.cuda.empty_cache()
     if return_mem:
         return mem
@@ -439,7 +444,7 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 model_train_step_inbuilt = True
 
-def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,step_=step):
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,step_=step,optimizer=optimizer,optimizer_disc=optimizer_disc):
     model.train() 
     total_loss = 0.
     total_loss_d = 0.
@@ -462,91 +467,17 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             single_pass_mem = None
         data, targets = get_batch(processed_train_data, i)
 
-        if not model_train_step_inbuilt:
-            # TODO: Remove and convert to fully inbuilt module
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_ = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer)
 
-            if use_deepspeed:
-                with autocast():
-                    output,single_pass_mem = model(data,mem=single_pass_mem)
-                    loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
-                model.backward(loss)
-                model.step()
-                model.zero_grad()
-            else:
-                if discriminator_enabled:
-                    model.zero_grad()
-                        
-                    real_label = torch.full(targets.size(),0,dtype=torch.long,device=device)
-                    real_label_gen = torch.full(data.size(),0,dtype=torch.long,device=device)
-                    fake_label = torch.full(data.size(),1,dtype=torch.long,device=device)
-
-                    out_d_real = model(targets.detach(),return_mem=False,discriminator=True,generator=False)
-                    loss_d_real = criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
-                    loss_d_real.backward()
-
-                    out_gan = model(data.detach(),mem=single_pass_mem,return_mem=False,discriminator=True)
-                    loss_d_fake = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
-                    loss_d_fake.backward(retain_graph=True)
-
-                    optimizer_disc.step()
-                    model.zero_grad()
-
-                    loss_gen = criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
-                    loss_gen.backward()
-
-                    output,single_pass_mem = model(data,mem=single_pass_mem)
-                    loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
-                    loss.backward()
-
-                    optimizer.step()
-                else:
-                    model.zero_grad()
-                    output,single_pass_mem = model(data,mem=single_pass_mem)
-                    torch.cuda.empty_cache()
-                    loss = criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b'))
-                    loss.backward()
-
-                    optimizer.step()
-
-            if discriminator_enabled:
-                acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
-                acc_d = ((torch.argmax(out_d_real,dim=-1)) == real_label).sum().item()/out_d_real.size(1)
-                acc_d += ((torch.argmax(out_gan,dim=-1)) == fake_label).sum().item()/out_gan.size(1)
-                acc += ((torch.argmax(out_gan,dim=-1)) == real_label_gen).sum().item()/out_gan.size(1)
-
-                total_acc += acc/2
-                total_acc_d += acc_d/2
-                total_loss += (loss.item() + loss_gen.item())/2
-                total_loss_d += (loss_d_fake.item() + loss_d_real.item())/2
-            else:
-                acc = ((torch.argmax(output,dim=-1)) == targets).sum().item()/output.size(1)
-                total_acc += acc
-                total_loss += loss.item()
-                total_acc_d = 0
-                total_loss_d = 0
-            if discriminator_enabled:
-                loss_g = (loss.item() + loss_gen.item())/2
-                loss_d = ((loss_d_fake.item() + loss_d_real.item())/2)
-            else:
-                loss_g = loss.item()
-                loss_d = 0
-            try:
-                ppl = math.exp(loss.item())
-            except:
-                ppl = -1.0
-        else:
-            outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_ = model.train_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer)
-
-            try:
-                ppl = math.exp(losses['loss'])
-            except:
-                ppl = -1.0
+        try:
+            ppl = math.exp(losses['loss'])
+        except:
+            ppl = -1.0
 
         log_interval = 200
         total_ppl += ppl
         inputs = "\n".join([tokenizer.decode(i) for i in data])
-        outputs = "\n".join([tokenizer.decode(torch.argmax(i,dim=-1)) for i in outputs['output']])
+        output = "\n".join([tokenizer.decode(torch.argmax(i,dim=-1)) for i in outputs['output']])
         req_targets = "\n".join([tokenizer.decode(i) for i in targets])
         del(data,targets,outputs,losses)
         torch.cuda.empty_cache()
@@ -655,7 +586,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     'Learning_Rate':scheduler.get_last_lr()[0],
                     'Time per Step':(time.time() - step_time),
                     "input":wandb.Html(inputs),
-                    "output":wandb.Html(outputs),
+                    "output":wandb.Html(output),
                     "target":wandb.Html(req_targets),
                 }
             )
@@ -671,7 +602,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     'Learning_Rate':scheduler.get_last_lr()[0],
                     'Time per Step':(time.time() - step_time),
                     "input":wandb.Html(inputs),
-                    "output":wandb.Html(outputs),
+                    "output":wandb.Html(output),
                     "target":wandb.Html(req_targets),
                 }
             )
