@@ -254,7 +254,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1 * 3
+lr = 1
 if not use_deepspeed:
     if discriminator_enabled:
         for p in model.discriminator.parameters():
@@ -277,7 +277,7 @@ a = 5000000
 b = 1000
 c = 0.0
 step = 1
-lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
+lambda_1 = lambda step: (((a/b * (step//2) + 1) / ((step//2)**2 + a)) + c)/((step//2)**0.1+1)
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
