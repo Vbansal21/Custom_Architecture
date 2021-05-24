@@ -521,7 +521,12 @@ class TransformerModel(Module):
         self.scale_down_conv = nn.Sequential(
             nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
         )
-        self.scale_down_fno = FNO1d(nhead,nhead,inp_dim=ninp,out_dim=ninp,ffd_dim=ninp)
+        self.scale_down_fno = GRUGating(ninp,FNO1d(nhead,
+                                                    nhead,
+                                                    inp_dim=ninp,
+                                                    out_dim=ninp,
+                                                    ffd_dim=nhid
+                                                ))
 
         self.padding_for_conv_scale = nn.Parameter(torch.randn((1,ninp))).reshape(-1)
 
@@ -529,7 +534,12 @@ class TransformerModel(Module):
             nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
         )
 
-        self.scale_up_fno = FNO1d(nhead,nhead,inp_dim=ninp,out_dim=ninp,ffd_dim=ninp)
+        self.scale_up_fno = GRUGating(ninp,FNO1d(nhead,
+                                                    nhead,
+                                                    inp_dim=ninp,
+                                                    out_dim=ninp,
+                                                    ffd_dim=nhid
+                                                ))
 
         #self.to(device)
         self.device = device
@@ -537,7 +547,7 @@ class TransformerModel(Module):
 
     def init_weights(self) -> NoReturn :
         for w in self.parameters():
-            w.data.uniform_(-1/6,1/6)
+            w.data.uniform_(-1/4,1/4)
             
     def __len__(self) -> int:
         return sum(p.numel() for p in self.parameters())
@@ -855,6 +865,7 @@ class TransformerModel(Module):
                 loss_d_fake.backward(retain_graph=True)
 
                 optimizer_disc.step()
+                optimizer_disc.zero_grad()
                 self.zero_grad()
 
                 loss_gen = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
@@ -865,6 +876,7 @@ class TransformerModel(Module):
                 loss.backward()
 
                 optimizer.step()
+                optimizer.zero_grad()
                 self.zero_grad()
 
                 outputs['out_d_real'] = out_d_real
@@ -879,10 +891,11 @@ class TransformerModel(Module):
                 self.zero_grad()
                 output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
                 torch.cuda.empty_cache()
-                loss = loss_criterion(rearrange(output,'b n c -> n c b'), rearrange(output_targets,'b n -> n b'))
+                loss = loss_criterion(output.permute(1,2,0).contiguous(), targets.permute(1,0).contiguous())
                 loss.backward()
 
                 optimizer.step()
+                optimizer.zero_grad()
                 outputs['output'] = output
 
                 losses['loss'] = loss.item()
@@ -942,6 +955,11 @@ class TransformerModel(Module):
         src = src * math.sqrt(self.ninp)
 
         if generator or not self.discriminator_enabled:
+
+            src = ckpt(self.scale_down_fno,src)
+            if self.encoder_decoder:
+                context = ckpt(self.scale_down_fno,context)
+                
             src = rearrange(src,'b n d -> b d n')
             if src.size(2)%self.seq_scale_down != 0:
                 src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=self.seq_scale_down-src.size(2)%self.seq_scale_down).to(self.device)),dim=2)
@@ -1001,7 +1019,6 @@ class TransformerModel(Module):
 
             output = output.contiguous()
 
-            src = ckpt(self.scale_down_fno,src)
             output = ckpt(self.ffd1,output) + output
             output = ckpt(self.norm1,output)
 
@@ -1026,10 +1043,10 @@ class TransformerModel(Module):
 
             output = output[:,output.size(1)-s:] if type(mem) != None or self.mem_exist else output
 
+            output = ckpt(self.scale_up_fno,output)
             output = ckpt(self.scale_up_conv,rearrange(output,'b n d -> b d n'))
             output = rearrange(output,'b d n -> b n d')
-            output = output[:,:s_]
-            out = ckpt(self.scale_up_fno,output)
+            out = output[:,:s_]
 
             output = ckpt(self.decoder,out)
 

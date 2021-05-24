@@ -9,3 +9,4 @@ freeCodeCamp
 /flowtron/apex/
 *.pyc
 *.pt
+/g-mlp-gpt/data/enwik8.gz

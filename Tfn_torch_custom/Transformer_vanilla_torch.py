@@ -23,7 +23,7 @@ torch.autograd.set_detect_anomaly(True)
 autocast = torch.cuda.amp.autocast
 
 
-file = "wikitextv103"
+file = "wikitextv2"
 if file == "wikitextv2":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
 elif file == "wikitextv103":
@@ -52,9 +52,9 @@ from scripts.model import TransformerModel
 ntokens = tokenizer.vocab_size
 emsize = 2048//8
 nhid = emsize * 4
-nlayers = 4
+nlayers = 2
 deberta_layers = 8
-repeated_deberta_layers = 2
+repeated_deberta_layers = 1
 nhead = 16
 dropout = 0.1
 mem_tokens = 128
@@ -242,7 +242,7 @@ def prepare_batch(source):
     return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
 
 def get_batch(source,j,bptt=bptt):
-    rnd = random.randint(0,10)//10
+    rnd = 0#random.randint(0,10)//10
     seq_len = min(bptt -1 -1 , source.size(2) - j -1 -1)
     data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
     data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
@@ -252,7 +252,7 @@ def get_batch(source,j,bptt=bptt):
 
 #print(sum(p.numel() for p in model.parameters()))
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
-path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+".tar"
+path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
 lr = 0.1
@@ -269,6 +269,8 @@ if not use_deepspeed:
         for p in model.parameters():
             p.requires_grad_(True)
     else:
+        for p in model.parameters():
+            p.requires_grad_(True)
         optimizer = torch.optim.SGD(model.parameters(),lr=lr)
         optimizer_disc = None
 else:
@@ -362,7 +364,7 @@ try:
             scheduler_disc.load_state_dict(checkpoint_['scheduler_disc_state_dict'])
 
     else:
-        lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
+        #lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 
         if discriminator_enabled:
@@ -484,7 +486,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         torch.cuda.empty_cache()
 
         if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
-            
+            inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
+
             if discriminator_enabled:
                 torch.save(
                 {
