@@ -242,8 +242,9 @@ def prepare_batch(source):
     return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
 
 def get_batch(source,j,bptt=bptt):
+    rnd = random.randint(0,10)//10
     seq_len = min(bptt -1 -1 , source.size(2) - j -1 -1)
-    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=2,shuffle_together_nos=5).to(device)
+    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
     data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
     targets = source[1,:,j:j+seq_len].to(device)
     targets = torch.cat((targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
@@ -467,7 +468,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             single_pass_mem = None
         data, targets = get_batch(processed_train_data, i)
 
-        outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_ = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer)
+        outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer)
 
         try:
             ppl = math.exp(losses['loss'])

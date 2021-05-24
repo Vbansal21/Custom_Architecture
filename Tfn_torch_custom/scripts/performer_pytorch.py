@@ -353,6 +353,7 @@ class SelfAttention(nn.Module):
                  to_k = None,
                  to_v = None,
                  to_out = None,
+                 hop_attn=None,
                  running_attn = False,
                  rotary_pos_emb=True
                  ):
@@ -372,6 +373,12 @@ class SelfAttention(nn.Module):
         self.to_v = default(nn.Linear(dim, inner_dim),to_v)
         self.to_out = default(nn.Linear(inner_dim, dim),to_out)
         self.dropout = nn.Dropout(dropout)
+
+        self.hop_attn = hop_attn
+        if exists(hop_attn):
+            self.norm_hop_attn = nn.LayerNorm(dim,dim)
+            self.hop_attn_k_linear = nn.Linear(dim,dim)
+            self.hop_attn_v_linear = nn.Linear(dim,dim)
 
         self.rotary_pos_emb = RotaryEmbedding(dim) if rotary_pos_emb else None
 
@@ -403,6 +410,14 @@ class SelfAttention(nn.Module):
             ql, kl = apply_rotary_pos_emb(ql, kl, rotary_pos_emb)
             q = torch.cat((ql, qr), dim = -1)
             k = torch.cat((kl, kr), dim = -1)
+        
+        if exists(self.hop_attn):
+            hop_attn_k = self.norm_hop_attn(ckpt(self.hop_attn,k)).to(k.device) + k
+            hop_attn_v = self.norm_hop_attn(ckpt(self.hop_attn,v)).to(v.device) + v
+            k = torch.cat((hop_attn_k,k),dim=-2)
+            v = torch.cat((hop_attn_v,v),dim=-2)
+            k = ckpt(self.hop_attn_k_linear,k)
+            v = ckpt(self.hop_attn_k_linear,v)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
@@ -410,8 +425,7 @@ class SelfAttention(nn.Module):
             mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v))
             k = torch.cat((mem_k, k), dim = -2)
             v = torch.cat((mem_v, v), dim = -2)
-            if exists(context_mask):
-                context_mask = F.pad(context_mask, (self.num_mem_kv, 0), value = True)
+
 
         (q, lq), (k, lk), (v, lv) = map(lambda t: (t[:, :gh], t[:, gh:]), (q, k, v))
 
