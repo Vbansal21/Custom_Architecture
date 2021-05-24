@@ -196,6 +196,7 @@ class mem_norm(Module):
                                 )
         self.g_0 = nn.Parameter(torch.zeros(1))
         self.g_1 = nn.Parameter(torch.zeros(1))
+        self.g_2 = nn.Parameter(torch.ones(1))
         self.norm = RMSNorm(dim)
 
     def forward(self, x, residual):
@@ -204,8 +205,8 @@ class mem_norm(Module):
             x
         ).reshape_as(x) * self.g_0
         gated_output,gate = ckpt(self.proj,gru_out).chunk(2,dim=-1)
-        x = (gated_output * F.gelu(gate)) + x
-        return (ckpt(self.norm,x) * self.g_1)+residual
+        x = (gated_output * F.gelu(gate))
+        return (ckpt(self.norm,x) * self.g_1)+(residual * self.g_2)
 
 
 class AbsolutePositionalEmbedding(Module):
@@ -216,7 +217,8 @@ class AbsolutePositionalEmbedding(Module):
         self.init_()
 
     def init_(self):
-        nn.init.normal_(self.emb.weight, std = 0.02)
+        for w in self.parameters():
+            w.data.uniform_(-1/4,1/4)
 
     def forward(self, x):
         if x.size(1) < self.max_seq_len:
