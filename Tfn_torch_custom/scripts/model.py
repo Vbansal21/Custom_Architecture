@@ -339,8 +339,6 @@ class TransformerBlock(Module):
 
         self.gate1 = mem_norm(d_model)
 
-        self.norm2 = RMSNorm(d_model)
-
         self.conv_emb = GRUGating(d_model,convolutional_embedding(d_model),True)
 
         self.context_exist = context
@@ -382,7 +380,6 @@ class TransformerBlock(Module):
 
         output = ckpt(self.attn,output,context)
         output = self.dropout2(output)
-        output = ckpt(self.norm2,output)
         output = ckpt(self.gate1,output,src)
         return output
 
