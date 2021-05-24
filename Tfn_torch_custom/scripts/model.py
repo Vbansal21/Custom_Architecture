@@ -1,6 +1,5 @@
 import math
 #import profile
-from sympy import Nand
 import torch
 from torch import tensor
 import torch.nn as nn
@@ -23,14 +22,13 @@ from mogrifier import Mogrifier
 
 from .evolved_transformer_block import EvolvedTransformerBlock
 from .product_key_memory import PKM
-from .hopfield_modules import Hopfield, HopfieldLayer, HopfieldPooling
+from .hopfield_modules import HopfieldLayer
 from .hopfield_modules.transformer import HopfieldEncoderLayer
 from .performer_pytorch import SelfAttention
 
 from .fourier_1d import FNO1d
 
 from .dynamic_conv import Dynamic_conv1d
-from .Dynamic_Convolutional_Layer import ConvBasis2d
 from .involution.involution_naive import involution
 
 from torchnlp.encoders.text import SubwordEncoder
@@ -148,6 +146,7 @@ class GRUGating(nn.Module):
         super().__init__()
         self.dim = dim
         self.fn = fn
+        self.norm = nn.LayerNorm(dim)
         self.gru = nBRC(dim, dim)
         self.mogrify = Mogrifier(dim, factorize_k = dim // 4) if mogrify else None
 
@@ -158,7 +157,7 @@ class GRUGating(nn.Module):
         if z==None:
             z = x
 
-        y = self.fn(z, **kwargs) + z
+        y = self.norm(ckpt(self.fn,z)) + z
 
         if self.mogrify is not None:
             y, x = self.mogrify(y, x)
@@ -248,7 +247,7 @@ class TransformerBlock(Module):
                      activation="gelu",
                      context=False,
                      mem_kv=64*2,
-                     hop_pattern_size=64*2,
+                     hop_pattern_size=64*8,
                      pkm_keys=64*2,
                      deberta_mode=False
                 ):
@@ -257,7 +256,8 @@ class TransformerBlock(Module):
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
         self.norm3 = RMSNorm(d_model)
-        self.dropout = Dropout(dropout)
+        self.dropout2 = Dropout(dropout)
+        self.dropout1 = Dropout(dropout)
 
         self.deberta_mode = deberta_mode
 
@@ -271,22 +271,22 @@ class TransformerBlock(Module):
         self.geglu1 = GEGLU(d_model,d_model)
 
         self.pkm1 = nn.Sequential(
-            nn.Linear(d_model,d_model//4),
+            nn.Linear(d_model,d_model//2),
             _get_activation_fn(activation),
-            PKM(d_model//4,heads=nhead//4,num_keys=pkm_keys,dim_head=d_model//nhead),
-            nn.Linear(d_model//4,d_model),
+            PKM(d_model//2,heads=nhead//2,num_keys=pkm_keys,dim_head=d_model//nhead),
+            nn.Linear(d_model//2,d_model),
             _get_activation_fn(activation),
             )
 
         hop_attn = nn.Sequential(
                                 nn.Linear(d_model,d_model),
-                                HopfieldEncoderLayer(HopfieldLayer(
+                                GRUGating(d_model,HopfieldEncoderLayer(HopfieldLayer(
                                             input_size=d_model,
                                             pattern_size=hop_pattern_size,
                                             num_heads=nhead,
                                             dropout=dropout_hopfield
                                         ),
-                                        dim_feedforward=dim_feedforward),
+                                        dim_feedforward=dim_feedforward),True ),
                                 nn.Linear(d_model,d_model)
                                 )
         fno = EvolvedTransformerBlock(
@@ -313,7 +313,8 @@ class TransformerBlock(Module):
                                                     to_k=copy.deepcopy(fno),
                                                     to_q=copy.deepcopy(fno),
                                                     to_v=copy.deepcopy(hop_attn),
-                                                    to_out=copy.deepcopy(fno)
+                                                    to_out=copy.deepcopy(fno),
+                                                    running_attn=False
                                                 ),
                                 ffd=copy.deepcopy(self.geglu1),
                                 context=context,
@@ -333,7 +334,8 @@ class TransformerBlock(Module):
                                                     to_q=fno,
                                                     to_k=copy.deepcopy(fno),
                                                     to_v=copy.deepcopy(hop_attn),
-                                                    to_out=copy.deepcopy(fno)
+                                                    to_out=copy.deepcopy(fno),
+                                                    running_attn=False
                                                 ),
                                 ffd=copy.deepcopy(self.geglu1),
                                 context=True,
@@ -341,6 +343,8 @@ class TransformerBlock(Module):
                                 )
 
         self.gate1 = mem_norm(d_model)
+
+        self.conv_emb = GRUGating(d_model,convolutional_embedding(d_model),True)#
 
         self.context_exist = context
         if context:
@@ -371,19 +375,20 @@ class TransformerBlock(Module):
 
         output = self.norm1(src)
         output = Positional_Encoding(output)
-        output = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.geglu1,output) + output
-        output = ckpt(self.norm3,output)
+        output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.geglu1,output) + ckpt(self.conv_emb,output)
+        output = ckpt(self.norm3,self.dropout1(output2)) + output
+        del(output2)
 
         if self.context_exist:
             context = self.norm2(context)
             context = Positional_Encoding(context)
-            context = ckpt(self.ffd2,context) + ckpt(self.pkm2,context) + ckpt(self.geglu2,context)
-            context_ = ckpt(self.self_attn_context,context)
+            context_ = ckpt(self.ffd2,context) + ckpt(self.pkm2,context) + ckpt(self.geglu2,context)
+            context_ = ckpt(self.self_attn_context,context_)
             context = ckpt(self.ctxt_norm,(context_+context))
             del(context_)
 
         output = ckpt(self.attn,output,context)
-        output = self.dropout(output)
+        output = self.dropout2(output)
         output = ckpt(self.gate1,output,src)
         return output
 
@@ -487,7 +492,6 @@ class TransformerModel(Module):
                 _get_activation_fn(activation),
                 nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
-                convolutional_embedding(ninp),
             )
 
         

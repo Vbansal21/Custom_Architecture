@@ -51,17 +51,17 @@ from scripts.model import TransformerModel
 
 ntokens = tokenizer.vocab_size
 emsize = 2048//4
-nhid = emsize * 8
+nhid = emsize * 4
 nlayers = 1
-deberta_layers = 3
+deberta_layers = 1
 repeated_deberta_layers = 1
 nhead = 16
 dropout = 0.3
 mem_tokens = 512
-bptt = (1024*1-1+mem_tokens) - mem_tokens
+bptt = (1024*2-5+mem_tokens) - mem_tokens
 max_seq_len = 2**16
 discriminator_enabled = False
-seq_scale_down = 32
+seq_scale_down = 24
 
 use_deepspeed = False
 
@@ -242,11 +242,11 @@ def prepare_batch(source):
     return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
 
 def get_batch(source,j,bptt=bptt):
-    seq_len = min(bptt -1 , source.size(2) - j -1 -1)
+    seq_len = min(bptt -1 -1 , source.size(2) - j -1 -1)
     data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=2,shuffle_together_nos=5).to(device)
-    data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device)),dim=1).contiguous()
+    data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
     targets = source[1,:,j:j+seq_len].to(device)
-    targets = torch.cat((targets,torch.full((targets.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+    targets = torch.cat((targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
     return data,targets
 
 #print(sum(p.numel() for p in model.parameters()))
@@ -254,7 +254,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1
+lr = 0.1
 if not use_deepspeed:
     if discriminator_enabled:
         for p in model.discriminator.parameters():
@@ -277,7 +277,7 @@ a = 5000000
 b = 1000
 c = 0.0
 step = 1
-lambda_1 = lambda step: (((a/b * (step//2) + 1) / ((step//2)**2 + a)) + c)/((step//2)**0.1+1)
+lambda_1 = lambda step: (((a/b * (step) + 1) / ((step)**2 + a)) + c)/((step)**0.1+1)
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
@@ -392,9 +392,9 @@ if best_model==None:
     best_model=model
 
 try:
-    processed_train_data = torch.load("models/data/"+file+"_train.tar")
-    processed_test_data = torch.load("models/data/"+file+"_test.tar")
-    processed_val_data = torch.load("models/data/"+file+"_val.tar")
+    processed_train_data = torch.load("models/data/"+file+"_train.tar",map_location=torch.device('cpu'))
+    processed_test_data = torch.load("models/data/"+file+"_test.tar",map_location=torch.device('cpu'))
+    processed_val_data = torch.load("models/data/"+file+"_val.tar",map_location=torch.device('cpu'))
 except:
     train_data = data_process(io.open(train_filepath, encoding="utf8").read()).to(device)
     val_data = data_process(io.open(valid_filepath, encoding="utf8").read()).to(device)
@@ -458,12 +458,12 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     acc_d = 0
     total_acc = 0
     total_acc_d = 0
-    for batch, i in enumerate(range(0, processed_train_data.size(2), bptt-1)):
+    for batch, i in enumerate(range(0, processed_train_data.size(2), bptt-1-1)):
         step_time = time.time()
         if resume_batch != None:
             if batch < resume_batch:
                 continue
-        if epoch%2==0:
+        if epoch%2==1:
             single_pass_mem = None
         data, targets = get_batch(processed_train_data, i)
 
@@ -614,7 +614,7 @@ def evaluate(eval_model, data_source):
     total_acc = 0.
     single_pass_mem = None
     with torch.no_grad():
-        for i in range(0, data_source.size(2), bptt-1):
+        for i in range(0, data_source.size(2), bptt-1-1):
             data, targets = get_batch(data_source, i)
             if use_deepspeed:
                 with autocast():

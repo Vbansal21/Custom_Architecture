@@ -1,3 +1,0 @@
-2020-04-03 17:04:03,934:INFO::Parsing arguments
-2020-04-03 17:04:03,941:INFO::Device:cpu|Batch size:16|EmbedDim:32|Epochs:10|Ngrams:2|MAX_LEN:200|Split:0.95
-2020-04-03 17:04:03,941:INFO::Loading Data
