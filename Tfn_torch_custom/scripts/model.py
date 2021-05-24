@@ -150,14 +150,14 @@ class GRUGating(nn.Module):
         self.gru = nBRC(dim, dim)
         self.mogrify = Mogrifier(dim, factorize_k = dim // 4) if mogrify else None
 
-    def forward(self, x, z=None, **kwargs):
+    def forward(self, x, y=None, **kwargs):
         shape = x.shape
         dim = self.dim
 
-        if z==None:
-            z = x
+        if y==None:
+            y = x
 
-        y = self.norm(ckpt(self.fn,z)) + z
+        y = self.norm(ckpt(self.fn,y)) + y
 
         if self.mogrify is not None:
             y, x = self.mogrify(y, x)
@@ -173,7 +173,12 @@ class GRUGating(nn.Module):
 class mem_norm(Module):
     def __init__(self, dim):
         super().__init__()
-        self.gru = GRUGating(dim,HopfieldEncoderLayer(HopfieldLayer(input_size=dim,quantity=dim*8)) )
+        self.gru = GRUGating(dim,nn.Sequential(
+            GEGLU(dim,dim*4),
+            nn.GELU(),
+            nn.Linear(dim*4,dim),
+            nn.GELU(),
+        ),True )
         self.proj =nn.Sequential(
                                 EvolvedTransformerBlock(
                                     dim,
@@ -195,8 +200,8 @@ class mem_norm(Module):
 
     def forward(self, x, residual):
         gru_out = ckpt(self.gru,
-            x,
-            residual
+            residual,
+            x
         ).reshape_as(x) * self.g_0
         gated_output,gate = ckpt(self.proj,gru_out).chunk(2,dim=-1)
         x = (gated_output * F.gelu(gate)) + x
@@ -275,17 +280,6 @@ class TransformerBlock(Module):
             _get_activation_fn(activation),
             )
 
-        hop_attn = nn.Sequential(
-                                nn.Linear(d_model,d_model),
-                                GRUGating(d_model,HopfieldEncoderLayer(HopfieldLayer(
-                                            input_size=d_model,
-                                            num_heads=nhead,
-                                            dropout=dropout_hopfield,
-                                            quantity=dim_feedforward*2
-                                        ),
-                                        dim_feedforward=dim_feedforward) ),
-                                nn.Linear(d_model,d_model)
-                                )
         fno = EvolvedTransformerBlock(
                                         d_model,
                                         nhead,
@@ -299,6 +293,17 @@ class TransformerBlock(Module):
                                         context=False,
                                     )
         if not deberta_mode:
+            hop_attn = nn.Sequential(
+                                    nn.Linear(d_model,d_model),
+                                    GRUGating(d_model,HopfieldEncoderLayer(HopfieldLayer(
+                                                input_size=d_model,
+                                                num_heads=nhead,
+                                                dropout=dropout_hopfield,
+                                                quantity=dim_feedforward*2
+                                            ),
+                                            dim_feedforward=dim_feedforward) ),
+                                    nn.Linear(d_model,d_model)
+                                    )
             self.attn = EvolvedTransformerBlock(d_model,
                                 num_heads=nhead,
                                 attn=SelfAttention(d_model,
@@ -306,9 +311,7 @@ class TransformerBlock(Module):
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
-                                                    generalized_attention=True,
                                                     hop_attn=hop_attn,
-                                                    running_attn=False
                                                 ),
                                 ffd=copy.deepcopy(self.ffd1),
                                 context=context,
@@ -316,7 +319,7 @@ class TransformerBlock(Module):
 
                                 )
         else:
-            
+                
             self.attn = EvolvedTransformerBlock(d_model,
                                 num_heads=nhead,
                                 attn=SelfAttention(d_model,
@@ -327,7 +330,6 @@ class TransformerBlock(Module):
                                                     generalized_attention=False,
                                                     to_q=fno,
                                                     to_k=copy.deepcopy(fno),
-                                                    hop_attn=hop_attn,
                                                     running_attn=False
                                                 ),
                                 ffd=copy.deepcopy(self.ffd1),
@@ -367,9 +369,8 @@ class TransformerBlock(Module):
 
         output = self.norm1(src)
         output = Positional_Encoding(output)
-        output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.conv_emb,output)
-        output = ckpt(self.norm3,self.dropout1(output2)) + output
-        del(output2)
+        output = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.conv_emb,output)
+        output = ckpt(self.norm3,self.dropout1(output))
 
         if self.context_exist:
             context = self.norm2(context)
@@ -574,7 +575,7 @@ class TransformerModel(Module):
 
     def init_weights(self) -> NoReturn :
         for w in self.parameters():
-            w.data.uniform_(-1/4,1/4)
+            w.data.uniform_(-1/6,1/6)
             
     def __len__(self) -> int:
         return sum(p.numel() for p in self.parameters())
