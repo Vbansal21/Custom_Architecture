@@ -314,6 +314,7 @@ class TransformerBlock(Module):
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
                                                     hop_attn=hop_attn,
+                                                    rotary_pos_emb=False
                                                 ),
                                 ffd=copy.deepcopy(self.ffd1),
                                 context=context,
