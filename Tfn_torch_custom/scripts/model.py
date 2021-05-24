@@ -331,7 +331,7 @@ class TransformerBlock(Module):
                                                     num_mem_kv=mem_kv,
                                                     generalized_attention=False,
                                                     to_q=fno,
-                                                    to_k=copy.deepcopy(fno),,
+                                                    to_k=copy.deepcopy(fno),
                                                     rotary_pos_emb=False
                                                 ),
                                 ffd=copy.deepcopy(self.ffd1),
@@ -355,8 +355,7 @@ class TransformerBlock(Module):
                                                     causal=False,
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
-                                                    num_mem_kv=mem_kv,
-                                                    to_out=copy.deepcopy(fno)
+                                                    num_mem_kv=mem_kv
                                                 ),
                                 ffd=copy.deepcopy(self.ffd1),
                                 context=False
