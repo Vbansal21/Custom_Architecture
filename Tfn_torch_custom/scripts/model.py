@@ -313,8 +313,7 @@ class TransformerBlock(Module):
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
-                                                    hop_attn=hop_attn,
-                                                    rotary_pos_emb=False
+                                                    hop_attn=hop_attn
                                                 ),
                                 ffd=copy.deepcopy(self.ffd1),
                                 context=context,
@@ -332,8 +331,8 @@ class TransformerBlock(Module):
                                                     num_mem_kv=mem_kv,
                                                     generalized_attention=False,
                                                     to_q=fno,
-                                                    to_k=copy.deepcopy(fno),
-                                                    running_attn=False
+                                                    to_k=copy.deepcopy(fno),,
+                                                    rotary_pos_emb=False
                                                 ),
                                 ffd=copy.deepcopy(self.ffd1),
                                 context=True,
