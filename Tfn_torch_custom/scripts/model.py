@@ -251,7 +251,7 @@ class TransformerBlock(Module):
                      dropout_hopfield=0.7,
                      activation="gelu",
                      context=False,
-                     mem_kv=64*2,
+                     mem_kv=64*4,
                      pkm_keys=64*2,
                      deberta_mode=False
                 ):

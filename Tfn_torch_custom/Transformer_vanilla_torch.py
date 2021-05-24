@@ -55,13 +55,13 @@ nhid = emsize * 4
 nlayers = 1
 deberta_layers = 1
 repeated_deberta_layers = 1
-nhead = 64
+nhead = 32
 dropout = 0.1
 mem_tokens = 128
 bptt = (1024*2-5+mem_tokens) - mem_tokens
 max_seq_len = 2**16
 discriminator_enabled = False
-seq_scale_down = 32
+seq_scale_down = 16
 
 use_deepspeed = False
 
