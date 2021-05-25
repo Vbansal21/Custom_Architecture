@@ -171,6 +171,27 @@ class GRUGating(nn.Module):
 
         return gated_output.reshape(shape)
 
+class ET_ffd(Module):
+
+    def __init__(self,dim,activation="gelu"):
+        super(ET_ffd,self).__init__()
+        self.l_1 = nn.Sequential(
+            GEGLU(dim,dim*4),
+            _get_activation_fn(activation),
+        )
+
+        self.l_2 = nn.Sequential(
+            nn.Conv1d(dim*4,dim*4,1,1),
+            nn.ReLU(),
+            nn.Conv1d(dim*4,dim,1,1)
+        )
+
+    def forward(self,x):
+        out = ckpt(self.l_1,x)
+        out = out.permute(0,2,1)
+        out = ckpt(self.l_2,out)
+        return out.permute(0,2,1).contiguous()
+
 class AbsolutePositionalEmbedding(Module):
     def __init__(self, dim, max_seq_len):
         super().__init__()
@@ -212,11 +233,11 @@ class TransformerBlock(Module):
                      nhead, 
                      dim_feedforward=2048, 
                      dropout=0.5, 
-                     dropout_hopfield=0.7,
+                     dropout_hopfield=0.0,
                      activation="gelu",
                      context=False,
-                     mem_kv=64*4,
-                     pkm_keys=64*2,
+                     mem_kv=64*16,
+                     pkm_keys=64,
                      deberta=False
                 ):
         super(TransformerBlock, self).__init__()
@@ -229,12 +250,16 @@ class TransformerBlock(Module):
 
         self.deberta = deberta
 
+        """
         self.ffd1 = nn.Sequential(
             GEGLU(d_model,dim_feedforward),
             _get_activation_fn(activation),
             nn.Linear(dim_feedforward,d_model),
             _get_activation_fn(activation),
         )
+        """
+
+        self.ffd1 = ET_ffd(dim=d_model)
 
         self.pkm1 = nn.Sequential(
             nn.Linear(d_model,d_model//2),
@@ -259,13 +284,14 @@ class TransformerBlock(Module):
                                     GRUGating(d_model,HopfieldEncoderLayer(HopfieldLayer(
                                                 input_size=d_model,
                                                 num_heads=nhead,
+                                                pattern_size=2**11,
                                                 dropout=dropout_hopfield,
-                                                quantity=dim_feedforward*2
+                                                quantity=2**12
                                             ),
                                             dim_feedforward=dim_feedforward) ),
                                     nn.Linear(d_model,d_model)
                                     )
-            self.attn = EvolvedTransformerBlock(d_model,
+            attn = EvolvedTransformerBlock(d_model,
                                 num_heads=nhead,
                                 attn=SelfAttention(d_model,
                                                     causal=False,
@@ -295,7 +321,7 @@ class TransformerBlock(Module):
                                 pkm=copy.deepcopy(self.pkm1)
                                 )
         
-            self.attn = GRUGating(d_model,attn)
+        self.attn = GRUGating(d_model,attn)
 
         self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**16,window=d_model*4))
 
@@ -371,7 +397,7 @@ class TransformerModule(ModuleList):
         self.deberta_layers = nn.ModuleList([copy.deepcopy(block) for _ in range(deberta_layers)])
         self.norm = RMSNorm(d_model,eps=1e-16)
         self.scale_output = nn.Parameter(torch.zeros(d_model))
-        self.scale_abs_pos_emb = nn.Parameter(torch.ones()(d_model))
+        self.scale_abs_pos_emb = nn.Parameter(torch.ones(d_model))
         del(block)
 
         d_model = d_model

@@ -38,10 +38,13 @@ except:
     torch.save(tokenizer,"models/tokenizer.tar")
 vocab = tokenizer.vocab
 
-def batchify(data, bsz):
-    nbatch = data.size(0) // bsz
-    data = data.narrow(0, 0, nbatch * bsz)
-    data = data.view(bsz, -1).contiguous()
+def batchify(data, bsz,dim=0):
+    nbatch = data.size(dim) // bsz
+    data = data.narrow(dim, 0, nbatch * bsz)
+    if len(data.size())==2:
+        data = data.view(2, bsz, -1).contiguous()
+    elif len(data.size())==1:
+        data = data.view(bsz, -1).contiguous()
     return data
 
 batch_size = 1
@@ -52,7 +55,7 @@ from scripts.model import TransformerModel
 ntokens = tokenizer.vocab_size
 emsize = 2048//8
 nhid = emsize * 4
-nlayers = 2
+nlayers = 4
 deberta_layers = 8
 repeated_deberta_layers = 0
 nhead = 16
@@ -225,17 +228,6 @@ def random_mask_shuffle_encoder(
                 together_count = 0
     return inp_2.clone().detach()
 
-def random_mask_encoder(inp):
-    inp_2 = inp.clone().detach()
-    for i in range(inp.size(0)):
-        for j in range(inp.size(1)):
-            rnd = random.randint(0,6)
-            if rnd==1:
-                inp_2[i,j] = 5
-            elif rnd==0:
-                inp_2[i,j] = inp[i,random.randint(0,inp.size(1)-1)]
-    return inp_2
-
 def prepare_batch(source):
     data = source.clone().detach()
     target = source
@@ -255,7 +247,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1
+lr = 0.09
 if not use_deepspeed:
     if discriminator_enabled:
         for p in model.discriminator.parameters():
@@ -398,6 +390,10 @@ try:
     processed_train_data = torch.load("models/data/"+file+"_train.tar",map_location=torch.device('cpu'))
     processed_test_data = torch.load("models/data/"+file+"_test.tar",map_location=torch.device('cpu'))
     processed_val_data = torch.load("models/data/"+file+"_val.tar",map_location=torch.device('cpu'))
+
+    processed_train_data = batchify(processed_train_data,batch_size,-1)
+    processed_test_data = batchify(processed_test_data,eval_batch_size,-1)
+    processed_val_data = batchify(processed_val_data,eval_batch_size,-1)
 except:
     train_data = data_process(io.open(train_filepath, encoding="utf8").read()).to(device)
     val_data = data_process(io.open(valid_filepath, encoding="utf8").read()).to(device)
@@ -445,9 +441,8 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
 
 
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
-model_train_step_inbuilt = True
 
-def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,step_=step,optimizer=optimizer,optimizer_disc=optimizer_disc):
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=600,step_=step,optimizer=optimizer,optimizer_disc=optimizer_disc):
     model.train() 
     total_loss = 0.
     total_loss_d = 0.
@@ -455,8 +450,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     start_time = time.time()
     intermediate_save_time = time.time()
     single_pass_mem = None
-    #model.alt_mem = None
-    #model.alt_mem_tokens(None,False)
     acc = 0
     acc_d = 0
     total_acc = 0
@@ -469,6 +462,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         if epoch%2==1:
             single_pass_mem = None
         data, targets = get_batch(processed_train_data, i)
+        torch.cuda.empty_cache()
 
         outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer)
 
