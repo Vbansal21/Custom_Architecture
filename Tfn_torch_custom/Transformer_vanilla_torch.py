@@ -52,8 +52,8 @@ from scripts.model import TransformerModel
 ntokens = tokenizer.vocab_size
 emsize = 2048//8
 nhid = emsize * 4
-nlayers = 8
-deberta_layers = 0
+nlayers = 2
+deberta_layers = 8
 repeated_deberta_layers = 0
 nhead = 16
 dropout = 0.1
@@ -255,7 +255,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.1
+lr = 1
 if not use_deepspeed:
     if discriminator_enabled:
         for p in model.discriminator.parameters():

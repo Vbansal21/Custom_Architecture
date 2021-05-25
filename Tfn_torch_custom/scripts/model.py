@@ -297,7 +297,7 @@ class TransformerBlock(Module):
         
             self.attn = GRUGating(d_model,attn)
 
-        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**10,window=d_model))
+        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**16,window=d_model*4))
 
         self.conv_emb = convolutional_embedding(d_model)
 
@@ -369,6 +369,9 @@ class TransformerModule(ModuleList):
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
         block = TransformerBlock(d_model, nhead, nhid, dropout,context=True,deberta=True)
         self.deberta_layers = nn.ModuleList([copy.deepcopy(block) for _ in range(deberta_layers)])
+        self.norm = RMSNorm(d_model,eps=1e-16)
+        self.scale_output = nn.Parameter(torch.zeros(d_model))
+        self.scale_abs_pos_emb = nn.Parameter(torch.ones()(d_model))
         del(block)
 
         d_model = d_model
@@ -407,12 +410,11 @@ class TransformerModule(ModuleList):
                 output = ckpt(dec,output)
 
         out = self.absolutepositionalembedding(output) if len(self.deberta_layers)!=0 else output
+        out = (out*self.scale_abs_pos_emb) + (self.norm(output * self.scale_output))
         
         for enc in self.deberta_layers:
             for _ in range(self.repeated_deberta_layers+1):
                 out = ckpt(enc,out,output)
-        else:
-            output = out
 
         return output
 
@@ -549,7 +551,7 @@ class TransformerModel(Module):
 
     def init_weights(self) -> NoReturn :
         for w in self.parameters():
-            w.data.uniform_(-1/4,1/4)
+            w.data.uniform_(-1/8,1/8)
             
     def __len__(self) -> int:
         return sum(p.numel() for p in self.parameters())
