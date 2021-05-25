@@ -406,13 +406,15 @@ class TransformerModule(ModuleList):
             for dec in self.decoder:
                 output = ckpt(dec,output)
 
-        out = self.absolutepositionalembedding(output)
+        out = self.absolutepositionalembedding(output) if len(self.deberta_layers)!=0 else output
         
         for enc in self.deberta_layers:
             for _ in range(self.repeated_deberta_layers):
                 out = ckpt(enc,out,output)
+        else:
+            output = out
 
-        return out
+        return output
 
 class TransformerModel(Module):
 

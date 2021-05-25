@@ -52,8 +52,8 @@ from scripts.model import TransformerModel
 ntokens = tokenizer.vocab_size
 emsize = 2048//8
 nhid = emsize * 4
-nlayers = 2
-deberta_layers = 8
+nlayers = 8
+deberta_layers = 0
 repeated_deberta_layers = 1
 nhead = 16
 dropout = 0.1
@@ -548,7 +548,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 if discriminator_enabled:
                     scheduler_disc.step(step_)
                 step_ += 1
-                step = step_
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
@@ -610,6 +609,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     "target":wandb.Html(req_targets),
                 }
             )
+    return step_
 
 
 def evaluate(eval_model, data_source):
@@ -638,7 +638,7 @@ while True:
         epoch +=1
     step=step
     epoch_start_time = time.time()
-    train(resume_batch=resume_batch,step_=step)
+    step = train(resume_batch=resume_batch,step_=step)
     resume_batch = 0
     val_loss, val_acc = evaluate(model, processed_val_data)
     print('-' * 110)
