@@ -8,7 +8,7 @@ from torch import nn
 from torch import Tensor
 from einops import rearrange
 #from performer_torch import PerformerLM
-from pytorch_model_summary import summary
+#from pytorch_model_summary import summary
 from torchnlp.encoders.text import SubwordEncoder
 from torchtext.utils import download_from_url, extract_archive
 #from typing import Tuple, Optional, Any, NoReturn, Union, Literal
@@ -23,7 +23,7 @@ torch.autograd.set_detect_anomaly(True)
 autocast = torch.cuda.amp.autocast
 
 
-file = "wikitextv2"
+file = "wikitextv103"
 if file == "wikitextv2":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
 elif file == "wikitextv103":
@@ -32,9 +32,10 @@ test_filepath, valid_filepath, train_filepath = extract_archive(download_from_ur
 try:
     tokenizer = torch.load("models/tokenizer.tar")
 except:
-    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**16,reserved_tokens=[
+    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**14,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
-    ])
+    ],
+    eos_index=3,unknown_index=1,padding_index=0,min_occurrences=1,max_occurrences=100000,enforce_reversible=True)
     torch.save(tokenizer,"models/tokenizer.tar")
 vocab = tokenizer.vocab
 
@@ -50,23 +51,134 @@ def batchify(data, bsz,dim=0):
 batch_size = 1
 eval_batch_size = batch_size
 
-from scripts.model import TransformerModel
-
 ntokens = tokenizer.vocab_size
-emsize = 2048//8
+emsize = 2048//16
 nhid = emsize * 4
 nlayers = 4
 deberta_layers = 8
-repeated_deberta_layers = 1
+repeated_deberta_layers = 4
 nhead = 16
 dropout = 0.1
 mem_tokens = 128*4
-bptt = (1024*2-5+mem_tokens) - mem_tokens
+bptt = (1024*4-5+mem_tokens) - mem_tokens
 max_seq_len = 2**16
+seq_scale_down = 128
+
 discriminator_enabled = False
-seq_scale_down = 16
+progressive_generation = True
 
 use_deepspeed = False
+
+
+def data_process(raw_text_iter):
+  data = tokenizer.encode(raw_text_iter)
+  return data.contiguous()
+
+def random_mask_shuffle_encoder(
+                            inp: Tensor,
+                            mask: bool = True,
+                            mask_percentage: float = 15.0,
+                            mask_together_nos: int = 3,
+                            mask_continuous_pos: float = -101.0,
+                            shuffle: bool = True,
+                            shuffle_percentage: float = 15,
+                            shuffle_together_nos: int = 3,
+                            shuffle_continuous_pos: float = -101
+                        ) -> Tensor:
+    inp_2: Tensor = inp.clone().detach()
+    for i in range(inp.size(0)):
+        count: int = 0
+        together_count: int = 0
+        for j in range(inp.size(1)):
+            if not shuffle:
+                break
+            rnd: float = -1
+            if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
+                rnd: float = random.randint(0,100000)/1000
+            elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
+                shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
+                if shuffle_continuous_pos < 0:
+                    if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                        rnd: float = shuffle_percentage/2
+                else:
+                    if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
+                        rnd: float = shuffle_percentage/2
+            if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
+                while True:
+                    r = random.randint(0,inp.size(1)-1)
+                    if r!=j:
+                        break
+                inp_2[i,j],inp_2[i,r] = inp[i,r],inp[i,j]
+                count += 1
+                together_count += 1
+            elif together_count>=shuffle_together_nos:
+                together_count = 0
+
+        count: int = 0
+        together_count: int = 0
+        for j in range(inp.size(1)):
+            rnd: float = -1
+            if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
+                rnd: float = random.randint(0,100000)/1000
+            elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
+                mask_together_nos = mask_percentage * (inp.size(1)/100)
+                if mask_continuous_pos < 0:
+                    if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                        rnd: float = mask_percentage/2
+                else:
+                    if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
+                        rnd: float = mask_percentage/2
+            if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
+                inp_2[i,j] = 5
+                count += 1
+                together_count += 1
+            elif together_count>=mask_together_nos:
+                together_count = 0
+    return inp_2.clone().detach()
+
+def get_batch(source,j,bptt=bptt,progressive=True,shuffle=False):
+    rnd = 0 if not shuffle else random.randint(0,10)//10
+    if progressive:
+        seq_len = min(bptt, source.size(1) - j) -1 -1
+        data = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
+        data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        targets = source[:,j:j+seq_len].to(device)
+        targets = torch.cat((targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
+    else:
+        seq_len = min(bptt, source.size(1) - j) -1 -1 -1
+        data = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=34.1,mask_together_nos=10,mask_continuous_pos=66,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
+        data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        targets = source[:,j:j+seq_len].to(device)
+        targets = torch.cat((torch.full((targets.size(0),1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
+    return data,targets
+
+try:
+    processed_train_data = torch.load("models/data/"+file+"_train.tar",map_location=torch.device('cpu'))
+    processed_test_data = torch.load("models/data/"+file+"_test.tar",map_location=torch.device('cpu'))
+    processed_val_data = torch.load("models/data/"+file+"_val.tar",map_location=torch.device('cpu'))
+
+    processed_train_data = batchify(processed_train_data,batch_size,-1)
+    processed_test_data = batchify(processed_test_data,eval_batch_size,-1)
+    processed_val_data = batchify(processed_val_data,eval_batch_size,-1)
+except:
+    train_data = data_process(io.open(train_filepath, encoding="utf8").read())
+    val_data = data_process(io.open(valid_filepath, encoding="utf8").read())
+    test_data = data_process(io.open(test_filepath, encoding="utf8").read())
+
+    processed_train_data = batchify(train_data, batch_size)
+    processed_val_data = batchify(val_data, eval_batch_size)
+    processed_test_data = batchify(test_data, eval_batch_size)
+
+    del(train_data,test_data,val_data)
+
+    torch.save(processed_train_data,"models/data/"+file+"_train.tar")
+    torch.save(processed_test_data,"models/data/"+file+"_test.tar")
+    torch.save(processed_val_data,"models/data/"+file+"_val.tar")
+
+torch.cuda.empty_cache()
+
+from scripts.model import TransformerModel
+torch.cuda.empty_cache()
 
 deepspeed_args = {
   "train_batch_size": batch_size,
@@ -161,93 +273,14 @@ else:
                             ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
-
-def data_process(raw_text_iter):
-  data = tokenizer.encode(raw_text_iter)
-  return torch.tensor(data)
-
-def random_mask_shuffle_encoder(
-                            inp: Tensor,
-                            mask: bool = True,
-                            mask_percentage: float = 15.0,
-                            mask_together_nos: int = 3,
-                            mask_continuous_pos: float = -101.0,
-                            shuffle: bool = True,
-                            shuffle_percentage: float = 15,
-                            shuffle_together_nos: int = 3,
-                            shuffle_continuous_pos: float = -101
-                        ) -> Tensor:
-    inp_2: Tensor = inp.clone().detach()
-    for i in range(inp.size(0)):
-        count: int = 0
-        together_count: int = 0
-        for j in range(inp.size(1)):
-            if not shuffle:
-                break
-            rnd: float = -1
-            if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
-                rnd: float = random.randint(0,100000)/1000
-            elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
-                shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
-                if shuffle_continuous_pos < 0:
-                    if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
-                        rnd: float = shuffle_percentage/2
-                else:
-                    if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
-                        rnd: float = shuffle_percentage/2
-            if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
-                while True:
-                    r = random.randint(0,inp.size(1)-1)
-                    if r!=j:
-                        break
-                inp_2[i,j],inp_2[i,r] = inp[i,r],inp[i,j]
-                count += 1
-                together_count += 1
-            elif together_count>=shuffle_together_nos:
-                together_count = 0
-
-        count: int = 0
-        together_count: int = 0
-        for j in range(inp.size(1)):
-            rnd: float = -1
-            if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
-                rnd: float = random.randint(0,100000)/1000
-            elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
-                mask_together_nos = mask_percentage * (inp.size(1)/100)
-                if mask_continuous_pos < 0:
-                    if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
-                        rnd: float = mask_percentage/2
-                else:
-                    if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
-                        rnd: float = mask_percentage/2
-            if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
-                inp_2[i,j] = 5
-                count += 1
-                together_count += 1
-            elif together_count>=mask_together_nos:
-                together_count = 0
-    return inp_2.clone().detach()
-
-def prepare_batch(source):
-    data = source.clone().detach()
-    target = source
-    return torch.cat((data.unsqueeze(0).to(torch.device('cpu')),target.unsqueeze(0).to(torch.device('cpu'))),dim=0)
-
-def get_batch(source,j,bptt=bptt):
-    rnd = 0#random.randint(0,10)//10
-    seq_len = min(bptt -1 -1 , source.size(2) - j -1 -1)
-    data = random_mask_shuffle_encoder(source[0,:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
-    data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
-    targets = source[1,:,j:j+seq_len].to(device)
-    targets = torch.cat((targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
-    return data,targets
+torch.cuda.empty_cache()
 
 #print(sum(p.numel() for p in model.parameters()))
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.33
+lr = 1
 if not use_deepspeed:
     if discriminator_enabled:
         for p in model.discriminator.parameters():
@@ -318,7 +351,8 @@ wandb.init(project=project_name,config={
     "max_seq_len":max_seq_len,
     "seq_scale_down":seq_scale_down,
     "discriminator_enabled":discriminator_enabled,
-    "Number of Parameters":len(model)
+    "Number of Parameters":len(model),
+    "Progressive generation training":progressive_generation
 })
 
 #wandb.watch(model,criterion=criterion,log_freq=20)
@@ -386,34 +420,6 @@ except Exception as e:
 if best_model==None:
     best_model=model
 
-try:
-    processed_train_data = torch.load("models/data/"+file+"_train.tar",map_location=torch.device('cpu'))
-    processed_test_data = torch.load("models/data/"+file+"_test.tar",map_location=torch.device('cpu'))
-    processed_val_data = torch.load("models/data/"+file+"_val.tar",map_location=torch.device('cpu'))
-
-    processed_train_data = batchify(processed_train_data,batch_size,-1)
-    processed_test_data = batchify(processed_test_data,eval_batch_size,-1)
-    processed_val_data = batchify(processed_val_data,eval_batch_size,-1)
-except:
-    train_data = data_process(io.open(train_filepath, encoding="utf8").read()).to(device)
-    val_data = data_process(io.open(valid_filepath, encoding="utf8").read()).to(device)
-    test_data = data_process(io.open(test_filepath, encoding="utf8").read()).to(device)
-
-    train_data = batchify(train_data, batch_size)
-    val_data = batchify(val_data, eval_batch_size)
-    test_data = batchify(test_data, eval_batch_size)
-
-    processed_train_data = prepare_batch(train_data)
-    processed_test_data = prepare_batch(test_data)
-    processed_val_data = prepare_batch(val_data)
-
-    del(train_data,test_data,val_data)
-
-    torch.save(processed_train_data,"models/data/"+file+"_train.tar")
-    torch.save(processed_test_data,"models/data/"+file+"_test.tar")
-    torch.save(processed_val_data,"models/data/"+file+"_val.tar")
-
-torch.cuda.empty_cache()
 model.to(device)
 
 #inp = torch.zeros([1,bptt],dtype=torch.long).to(device)
@@ -442,7 +448,8 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
 
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 
-def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,step_=step,optimizer=optimizer,optimizer_disc=optimizer_disc):
+torch.cuda.empty_cache()
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=1800,step_=step,optimizer=optimizer,optimizer_disc=optimizer_disc):
     model.train() 
     total_loss = 0.
     total_loss_d = 0.
@@ -454,14 +461,15 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     acc_d = 0
     total_acc = 0
     total_acc_d = 0
-    for batch, i in enumerate(range(0, processed_train_data.size(2), bptt-1-1)):
+    stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
+    for batch, i in enumerate(range(0, processed1train_data.size(1), stride_size)):
         step_time = time.time()
         if resume_batch != None:
             if batch < resume_batch:
                 continue
         if epoch%2==1:
             single_pass_mem = None
-        data, targets = get_batch(processed_train_data, i)
+        data, targets = get_batch(processed_train_data, i,progressive=progressive_generation)
         torch.cuda.empty_cache()
 
         outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer)
@@ -537,7 +545,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             """
             intermediate_save_time = time.time()
         if step_scheduler != None:
-            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(2)//bptt < step_scheduler):
+            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
                 scheduler.step(step_)
                 if discriminator_enabled:
                     scheduler_disc.step(step_)
@@ -551,7 +559,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '
                     'lr_g {:04.5f} | lr_d {:04.5f} | ms/batch {:08.3f} | acc_g {:3.2f}% | '
                     'loss_g {:5.3f} | acc_d {:3.2f}% | loss_d {:5.3f} | ppl {:10.3f}'.format(
-                        epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_last_lr()[0],
+                        epoch, batch, processed_train_data.size(1) // bptt, scheduler.get_last_lr()[0],
                         scheduler_disc.get_last_lr()[0],
                         elapsed * 1000 / log_interval,total_acc*100/log_interval,
                         cur_loss,total_acc_d*100/log_interval,cur_loss_d,total_ppl ))
@@ -559,7 +567,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '
                     'lr {:04.5f} | ms/batch {:08.3f} | acc {:3.2f}% | '
                     'loss {:5.3f} | ppl {:10.3f}'.format(
-                        epoch, batch, processed_train_data.size(2) // bptt, scheduler.get_last_lr()[0],
+                        epoch, batch, processed_train_data.size(1) // bptt, scheduler.get_last_lr()[0],
                         elapsed * 1000 / log_interval,total_acc*100/log_interval,
                         cur_loss,total_ppl ))
             total_loss = 0.
@@ -612,7 +620,7 @@ def evaluate(eval_model, data_source):
     total_acc = 0.
     single_pass_mem = None
     with torch.no_grad():
-        for i in range(0, data_source.size(2), bptt-1-1):
+        for i in range(0, data_source.size(1), bptt-1-1):
             data, targets = get_batch(data_source, i)
             if use_deepspeed:
                 with autocast():
@@ -623,7 +631,7 @@ def evaluate(eval_model, data_source):
                 output,single_pass_mem = eval_model(data,mem = single_pass_mem)
                 total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
                 total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
-    return total_loss / (data_source.size(2)), total_acc/data_source.size(2)
+    return total_loss / (data_source.size(1)), total_acc/data_source.size(1)
 
 while True:
     if epoch >= epochs:

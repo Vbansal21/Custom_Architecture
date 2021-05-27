@@ -467,9 +467,9 @@ class TransformerModule(ModuleList):
 
         out = self.absolutepositionalembedding(output) if len(self.deberta_layers)!=0 else output
         out = (out*self.scale_abs_pos_emb) + (self.norm(output * self.scale_output)).clamp(min=-0.125,max=0.125)
-        
-        for enc in self.deberta_layers:
-            for _ in range(self.repeated_deberta_layers+1):
+
+        for _ in range(self.repeated_deberta_layers+1):
+            for enc in self.deberta_layers:
                 out = ckpt(enc,out,output)
         else:
             if self.deberta_layers!=None:
@@ -511,24 +511,24 @@ class TransformerModel(Module):
         self.encoder_decoder = encoder_decoder
         self.transformer_encoder = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len)
         
-        self.embedding_encoder = nn.Sequential(
-                nn.Embedding(ntoken, ninp,padding_idx=padding_idx),
-                nn.Linear(ninp,nhid),
-                nn.Linear(nhid,ninp),
-            )
+        self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)
 
         
         self.ninp = ninp
         self.ntokens = ntoken
         
-        self.decoder = nn.Sequential(
-                nn.Linear(ninp,nhid),
-                nn.Linear(nhid,ninp),
-                nn.Linear(ninp,ntoken)
-            )
+        self.decoder = nn.Linear(ninp,ntoken)
 
         self.ffd1 = nn.Sequential(
             nn.Linear(ninp,nhid),
+            _get_activation_fn(activation),
+            FNO1d(nhead,nhead,nhid,nhid,nhid),
+            _get_activation_fn(activation),
+            nn.Linear(nhid,ninp),
+            _get_activation_fn(activation),
+            nn.Linear(ninp,nhid),
+            _get_activation_fn(activation),
+            FNO1d(nhead,nhead,nhid,nhid,nhid),
             _get_activation_fn(activation),
             nn.Linear(nhid,ninp),
             _get_activation_fn(activation)
@@ -617,7 +617,7 @@ class TransformerModel(Module):
 
     def init_weights(self) -> NoReturn :
         for w in self.parameters():
-            w.data.uniform_(-1/8,1/8)
+            w.data.uniform_(-1/16,1/16)
             
     def __len__(self) -> int:
         return sum(p.numel() for p in self.parameters())
