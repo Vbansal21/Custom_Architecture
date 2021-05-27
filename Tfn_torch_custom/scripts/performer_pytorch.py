@@ -412,8 +412,8 @@ class SelfAttention(nn.Module):
             k = torch.cat((kl, kr), dim = -1)
         
         if exists(self.hop_attn):
-            hop_attn_k = self.norm_hop_attn(ckpt(self.hop_attn,k)).to(k.device)
-            hop_attn_v = self.norm_hop_attn(ckpt(self.hop_attn,v)).to(v.device)
+            hop_attn_k = self.norm_hop_attn(ckpt(self.hop_attn,k)).clamp(min=-0.125,max=0.125).to(k.device)
+            hop_attn_v = self.norm_hop_attn(ckpt(self.hop_attn,v)).clamp(min=-0.125,max=0.125).to(v.device)
             k = torch.cat((k,hop_attn_k),dim=-2)
             v = torch.cat((v,hop_attn_v),dim=-2)
             k = ckpt(self.hop_attn_k_linear,k)

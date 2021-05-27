@@ -55,7 +55,7 @@ class SeparableConv1D(nn.Module):
     """
     def __init__(self, in_channel, inner_channels, out_channel, kernel_size=1, padding=0):
         super().__init__()
-        self.deep_wise = nn.Conv1d(in_channel, inner_channels, kernel_size=kernel_size, padding=padding, groups=in_channel)
+        self.deep_wise = nn.Conv1d(in_channel, inner_channels, kernel_size=kernel_size, padding=padding, groups=min(in_channel,inner_channels))
         self.point_wise = nn.Conv1d(inner_channels, out_channel, kernel_size=1)
 
     def forward(self, x):
@@ -94,9 +94,9 @@ class ET_Encoder_Block(nn.Module):
         )
 
         self.mid_layer_norm=nn.LayerNorm(d_model)
-        self.sep_conv = SeparableConv1D(d_model,d_model//2,d_model,kernal_size=9,padding=4)
+        self.sep_conv = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=9,padding=4)
 
-    def forward(self,x:Tensor) -> Tensor:
+    def forward(self,x:Tensor,*args) -> Tensor:
 
         glued = ckpt(self.glu,self.layer_norms[0](x))+x
         glu_normed = self.layer_norms[1](glued)
@@ -117,7 +117,7 @@ class ET_Encoder_Block(nn.Module):
         if self.pkm == None:
             forwarded = ckpt(self.feed_forward,normed) + attended
         else:
-            forwarded = ckpt(self.feed_forward,normed)+ckpt(self.pkm,normed)+attended
+            forwarded = ckpt(self.feed_forward,normed.transpose(1,2)).transpose(1,2)+ckpt(self.pkm,normed)+attended
         return forwarded
         
 
@@ -151,9 +151,9 @@ class ET_Decoder_Block(nn.Module):
             self.feed_forward = ffd
 
         self.sep_norm=nn.LayerNorm(d_model)
-        self.sep_conv_l = SeparableConv1D(d_model,d_model*2,d_model,kernal_size=11,padding=5)
-        self.sep_conv_r = SeparableConv1D(d_model,d_model//2,d_model,kernal_size=7,padding=3)
-        self.sep_mid = SeparableConv1D(d_model,d_model,d_model,kernal_size=7,padding=3)
+        self.sep_conv_l = SeparableConv1D(d_model,d_model*2,d_model,kernel_size=11,padding=5)
+        self.sep_conv_r = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=7,padding=3)
+        self.sep_mid = SeparableConv1D(d_model,d_model,d_model,kernel_size=7,padding=3)
 
     def forward(self,x:Tensor,context:Tensor) -> Tensor:
 
@@ -165,15 +165,15 @@ class ET_Decoder_Block(nn.Module):
         attended = self_attn+cross_attn
         attended_normed = self.layer_norms[1](attended)
 
-        sep_l = ckpt(self.sep_conv_l,attended_normed)
+        sep_l = ckpt(self.sep_conv_l,attended_normed.transpose(1,2)).transpose(1,2)
         sep_l = F.relu(sep_l)
 
-        sep_r = ckpt(self.sep_conv_r,attended_normed)
+        sep_r = ckpt(self.sep_conv_r,attended_normed.transpose(1,2)).transpose(1,2)
 
         sep_attended = sep_l + sep_r
         sep_normed = self.sep_norm(sep_attended)
 
-        sep_normed = ckpt(self.sep_mid,sep_normed)
+        sep_normed = ckpt(self.sep_mid,sep_normed.transpose(1,2)).transpose(1,2)
         sep_attended = sep_normed + attended
 
         sep_attn_normed = self.layer_norms[2](sep_attended)
@@ -188,6 +188,6 @@ class ET_Decoder_Block(nn.Module):
         if self.pkm==None:
             forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn
         else:
-            forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn + ckpt(self.pkm,attn_normed)
+            forwarded = ckpt(self.feed_forward,attn_normed.transpose(1,2)).transpose(1,2) + cross_attn + ckpt(self.pkm,attn_normed)
 
         return forwarded

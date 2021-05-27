@@ -1,3 +1,4 @@
+from json import decoder
 import math
 #import profile
 import torch
@@ -22,7 +23,7 @@ from mogrifier import Mogrifier
 
 from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block #TODO: Redifine EvolvedTransformerBlock
 from .product_key_memory import PKM
-from .hopfield_modules import HopfieldLayer
+from .hopfield_modules import HopfieldLayer,HopfieldPooling
 from .hopfield_modules.transformer import HopfieldEncoderLayer
 from .performer_pytorch import SelfAttention
 
@@ -235,10 +236,10 @@ class TransformerBlock(Module):
                      dropout=0.5, 
                      dropout_hopfield=0.0,
                      activation="gelu",
-                     context=False,
                      mem_kv=64*16,
                      pkm_keys=64,
-                     deberta=False
+                     decoder=False,
+                     hopfield=False
                 ):
         super(TransformerBlock, self).__init__()
 
@@ -248,7 +249,7 @@ class TransformerBlock(Module):
         self.dropout2 = Dropout(dropout)
         self.dropout1 = Dropout(dropout)
 
-        self.deberta = deberta
+        self.decoder = decoder
 
         """
         self.ffd1 = nn.Sequential(
@@ -278,7 +279,7 @@ class TransformerBlock(Module):
                                                     ffd_dim=dim_feedforward
                                                 ))
 
-        if not deberta:
+        if hopfield:
             hop_attn = nn.Sequential(
                                     nn.Linear(d_model,d_model),
                                     GRUGating(d_model,HopfieldEncoderLayer(HopfieldLayer(
@@ -291,6 +292,11 @@ class TransformerBlock(Module):
                                             dim_feedforward=dim_feedforward) ),
                                     nn.Linear(d_model,d_model)
                                     )
+        else:
+            hop_attn = None
+
+        if not decoder:
+            
             attn_block = ET_Encoder_Block(d_model,
                                 num_heads=nhead,
                                 attn=SelfAttention(d_model,
@@ -302,12 +308,12 @@ class TransformerBlock(Module):
                                 pkm=copy.deepcopy(self.pkm1),
                                 )
         else:
-                
             attn = {
                 'self_1':SelfAttention(d_model,
                                         heads=nhead*2,
                                         dim_head=d_model//(nhead*2),
                                         num_mem_kv=mem_kv,
+                                        hop_attn=hop_attn,
                                         rotary_pos_emb=True),
                 'self_2':SelfAttention(d_model,
                                         heads=nhead,
@@ -318,6 +324,7 @@ class TransformerBlock(Module):
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
+                                        hop_attn=copy.deepcopy(hop_attn),
                                         rotary_pos_emb=False),
                 'cross_2':SelfAttention(d_model,
                                         heads=nhead,
@@ -338,8 +345,8 @@ class TransformerBlock(Module):
 
         self.conv_emb = convolutional_embedding(d_model)
 
-        self.context_exist = context
-        if context:
+        self.decoder = decoder
+        if decoder:
             self.ffd2 = copy.deepcopy(self.ffd1)
 
             self.pkm2 = copy.deepcopy(self.pkm1)
@@ -368,7 +375,7 @@ class TransformerBlock(Module):
         output = ckpt(self.gate,output,self.dropout1(output2))
         del(output2)
 
-        if self.context_exist:
+        if self.decoder:
             context = self.norm2(context)
             context = Positional_Encoding(context)
             context_ = ckpt(self.ffd2,context) + ckpt(self.pkm2,context)
@@ -378,7 +385,7 @@ class TransformerBlock(Module):
 
         output = ckpt(self.fno,output)
 
-        output = ckpt(self.attn,output,context)
+        output = ckpt(self.attn,output,output,context)
         output = self.dropout2(output)
         if self.mlp!=None:
             output = ckpt(self.mlp,output)
@@ -399,16 +406,29 @@ class TransformerModule(ModuleList):
             block = TransformerBlock(d_model, nhead, nhid, dropout)
             self.encoder = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,context=True)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True)
             self.decoder_cross = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
-        block = TransformerBlock(d_model, nhead, nhid, dropout,context=True,deberta=True)
-        self.deberta_layers = nn.ModuleList([copy.deepcopy(block) for _ in range(deberta_layers)])
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True)
+        self.deberta_layers = nn.ModuleList([copy.deepcopy(block) for _ in range(deberta_layers)]) if deberta_layers else None
         self.norm = RMSNorm(d_model,eps=1e-16)
         self.scale_output = nn.Parameter(torch.zeros(d_model))
         self.scale_abs_pos_emb = nn.Parameter(torch.ones(d_model))
         del(block)
+
+        self.prev_state_attend = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True)
+        self.register_buffer(
+            name='prev_state',
+            tensor=torch.zeros((1,8192,d_model))
+        )
+        self.hop_pool = HopfieldPooling(
+                            input_size=d_model,
+                        )
+        self.prev_state_update = nn.Sequential(
+            FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=nhid,transpose_req=False),
+            nn.Conv1d(d_model,d_model,kernel_size=2,stride=1,padding=0)
+            )
 
         d_model = d_model
         self.num_layers = num_layers
@@ -446,11 +466,20 @@ class TransformerModule(ModuleList):
                 output = ckpt(dec,output)
 
         out = self.absolutepositionalembedding(output) if len(self.deberta_layers)!=0 else output
-        out = (out*self.scale_abs_pos_emb) + (self.norm(output * self.scale_output))
+        out = (out*self.scale_abs_pos_emb) + (self.norm(output * self.scale_output)).clamp(min=-0.125,max=0.125)
         
         for enc in self.deberta_layers:
             for _ in range(self.repeated_deberta_layers+1):
                 out = ckpt(enc,out,output)
+            out = ckpt(self.prev_state_attend,out,repeat(self.prev_state,'1 n d -> b n d',b=out.size(0)))
+        else:
+            if self.deberta_layers!=None:
+                output = out
+
+        tmp = ckpt(self.hop_pool,output)
+        tmp = torch.sum(tmp,dim=0,keepdim=True).view(1,1,-1)
+        self.prev_state = torch.cat((self.prev_state,tmp),dim=1)
+        self.prev_state = ckpt(self.prev_state_update, self.prev_state.transpose(-1,-2)).transpose(-1,-2)
 
         return output
 
@@ -996,26 +1025,22 @@ class TransformerModel(Module):
 
         if generator or not self.discriminator_enabled:
 
-            src = ckpt(self.scale_down_fno,src)
-            if self.encoder_decoder:
-                context = ckpt(self.scale_down_fno,context)
+            src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
                 
-            src = rearrange(src,'b n d -> b d n')
             if src.size(2)%self.seq_scale_down != 0:
                 src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=self.seq_scale_down-src.size(2)%self.seq_scale_down).to(self.device)),dim=2)
 
-            src = ckpt(self.scale_down_conv,src)
-            src = rearrange(src,'b d n -> b n d')
+            src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
             s = src.size(1)
 
             if self.encoder_decoder:
                 context = ckpt(self.embedding_encoder,context)
                 context = context * math.sqrt(self.ninp)
+                context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
                 if context.size(2)%self.seq_scale_down!=0:
-                    context = torch.cat((rearrange(context,'b n d -> b d n'),repeat(self.padding_for_conv_scale,'d -> b d n',b=context.size(0),n=self.seq_scale_down-context.size(2)%self.seq_scale_down).to(self.device)),dim=2)
+                    context = torch.cat((context,repeat(self.padding_for_conv_scale,'d -> b d n',b=context.size(0),n=self.seq_scale_down-context.size(2)%self.seq_scale_down).to(self.device)),dim=2)
 
-                context = ckpt(self.scale_down_conv,context)
-                context = rearrange(context,'b d n -> b n d')
+                context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
                 
 
 
@@ -1059,8 +1084,8 @@ class TransformerModel(Module):
 
             output = output.contiguous()
 
-            output = ckpt(self.ffd1,output) + output
-            output = ckpt(self.norm1,output)
+            output = ckpt(self.ffd1,output)
+            output = ckpt(self.norm1,output) + output
 
             if self.encoder_decoder:
                 context = ckpt(self.scale_down_fno,context)
@@ -1069,8 +1094,8 @@ class TransformerModel(Module):
 
             output = ckpt(self.transformer_encoder,output,context)
 
-            output = ckpt(self.ffd2,output) + output
-            output = ckpt(self.norm2,output)
+            output = ckpt(self.ffd2,output)
+            output = ckpt(self.norm2,output) + output
 
 
             for i in range(b):
@@ -1084,8 +1109,7 @@ class TransformerModel(Module):
             output = output[:,output.size(1)-s:] if type(mem) != None or self.mem_exist else output
 
             output = ckpt(self.scale_up_fno,output)
-            output = ckpt(self.scale_up_conv,rearrange(output,'b n d -> b d n'))
-            output = rearrange(output,'b d n -> b n d')
+            output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
             out = output[:,:s_]
 
             output = ckpt(self.decoder,out)

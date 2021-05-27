@@ -79,7 +79,7 @@ class SpectralConv1d(nn.Module):
         return x
 
 class FNO1d(nn.Module):
-    def __init__(self, modes, width,inp_dim=2,out_dim=1,ffd_dim=128):
+    def __init__(self, modes, width,inp_dim=2,out_dim=1,ffd_dim=128,transpose_req=True):
         super(FNO1d, self).__init__()
 
         """
@@ -94,6 +94,8 @@ class FNO1d(nn.Module):
         output: the solution of a later timestep
         output shape: (batchsize, x=s, c=1)
         """
+
+        self.transpose_req = transpose_req
 
         self.modes1 = modes
         self.width = width
@@ -113,9 +115,12 @@ class FNO1d(nn.Module):
         self.fc2 = nn.Linear(ffd_dim, out_dim)
 
     def forward(self, x):
-
-        x = self.fc0(x)
-        x = x.permute(0, 2, 1)
+        
+        if not self.transpose_req:
+            x = self.fc0(x.transpose(-1,-2)).transpose(-1,-2)
+        else:
+            x = self.fc0(x)
+            x = x.transpose(-1,-2)
 
         x1 = ckpt(self.conv0,x)
         x2 = ckpt(self.w0,x)
@@ -136,10 +141,18 @@ class FNO1d(nn.Module):
         x2 = ckpt(self.w3,x)
         x = x1 + x2
 
-        x = x.permute(0, 2, 1)
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.fc2(x)
+        if not self.transpose_req:
+            x = x.transpose(-1,-2)
+            x = self.fc1(x)
+            x = F.relu(x)
+            x = self.fc2(x).transpose(-1,-2)
+
+        else:
+            x = x.transpose(-1,-2)
+            x = self.fc1(x)
+            x = F.relu(x)
+            x = self.fc2(x)
+
         return x
 
 
