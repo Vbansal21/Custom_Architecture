@@ -55,7 +55,7 @@ from scripts.model import TransformerModel
 ntokens = tokenizer.vocab_size
 emsize = 2048//8
 nhid = emsize * 4
-nlayers = 2
+nlayers = 4
 deberta_layers = 8
 repeated_deberta_layers = 1
 nhead = 16
@@ -442,7 +442,7 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
 
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 
-def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=600,step_=step,optimizer=optimizer,optimizer_disc=optimizer_disc):
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,step_=step,optimizer=optimizer,optimizer_disc=optimizer_disc):
     model.train() 
     total_loss = 0.
     total_loss_d = 0.

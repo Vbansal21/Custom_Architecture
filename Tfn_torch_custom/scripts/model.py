@@ -471,10 +471,11 @@ class TransformerModule(ModuleList):
         for enc in self.deberta_layers:
             for _ in range(self.repeated_deberta_layers+1):
                 out = ckpt(enc,out,output)
-            out = ckpt(self.prev_state_attend,out,repeat(self.prev_state,'1 n d -> b n d',b=out.size(0)))
         else:
             if self.deberta_layers!=None:
                 output = out
+
+        output = ckpt(self.prev_state_attend,output,repeat(self.prev_state,'1 n d -> b n d',b=output.size(0)))
 
         tmp = ckpt(self.hop_pool,output)
         tmp = torch.sum(tmp,dim=0,keepdim=True).view(1,1,-1)
