@@ -15,7 +15,6 @@ from torchtext.utils import download_from_url, extract_archive
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #device = torch.device("cpu")
-torch.cuda._lazy_init()
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -29,23 +28,23 @@ if file == "wikitextv2":
 elif file == "wikitextv103":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
+
 try:
-    tokenizer = torch.load("models/tokenizer.tar")
+    tokenizer = torch.load("models/tokenizer_65547.tar")
 except:
-    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**14,reserved_tokens=[
+    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**15,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
     ],
-    eos_index=3,unknown_index=1,padding_index=0,min_occurrences=1,max_occurrences=100000,enforce_reversible=True)
+    eos_index=3,unknown_index=1,padding_index=0)
     torch.save(tokenizer,"models/tokenizer.tar")
 vocab = tokenizer.vocab
 
 def batchify(data, bsz,dim=0):
+    if data.size(0) == 2:
+        data = data[0]
     nbatch = data.size(dim) // bsz
     data = data.narrow(dim, 0, nbatch * bsz)
-    if len(data.size())==2:
-        data = data.view(2, bsz, -1).contiguous()
-    elif len(data.size())==1:
-        data = data.view(bsz, -1).contiguous()
+    data = data.view(bsz, -1).contiguous()
     return data
 
 batch_size = 1
@@ -54,15 +53,15 @@ eval_batch_size = batch_size
 ntokens = tokenizer.vocab_size
 emsize = 2048//16
 nhid = emsize * 4
-nlayers = 4
-deberta_layers = 8
-repeated_deberta_layers = 4
+nlayers = 8
+deberta_layers = 16
+repeated_deberta_layers = 0
 nhead = 16
 dropout = 0.1
 mem_tokens = 128*4
-bptt = (1024*4-5+mem_tokens) - mem_tokens
+bptt = (1024*2-5+mem_tokens) - mem_tokens
 max_seq_len = 2**16
-seq_scale_down = 128
+seq_scale_down = 64
 
 discriminator_enabled = False
 progressive_generation = True
@@ -153,14 +152,15 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=False):
     return data,targets
 
 try:
-    processed_train_data = torch.load("models/data/"+file+"_train.tar",map_location=torch.device('cpu'))
-    processed_test_data = torch.load("models/data/"+file+"_test.tar",map_location=torch.device('cpu'))
-    processed_val_data = torch.load("models/data/"+file+"_val.tar",map_location=torch.device('cpu'))
+    processed_train_data = torch.load("models/data_65547/"+file+"_train.tar",map_location=torch.device('cpu'))
+    processed_test_data = torch.load("models/data_65547/"+file+"_test.tar",map_location=torch.device('cpu'))
+    processed_val_data = torch.load("models/data_65547/"+file+"_val.tar",map_location=torch.device('cpu'))
 
     processed_train_data = batchify(processed_train_data,batch_size,-1)
     processed_test_data = batchify(processed_test_data,eval_batch_size,-1)
     processed_val_data = batchify(processed_val_data,eval_batch_size,-1)
-except:
+except Exception as e:
+    print(e)
     train_data = data_process(io.open(train_filepath, encoding="utf8").read())
     val_data = data_process(io.open(valid_filepath, encoding="utf8").read())
     test_data = data_process(io.open(test_filepath, encoding="utf8").read())
@@ -462,7 +462,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     total_acc = 0
     total_acc_d = 0
     stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
-    for batch, i in enumerate(range(0, processed1train_data.size(1), stride_size)):
+    for batch, i in enumerate(range(0, processed_train_data.size(1), stride_size)):
         step_time = time.time()
         if resume_batch != None:
             if batch < resume_batch:

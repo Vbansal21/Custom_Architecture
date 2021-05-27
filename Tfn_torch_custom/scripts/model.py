@@ -21,7 +21,7 @@ from torch.nn.modules.dropout import Dropout
 from einops import repeat,rearrange
 from mogrifier import Mogrifier
 
-from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block #TODO: Redifine EvolvedTransformerBlock
+from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block
 from .product_key_memory import PKM
 from .hopfield_modules import HopfieldLayer,HopfieldPooling
 from .hopfield_modules.transformer import HopfieldEncoderLayer

@@ -2,6 +2,7 @@ torch
 torchtext
 torchvision
 torchaudio
+tokenizers
 torchnlp
 pytorch-nlp
 pytorch_model_summary
