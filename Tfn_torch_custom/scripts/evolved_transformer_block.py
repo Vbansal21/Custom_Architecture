@@ -1,7 +1,8 @@
 #from ..models.embedder import Embedder, PositionalEncoder
 #import math
+from turtle import forward
 import torch
-from einops import rearrange
+from einops import rearrange,repeat
 from typing import Optional
 from torch.functional import Tensor
 import torch.nn as nn
@@ -47,11 +48,25 @@ class GLU(nn.Module):
         for convolution in self.gated_convs:
             x = convolution(x)
         return x
+        
+class SeparableConv1D(nn.Module):
+    """ Input: (batch_size, in_channel, length)
+        Output: (batch_size, out_channel, length)
+    """
+    def __init__(self, in_channel, inner_channels, out_channel, kernel_size=1, padding=0):
+        super().__init__()
+        self.deep_wise = nn.Conv1d(in_channel, inner_channels, kernel_size=kernel_size, padding=padding, groups=in_channel)
+        self.point_wise = nn.Conv1d(inner_channels, out_channel, kernel_size=1)
 
-class EvolvedTransformerBlock(nn.Module):
-    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,context = True,pkm=None):
-        super(EvolvedTransformerBlock,self).__init__()
-        self.context_pass = context
+    def forward(self, x):
+        x = self.deep_wise(x)
+        x = self.point_wise(x)
+        return x
+
+
+class ET_Encoder_Block(nn.Module):
+    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,pkm=None):
+        super(ET_Encoder_Block,self).__init__()
         if attn == None:
             self.attention = nn.MultiheadAttention(d_model, num_heads) 
         else:
@@ -59,39 +74,35 @@ class EvolvedTransformerBlock(nn.Module):
         self.layer_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(4)])
         if ffd == None:
             self.feed_forward = nn.Sequential(
-                nn.Linear(d_model,ff_hidden*d_model),
+                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0),
                 nn.ReLU(),
-                nn.Linear(ff_hidden*d_model,d_model),
+                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0),
             )
         else:
             self.feed_forward = ffd
         self.pkm = pkm
         self.glu = GLU(d_model,1)
         self.left_net = nn.Sequential(
-            nn.Linear(d_model,ff_hidden*d_model),
-            nn.ReLU()
+            nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,padding=0),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,padding=0),
         )
         self.right_net = nn.Sequential(
             nn.Conv1d(in_channels=d_model,out_channels=d_model//2,kernel_size=3,padding=1),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Conv1d(in_channels=d_model//2,out_channels=d_model,kernel_size=1,padding=0),
         )
 
-        self.mid_layer_norm=nn.LayerNorm(d_model*ff_hidden)
-        self.sep_conv=nn.Sequential(
-            nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=1,kernel_size=9,padding=4),
-            nn.Conv1d(in_channels=1,out_channels=d_model,kernel_size=1)
-        )
+        self.mid_layer_norm=nn.LayerNorm(d_model)
+        self.sep_conv = SeparableConv1D(d_model,d_model//2,d_model,kernal_size=9,padding=4)
 
-    def forward(self,x:Tensor,context: Optional[Tensor] = None) -> Tensor:
+    def forward(self,x:Tensor) -> Tensor:
 
-        if context != None:
-            x = rearrange(torch.cat((x.unsqueeze(0),context.unsqueeze(0)),dim=0), 't b n d -> (t b) n d')
         glued = ckpt(self.glu,self.layer_norms[0](x))+x
         glu_normed = self.layer_norms[1](glued)
 
-        left_branch = ckpt(self.left_net,glu_normed)
+        left_branch = ckpt(self.left_net,glu_normed.transpose(1,2)).transpose(1,2)
         right_branch = ckpt(self.right_net,glu_normed.transpose(1,2)).transpose(1,2)
-        right_branch = F.pad(input=right_branch, pad=(0,left_branch.shape[2]-right_branch.shape[2],0,0,0,0), mode='constant', value=0)
 
         mid_result = left_branch+right_branch
         mid_result = ckpt(self.mid_layer_norm,mid_result)
@@ -100,20 +111,83 @@ class EvolvedTransformerBlock(nn.Module):
         mid_result = mid_result + glued
 
         normed = self.layer_norms[2](mid_result)
-        if context != None:
-            normed = rearrange(normed,'(t b) n d -> t b n d',t=2)
-            context = normed[1]
-            normed = normed[0]
-            mid_result = mid_result[0]
-        else:
-            context = normed
-        if self.context_pass:
-            attended = ckpt(self.attention,normed,context) + mid_result 
-        else:
-            attended = ckpt(self.attention,normed) + mid_result
+        attended = ckpt(self.attention,normed) + mid_result
+
         normed = self.layer_norms[3](attended)
         if self.pkm == None:
             forwarded = ckpt(self.feed_forward,normed) + attended
         else:
             forwarded = ckpt(self.feed_forward,normed)+ckpt(self.pkm,normed)+attended
+        return forwarded
+        
+
+
+class ET_Decoder_Block(nn.Module):
+    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,pkm=None):
+        super(ET_Decoder_Block,self).__init__()
+
+        if attn == None:
+            self.attention_self_1 = nn.MultiheadAttention(d_model, num_heads) 
+            self.attention_self_2 = nn.MultiheadAttention(d_model, num_heads) 
+            self.attention_cross_1 = nn.MultiheadAttention(d_model, num_heads) 
+            self.attention_cross_2 = nn.MultiheadAttention(d_model, num_heads) 
+        else:
+            self.attention_self_1 = attn['self_1'] 
+            self.attention_self_2 = attn['self_2'] 
+            self.attention_cross_1 = attn['cross_1'] 
+            self.attention_cross_2 = attn['cross_2'] 
+
+        self.layer_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(5)])
+
+        self.pkm = pkm
+
+        if ffd == None:
+            self.feed_forward = nn.Sequential(
+                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0),
+                nn.SiLU(),
+                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0),
+            )
+        else:
+            self.feed_forward = ffd
+
+        self.sep_norm=nn.LayerNorm(d_model)
+        self.sep_conv_l = SeparableConv1D(d_model,d_model*2,d_model,kernal_size=11,padding=5)
+        self.sep_conv_r = SeparableConv1D(d_model,d_model//2,d_model,kernal_size=7,padding=3)
+        self.sep_mid = SeparableConv1D(d_model,d_model,d_model,kernal_size=7,padding=3)
+
+    def forward(self,x:Tensor,context:Tensor) -> Tensor:
+
+        normed_x = self.layer_norms[0](x)
+
+        self_attn = ckpt(self.attention_self_1,normed_x)
+        cross_attn = ckpt(self.attention_cross_1,normed_x,context)
+
+        attended = self_attn+cross_attn
+        attended_normed = self.layer_norms[1](attended)
+
+        sep_l = ckpt(self.sep_conv_l,attended_normed)
+        sep_l = F.relu(sep_l)
+
+        sep_r = ckpt(self.sep_conv_r,attended_normed)
+
+        sep_attended = sep_l + sep_r
+        sep_normed = self.sep_norm(sep_attended)
+
+        sep_normed = ckpt(self.sep_mid,sep_normed)
+        sep_attended = sep_normed + attended
+
+        sep_attn_normed = self.layer_norms[2](sep_attended)
+
+        self_attn = ckpt(self.attention_self_2,sep_attn_normed) + sep_attended
+
+        self_attn_normed = self.layer_norms[3](self_attn)
+        cross_attn = ckpt(self.attention_cross_2,self_attn_normed,context) + self_attn
+
+        attn_normed = self.layer_norms[4](cross_attn)
+
+        if self.pkm==None:
+            forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn
+        else:
+            forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn + ckpt(self.pkm,attn_normed)
+
         return forwarded

@@ -20,7 +20,7 @@ from torch.nn.modules.dropout import Dropout
 from einops import repeat,rearrange
 from mogrifier import Mogrifier
 
-from .evolved_transformer_block import EvolvedTransformerBlock #TODO: Redifine EvolvedTransformerBlock
+from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block #TODO: Redifine EvolvedTransformerBlock
 from .product_key_memory import PKM
 from .hopfield_modules import HopfieldLayer
 from .hopfield_modules.transformer import HopfieldEncoderLayer
@@ -188,9 +188,9 @@ class ET_ffd(Module):
 
     def forward(self,x):
         out = ckpt(self.l_1,x)
-        out = out.permute(0,2,1)
+        out = out.transpose(1,2)
         out = ckpt(self.l_2,out)
-        return out.permute(0,2,1).contiguous()
+        return out.transpose(1,2).contiguous()
 
 class AbsolutePositionalEmbedding(Module):
     def __init__(self, dim, max_seq_len):
@@ -291,37 +291,48 @@ class TransformerBlock(Module):
                                             dim_feedforward=dim_feedforward) ),
                                     nn.Linear(d_model,d_model)
                                     )
-            attn = EvolvedTransformerBlock(d_model,
+            attn_block = ET_Encoder_Block(d_model,
                                 num_heads=nhead,
                                 attn=SelfAttention(d_model,
-                                                    causal=False,
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
                                                     hop_attn=hop_attn
                                                 ),
-                                ffd=copy.deepcopy(self.ffd1),
-                                context=context,
                                 pkm=copy.deepcopy(self.pkm1),
-
                                 )
         else:
                 
-            attn = EvolvedTransformerBlock(d_model,
+            attn = {
+                'self_1':SelfAttention(d_model,
+                                        heads=nhead*2,
+                                        dim_head=d_model//(nhead*2),
+                                        num_mem_kv=mem_kv,
+                                        rotary_pos_emb=True),
+                'self_2':SelfAttention(d_model,
+                                        heads=nhead,
+                                        dim_head=d_model//nhead,
+                                        num_mem_kv=mem_kv,
+                                        rotary_pos_emb=True),
+                'cross_1':SelfAttention(d_model,
+                                        heads=nhead,
+                                        dim_head=d_model//nhead,
+                                        num_mem_kv=mem_kv,
+                                        rotary_pos_emb=False),
+                'cross_2':SelfAttention(d_model,
+                                        heads=nhead,
+                                        dim_head=d_model//nhead,
+                                        num_mem_kv=mem_kv,
+                                        rotary_pos_emb=False)
+            }
+
+            attn_block = ET_Decoder_Block(d_model,
                                 num_heads=nhead,
-                                attn=SelfAttention(d_model,
-                                                    causal=False,
-                                                    heads=nhead,
-                                                    dim_head=d_model//nhead,
-                                                    num_mem_kv=mem_kv,
-                                                    rotary_pos_emb=False
-                                                ),
-                                ffd=copy.deepcopy(self.ffd1),
-                                context=True,
+                                attn=attn,
                                 pkm=copy.deepcopy(self.pkm1)
                                 )
         
-        self.attn = GRUGating(d_model,attn)
+        self.attn = GRUGating(d_model,attn_block)
 
         self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**16,window=d_model*4))
 
@@ -333,16 +344,15 @@ class TransformerBlock(Module):
 
             self.pkm2 = copy.deepcopy(self.pkm1)
         
-            self_attn_context = EvolvedTransformerBlock(d_model,
+            self_attn_context = ET_Encoder_Block(d_model,
                                 num_heads=nhead,
                                 attn=SelfAttention(d_model,
-                                                    causal=False,
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
-                                                    num_mem_kv=mem_kv
+                                                    num_mem_kv=mem_kv,
+                                                    rotary_pos_emb=True
                                                 ),
-                                ffd=copy.deepcopy(self.ffd1),
-                                context=False
+                                pkm=copy.deepcopy(self.pkm2)
                                 )
 
             self.self_attn_context = GRUGating(d_model,self_attn_context)
