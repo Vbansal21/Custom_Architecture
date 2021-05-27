@@ -18,6 +18,7 @@ tqdm
 spacy
 tensorboardx
 deepspeed
+fairseq
 mpi4py # sudo apt install libopenmpi-dev
 # sudo pip3 install --force-reinstall Ninja
 # sudo apt install libaio-dev
@@ -33,5 +34,17 @@ pytorch-lightning
 ort-gpu-nightly
 pennylane
 memory-profiler
+# sudo apt-get install gcc libdpkg-perl python3-dev
+# sudo apt-get install ffmpeg
+# sudo apt-get install nvidia-cuda-toolkit
+# 
 # -i https://test.pypi.org/simple/ ort-gpu-nightly
 # install pennylane --upgrade
+
+opencv-python
+opencv-contrib-python
+Pillow
+imageio
+six
+joblib
+

@@ -8,6 +8,9 @@
         }
     ],
     "settings": {
-        "python.pythonPath": "/home/vbansal21/anaconda3/envs/torchenv/bin/python"
+        "python.pythonPath": "/home/vbansal21/anaconda3/envs/torchenv/bin/python",
+        "files.associations": {
+            "separableconvolution_kernel.h": "c"
+        }
     }
 }
