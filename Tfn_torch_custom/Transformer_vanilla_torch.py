@@ -22,7 +22,7 @@ torch.autograd.set_detect_anomaly(True)
 autocast = torch.cuda.amp.autocast
 
 
-file = "wikitextv103"
+file = "wikitextv2"
 if file == "wikitextv2":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
 elif file == "wikitextv103":
@@ -30,9 +30,9 @@ elif file == "wikitextv103":
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 
 try:
-    tokenizer = torch.load("models/tokenizer_65547.tar")
+    tokenizer = torch.load("models/tokenizer.tar")
 except:
-    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**15,reserved_tokens=[
+    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**13,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
     ],
     eos_index=3,unknown_index=1,padding_index=0)
@@ -40,7 +40,7 @@ except:
 vocab = tokenizer.vocab
 
 def batchify(data, bsz,dim=0):
-    if data.size(0) == 2:
+    if data.size(0) == 2 and len(data.size())==3:
         data = data[0]
     nbatch = data.size(dim) // bsz
     data = data.narrow(dim, 0, nbatch * bsz)
@@ -51,15 +51,15 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 2048//16
+emsize = 384 #2048//4
 nhid = emsize * 4
-nlayers = 8
-deberta_layers = 16
-repeated_deberta_layers = 0
+nlayers = 1
+deberta_layers = 1
+repeated_deberta_layers = 1
 nhead = 16
-dropout = 0.1
+dropout = 0.7
 mem_tokens = 128*4
-bptt = (1024*2-5+mem_tokens) - mem_tokens
+bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**16
 seq_scale_down = 128
 
@@ -152,9 +152,9 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=False):
     return data,targets
 
 try:
-    processed_train_data = torch.load("models/data_65547/"+file+"_train.tar",map_location=torch.device('cpu'))
-    processed_test_data = torch.load("models/data_65547/"+file+"_test.tar",map_location=torch.device('cpu'))
-    processed_val_data = torch.load("models/data_65547/"+file+"_val.tar",map_location=torch.device('cpu'))
+    processed_train_data = torch.load("models/data/"+file+"_train.tar",map_location=torch.device('cpu'))
+    processed_test_data = torch.load("models/data/"+file+"_test.tar",map_location=torch.device('cpu'))
+    processed_val_data = torch.load("models/data/"+file+"_val.tar",map_location=torch.device('cpu'))
 
     processed_train_data = batchify(processed_train_data,batch_size,-1)
     processed_test_data = batchify(processed_test_data,eval_batch_size,-1)
@@ -178,6 +178,7 @@ except Exception as e:
 torch.cuda.empty_cache()
 
 from scripts.model import TransformerModel
+
 torch.cuda.empty_cache()
 
 deepspeed_args = {
@@ -436,9 +437,9 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
             out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
     else:
         out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
-    out = torch.argmax(out.view(-1, ntokens),dim=-1)
+    out = torch.argmax(out.view(-1, ntokens),dim=-1).to(torch.device('cpu'))
     result = tokenizer.decode(out)
-    print("Your input:\n\t",tokenizer.decode(text_input.view(-1)))
+    print("Your input:\n\t",tokenizer.decode(text_input.view(-1).to(torch.device('cpu'))))
     print("Model's Output:\n\t\t\b\b",result)
     print('')
     torch.cuda.empty_cache()
@@ -449,8 +450,9 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 
 torch.cuda.empty_cache()
-def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=1800,step_=step,optimizer=optimizer,optimizer_disc=optimizer_disc):
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=1800,optimizer=optimizer,optimizer_disc=optimizer_disc):
     model.train() 
+    global step
     total_loss = 0.
     total_loss_d = 0.
     total_ppl = 0.
@@ -481,9 +483,9 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
 
         log_interval = 200
         total_ppl += ppl
-        inputs = "\n".join([tokenizer.decode(i) for i in data])
-        output = "\n".join([tokenizer.decode(torch.argmax(i,dim=-1)) for i in outputs['output']])
-        req_targets = "\n".join([tokenizer.decode(i) for i in targets])
+        inputs = "\n".join([tokenizer.decode(i.to(torch.device('cpu'))) for i in data])
+        output = "\n".join([tokenizer.decode(torch.argmax(i,dim=-1).to(torch.device('cpu'))) for i in outputs['output']])
+        req_targets = "\n".join([tokenizer.decode(i.to(torch.device('cpu'))) for i in targets])
         del(data,targets,outputs,losses)
         torch.cuda.empty_cache()
 
@@ -505,7 +507,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     'tokenizer': tokenizer,
                     'resume_batch':batch,
                     'train_eval_events': train_eval_event,
-                    'step_number': step_
+                    'step_number': step
                 },
                 path
                 )
@@ -524,7 +526,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     'tokenizer': tokenizer,
                     'resume_batch':batch,
                     'train_eval_events': train_eval_event,
-                    'step_number': step_
+                    'step_number': step
                 },
                 path
                 )
@@ -546,10 +548,10 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             intermediate_save_time = time.time()
         if step_scheduler != None:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
-                scheduler.step(step_)
+                scheduler.step(step)
                 if discriminator_enabled:
-                    scheduler_disc.step(step_)
-                step_ += 1
+                    scheduler_disc.step(step)
+                step += 1
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
@@ -582,7 +584,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 {
                     "Loss Generator":loss_g,
                     "Loss Discriminator":loss_d,
-                    "step":step_,
+                    "step":step,
                     "Accuracy Generator(%)":acc*100/2,
                     "Accuracy Discriminator(%)":acc_d*100/2,
                     "epoch":epoch,
@@ -599,7 +601,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             wandb.log(
                 {
                     "Loss Generator":loss_g,
-                    "step":step_,
+                    "step":step,
                     "Accuracy Generator(%)":acc*100/2,
                     "epoch":epoch,
                     "batch":batch,
@@ -611,16 +613,15 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     "target":wandb.Html(req_targets),
                 }
             )
-    return step_
-
 
 def evaluate(eval_model, data_source):
     eval_model.eval()
     total_loss = 0.
     total_acc = 0.
     single_pass_mem = None
+    stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
     with torch.no_grad():
-        for i in range(0, data_source.size(1), bptt-1-1):
+        for i in range(0, data_source.size(1), stride_size):
             data, targets = get_batch(data_source, i)
             if use_deepspeed:
                 with autocast():
@@ -640,7 +641,7 @@ while True:
         epoch +=1
     step=step
     epoch_start_time = time.time()
-    step = train(resume_batch=resume_batch,step_=step)
+    train(resume_batch=resume_batch)
     resume_batch = 0
     val_loss, val_acc = evaluate(model, processed_val_data)
     print('-' * 110)

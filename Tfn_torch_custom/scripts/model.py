@@ -236,7 +236,7 @@ class TransformerBlock(Module):
                      dropout=0.5, 
                      dropout_hopfield=0.0,
                      activation="gelu",
-                     mem_kv=64*32,
+                     mem_kv=64*16,
                      pkm_dim=None,
                      pkm_keys=64,
                      decoder=False,
@@ -255,7 +255,7 @@ class TransformerBlock(Module):
         self.ffd1 = ET_ffd(dim=d_model)
 
         if pkm_dim==None:
-            pkm_dim = d_model//2
+            pkm_dim = d_model//4
 
         pkm_heads = (nhead * pkm_dim) // d_model
 
@@ -270,7 +270,7 @@ class TransformerBlock(Module):
 
         self.gate = GRUGating(d_model)
         
-        self.fno = GRUGating(d_model,FNO1d(d_model,
+        self.fno = GRUGating(d_model,FNO1d(nhead,
                                                     nhead,
                                                     inp_dim=d_model,
                                                     out_dim=d_model,
@@ -279,16 +279,16 @@ class TransformerBlock(Module):
 
         if hopfield:
             hop_attn = nn.Sequential(
-                                    nn.Linear(d_model,d_model),
-                                    GRUGating(d_model,HopfieldEncoderLayer(HopfieldLayer(
-                                                input_size=d_model,
+                                    nn.Linear(d_model,d_model//4),
+                                    GRUGating(d_model//4,HopfieldEncoderLayer(HopfieldLayer(
+                                                input_size=d_model//4,
                                                 num_heads=nhead,
-                                                pattern_size=2**11,
+                                                pattern_size=2**8,
                                                 dropout=dropout_hopfield,
-                                                quantity=2**12
+                                                quantity=2**8
                                             ),
-                                            dim_feedforward=dim_feedforward) ),
-                                    nn.Linear(d_model,d_model)
+                                            dim_feedforward=dim_feedforward//4) ),
+                                    nn.Linear(d_model//4,d_model)
                                     )
         else:
             hop_attn = None
@@ -394,13 +394,13 @@ class TransformerModule(ModuleList):
         self.repeated_deberta_layers = repeated_deberta_layers
 
         if not enable_encoder:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,pkm_dim=d_model)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True)
             self.decoder = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
         else:
             block = TransformerBlock(d_model, nhead, nhid, dropout)
             self.encoder = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,pkm_dim=d_model)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True)
             self.decoder_cross = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
@@ -421,11 +421,16 @@ class TransformerModule(ModuleList):
             name='prev_state',
             tensor=torch.zeros((1,prev_state_len,d_model))
         )
-        self.hop_pool = HopfieldPooling(
-                            input_size=d_model,
+        self.hop_pool = nn.Sequential(
+                nn.Linear(d_model,d_model//4),
+                HopfieldPooling(
+                            input_size=d_model//4,
+                        ),
+                nn.Linear(d_model//4,d_model),
+                nn.SiLU()
                         )
         self.prev_state_update = nn.Sequential(
-            FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=nhid,transpose_req=False),
+            FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=nhid,transpose_req=False,num_layers=1),
             nn.Conv1d(d_model,d_model,kernel_size=11,stride=1,padding=5,groups=d_model),
             nn.Conv1d(d_model,d_model,kernel_size=1,stride=1)
             )
@@ -524,13 +529,13 @@ class TransformerModel(Module):
         self.ffd1 = nn.Sequential(
             nn.Linear(ninp,nhid),
             _get_activation_fn(activation),
-            FNO1d(nhead,nhead,nhid,nhid,nhid),
+            FNO1d(nhead,nhead,nhid,nhid,nhid,num_layers=1),
             _get_activation_fn(activation),
             nn.Linear(nhid,ninp),
             _get_activation_fn(activation),
             nn.Linear(ninp,nhid),
             _get_activation_fn(activation),
-            FNO1d(nhead,nhead,nhid,nhid,nhid),
+            FNO1d(nhead,nhead,nhid,nhid,nhid,num_layers=1),
             _get_activation_fn(activation),
             nn.Linear(nhid,ninp),
             _get_activation_fn(activation)
@@ -593,7 +598,7 @@ class TransformerModel(Module):
         self.scale_down_conv = nn.Sequential(
             nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
         )
-        self.scale_down_fno = GRUGating(ninp,FNO1d(ninp,
+        self.scale_down_fno = GRUGating(ninp,FNO1d(nhead,
                                                     nhead,
                                                     inp_dim=ninp,
                                                     out_dim=ninp,
@@ -607,7 +612,7 @@ class TransformerModel(Module):
             nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
         )
 
-        self.scale_up_fno = GRUGating(ninp,FNO1d(ninp,
+        self.scale_up_fno = GRUGating(ninp,FNO1d(nhead,
                                                     nhead,
                                                     inp_dim=ninp,
                                                     out_dim=ninp,

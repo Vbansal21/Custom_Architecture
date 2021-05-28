@@ -3,6 +3,7 @@
 This file is the Fourier Neural Operator for 1D problem such as the (time-independent) Burgers equation discussed in Section 5.1 in the [paper](https://arxiv.org/pdf/2010.08895.pdf).
 """
 
+from typing import Tuple
 import numpy as np
 import torch
 import torch.nn as nn
@@ -103,8 +104,11 @@ class FNO1d(nn.Module):
         self.fc0 = nn.Linear(inp_dim, self.width)
 
         conv_block = SpectralConv1d(self.width, self.width, self.modes1)
+        self.conv_layers = nn.ModuleList([dcpy(conv_block) for _ in range(num_layers)])
         w_block = nn.Conv1d(self.width, self.width, 1)
-        self.conv_layers = nn.ModuleList([[dcpy(conv_block),dcpy(w_block),nn.Parameter(torch.zeros(tuple(self.width))),nn.Parameter(torch.ones(tuple(self.width)))] for _ in range(num_layers)])
+        self.w_layers = nn.ModuleList([dcpy(w_block) for _ in range(num_layers)])
+        self.rezero_parameters = [[nn.Parameter(torch.zeros((1,self.width))),nn.Parameter(torch.ones((1,self.width)))] for _ in range(num_layers)]
+        self.num_layers = num_layers
 
         self.fc1 = nn.Linear(self.width, ffd_dim)
         self.fc2 = nn.Linear(ffd_dim, out_dim)
@@ -118,10 +122,10 @@ class FNO1d(nn.Module):
 
         x = x.transpose(-1,-2)
 
-        for l,r,m_0,m_1 in self.conv_layers:
-            x_ = ckpt(l,x) + ckpt(r,x)
+        for i in range(self.num_layers):
+            x_ = ckpt(self.conv_layers[i],x) + ckpt(self.w_layers[i],x)
             x_ = F.relu(x_)
-            x= ((x_.transpose(-1,-2)*m_0) + (x.transpose(-1,-2)*m_1)).transpose(-1,-2)
+            x = ((x_.transpose(-1,-2)*self.rezero_parameters[i][0].to(x.device)) + (x.transpose(-1,-2)*self.rezero_parameters[i][1].to(x.device))).transpose(-1,-2)
 
         x = x.transpose(-1,-2)
         x = self.fc1(x)
