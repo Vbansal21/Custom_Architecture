@@ -61,7 +61,7 @@ dropout = 0.1
 mem_tokens = 128*4
 bptt = (1024*2-5+mem_tokens) - mem_tokens
 max_seq_len = 2**16
-seq_scale_down = 64
+seq_scale_down = 128
 
 discriminator_enabled = False
 progressive_generation = True
