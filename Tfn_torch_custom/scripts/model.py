@@ -601,7 +601,7 @@ class TransformerModel(Module):
                                                     num_layers=8
                                                 ))
 
-        self.padding_for_conv_scale = nn.Parameter(torch.randn((1,ninp))).reshape(-1)
+        self.padding_for_conv_scale = nn.Parameter(torch.randn((ninp,(self.seq_scale_down*3)-1)))
 
         self.scale_up_conv = nn.Sequential(
             nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
@@ -1032,10 +1032,8 @@ class TransformerModel(Module):
 
             src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
 
-            padding_size = (self.seq_scale_down*3)-1
-
             if src.size(2)%self.seq_scale_down != 0:
-                src = torch.cat((src,repeat(self.padding_for_conv_scale,'d -> b d n',b=src.size(0),n=padding_size).to(self.device)),dim=2)
+                src = torch.cat((src,repeat(self.padding_for_conv_scale,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
 
             src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
             s = src.size(1)
@@ -1045,7 +1043,7 @@ class TransformerModel(Module):
                 context = context * math.sqrt(self.ninp)
                 context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
                 if context.size(2)%self.seq_scale_down!=0:
-                    context = torch.cat((context,repeat(self.padding_for_conv_scale,'d -> b d n',b=context.size(0),n=padding_size).to(self.device)),dim=2)
+                    context = torch.cat((context,repeat(self.padding_for_conv_scale,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
 
                 context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
                 
