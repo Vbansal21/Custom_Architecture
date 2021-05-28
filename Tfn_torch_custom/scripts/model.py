@@ -237,6 +237,7 @@ class TransformerBlock(Module):
                      dropout_hopfield=0.0,
                      activation="gelu",
                      mem_kv=64*16,
+                     pkm_dim=None,
                      pkm_keys=64,
                      decoder=False,
                      hopfield=False
@@ -251,28 +252,24 @@ class TransformerBlock(Module):
 
         self.decoder = decoder
 
-        """
-        self.ffd1 = nn.Sequential(
-            GEGLU(d_model,dim_feedforward),
-            _get_activation_fn(activation),
-            nn.Linear(dim_feedforward,d_model),
-            _get_activation_fn(activation),
-        )
-        """
-
         self.ffd1 = ET_ffd(dim=d_model)
 
+        if pkm_dim==None:
+            pkm_dim = d_model//2
+
+        pkm_heads = (nhead * pkm_dim) // d_model
+
         self.pkm1 = nn.Sequential(
-            nn.Linear(d_model,d_model//2),
+            nn.Linear(d_model,pkm_dim),
             _get_activation_fn(activation),
-            PKM(d_model//2,heads=nhead//2,num_keys=pkm_keys,dim_head=d_model//nhead),
-            nn.Linear(d_model//2,d_model),
+            PKM(pkm_dim,heads=pkm_heads,num_keys=pkm_keys,dim_head=d_model//nhead),
+            nn.Linear(pkm_dim,d_model),
             _get_activation_fn(activation),
             )
 
         self.gate = GRUGating(d_model)
         
-        self.fno = GRUGating(d_model,FNO1d(nhead,
+        self.fno = GRUGating(d_model,FNO1d(d_model,
                                                     nhead,
                                                     inp_dim=d_model,
                                                     out_dim=d_model,
@@ -318,7 +315,7 @@ class TransformerBlock(Module):
                 'self_2':SelfAttention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
-                                        num_mem_kv=mem_kv,
+                                        num_mem_kv=mem_kv*4,
                                         rotary_pos_emb=True),
                 'cross_1':SelfAttention(d_model,
                                         heads=nhead,
@@ -329,7 +326,7 @@ class TransformerBlock(Module):
                 'cross_2':SelfAttention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
-                                        num_mem_kv=mem_kv,
+                                        num_mem_kv=mem_kv*4,
                                         rotary_pos_emb=False)
             }
 
@@ -363,7 +360,6 @@ class TransformerBlock(Module):
                                 )
 
             self.self_attn_context = GRUGating(d_model,self_attn_context)
-            self.ctxt_norm = copy.deepcopy(self.norm1)
         
 
 
@@ -379,8 +375,7 @@ class TransformerBlock(Module):
             context = self.norm2(context)
             context = Positional_Encoding(context)
             context_ = ckpt(self.ffd2,context) + ckpt(self.pkm2,context)
-            context_ = ckpt(self.self_attn_context,context_)
-            context = ckpt(self.ctxt_norm,context_)+context
+            context_ = ckpt(self.self_attn_context,context,context_)
             del(context_)
 
         output = ckpt(self.fno,output)
@@ -388,7 +383,7 @@ class TransformerBlock(Module):
         output = ckpt(self.attn,output,output,context)
         output = self.dropout2(output)
         if self.mlp!=None:
-            output = ckpt(self.mlp,output)
+            output = ckpt(self.mlp,output,output)
         return output
 
 class TransformerModule(ModuleList):
@@ -400,13 +395,13 @@ class TransformerModule(ModuleList):
         self.repeated_deberta_layers = repeated_deberta_layers
 
         if not enable_encoder:
-            block = TransformerBlock(d_model, nhead, nhid, dropout)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,pkm_dim=d_model)
             self.decoder = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
         else:
             block = TransformerBlock(d_model, nhead, nhid, dropout)
             self.encoder = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,pkm_dim=d_model)
             self.decoder_cross = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
@@ -591,7 +586,7 @@ class TransformerModel(Module):
         self.scale_down_conv = nn.Sequential(
             nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
         )
-        self.scale_down_fno = GRUGating(ninp,FNO1d(nhead,
+        self.scale_down_fno = GRUGating(ninp,FNO1d(ninp,
                                                     nhead,
                                                     inp_dim=ninp,
                                                     out_dim=ninp,
@@ -604,11 +599,12 @@ class TransformerModel(Module):
             nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down),
         )
 
-        self.scale_up_fno = GRUGating(ninp,FNO1d(nhead,
+        self.scale_up_fno = GRUGating(ninp,FNO1d(ninp,
                                                     nhead,
                                                     inp_dim=ninp,
                                                     out_dim=ninp,
-                                                    ffd_dim=nhid
+                                                    ffd_dim=nhid,
+                                                    num_layers=8
                                                 ))
 
         #self.to(device)
