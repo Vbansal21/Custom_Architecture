@@ -432,7 +432,7 @@ class TransformerModule(ModuleList):
         self.prev_state_update = nn.Sequential(
             FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=nhid,transpose_req=False,num_layers=1),
             nn.Conv1d(d_model,d_model,kernel_size=11,stride=1,padding=5,groups=d_model),
-            nn.Conv1d(d_model,d_model,kernel_size=1,stride=1)
+            nn.Conv1d(d_model,d_model,kernel_size=2,stride=1)
             )
 
         d_model = d_model
