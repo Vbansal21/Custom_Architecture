@@ -689,55 +689,66 @@ class TransformerModel(Module):
                                     shuffle_continuous_pos: float = -101
                                 ) -> Tensor:
         inp_2: Tensor = inp.clone().detach()
-        for i in range(inp.size(0)):
-            count: int = 0
-            together_count: int = 0
-            for j in range(inp.size(1)):
-                if not shuffle:
-                    break
-                rnd: float = -1
-                if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
-                    rnd: float = random.randint(0,100000)/1000
-                elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
-                    shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
-                    if shuffle_continuous_pos < 0:
-                        if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
-                            rnd: float = shuffle_percentage/2
-                    else:
-                        if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
-                            rnd: float = shuffle_percentage/2
-                if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
-                    while True:
-                        r = random.randint(0,inp.size(1)-1)
-                        if r!=j:
-                            break
-                    inp_2[i,j],inp_2[i,r] = inp[i,r],inp[i,j]
-                    count += 1
-                    together_count += 1
-                elif together_count>=shuffle_together_nos:
-                    together_count = 0
+        index_to_be_trained_on = []
 
-            count: int = 0
-            together_count: int = 0
-            for j in range(inp.size(1)):
-                rnd: float = -1
-                if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
-                    rnd: float = random.randint(0,100000)/1000
-                elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
-                    mask_together_nos = mask_percentage * (inp.size(1)/100)
-                    if mask_continuous_pos < 0:
-                        if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
-                            rnd: float = mask_percentage/2
-                    else:
-                        if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
-                            rnd: float = mask_percentage/2
-                if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
+        count: int = 0
+        together_count: int = 0
+        for j in range(inp.size(1)):
+            if not shuffle:
+                break
+            rnd: float = -1
+            if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
+                rnd: float = random.randint(0,100000)/1000
+            elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
+                shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
+                if shuffle_continuous_pos < 0:
+                    if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                        rnd: float = shuffle_percentage/2
+                else:
+                    if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
+                        rnd: float = shuffle_percentage/2
+            if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
+                while True:
+                    r = random.randint(0,inp.size(1)-1)
+                    if r!=j:
+                        break
+                if j not in index_to_be_trained_on:
+                    index_to_be_trained_on.append(j)
+                if r not in index_to_be_trained_on:
+                    index_to_be_trained_on.append(r)
+                inp_2[:,j],inp_2[:,r] = inp[:,r],inp[:,j]
+                count += 1
+                together_count += 1
+            elif together_count>=shuffle_together_nos:
+                together_count = 0
+
+        count: int = 0
+        together_count: int = 0
+        for j in range(inp.size(1)):
+            rnd: float = -1
+            if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
+                rnd: float = random.randint(0,100000)/1000
+            elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
+                mask_together_nos = mask_percentage * (inp.size(1)/100)
+                if mask_continuous_pos < 0:
+                    if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                        rnd: float = mask_percentage/2
+                else:
+                    if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
+                        rnd: float = mask_percentage/2
+            if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
+                for i in range(inp.size(0)):
                     inp_2[i,j] = 5
-                    count += 1
-                    together_count += 1
-                elif together_count>=mask_together_nos:
-                    together_count = 0
-        return inp_2.clone().detach()
+                if j not in index_to_be_trained_on:
+                    index_to_be_trained_on.append(j)
+                count += 1
+                together_count += 1
+            elif together_count>=mask_together_nos:
+                together_count = 0
+        out = inp_2.clone().detach().to(dtype=torch.long)
+        del(inp_2,inp)
+        torch.cuda.empty_cache()
+        return out,index_to_be_trained_on
 
     def encode_text(self,
                         *args: Union[str,Tensor],
@@ -763,13 +774,14 @@ class TransformerModel(Module):
                         shuffle_continuous_pos: float = -101.
                     ) -> List[Tensor] :
         encoded_text = []
+        trainable_index = []
         for txt in args:
             if type(txt) == str:
                 tmp = self.tokenizer.encode(txt)
             else:
                 assert type(tmp) == Tensor
             if mask_at_random or shuffle_at_random:
-                tmp =   self.random_mask_shuffle_encoder(tmp,
+                tmp,index_to_be_trained_on =   self.random_mask_shuffle_encoder(tmp,
                                                             mask=mask_at_random,
                                                             mask_percentage=mask_percentage,
                                                             mask_together_nos=mask_together_nos,
@@ -779,6 +791,8 @@ class TransformerModel(Module):
                                                             shuffle_together_nos=shuffle_together_nos,
                                                             shuffle_continuous_pos=shuffle_continuous_pos
                                                         )
+
+            trainable_index.append(index_to_be_trained_on)
 
             if append_sos:
                 tmp = torch.cat((torch.full((tmp.size(0),1),sos_idx,dtype=torch.long,device=device),tmp),dim=1).contiguous()
@@ -807,7 +821,7 @@ class TransformerModel(Module):
         
         if concatenate_all:
             encoded_text = [torch.cat(encoded_text,dim=concatenate_dim)]
-        return encoded_text
+        return encoded_text,trainable_index
 
     def decode_text(self,
                         *args: Tensor,
@@ -957,9 +971,6 @@ class TransformerModel(Module):
                 if trainable_index != None:
                     output = torch.cat([output[:,i] for i in trainable_index],dim=1)
                     output_targets = torch.cat([output_targets[:,i] for i in trainable_index],dim=1)
-                else:
-                    output = output
-                    output_targets = output_targets
 
                 loss = loss_criterion(output.permute(1,2,0).contiguous(), output_targets.permute(1,0).contiguous())
                 loss.backward()
@@ -983,9 +994,7 @@ class TransformerModel(Module):
                 if trainable_index != None:
                     output = torch.cat([output[:,i] for i in trainable_index],dim=1)
                     output_targets = torch.cat([output_targets[:,i] for i in trainable_index],dim=1)
-                else:
-                    output = output
-                    output_targets = output_targets
+                    
                 loss = loss_criterion(output.permute(1,2,0).contiguous(), output_targets.permute(1,0).contiguous())
                 loss.backward()
 
