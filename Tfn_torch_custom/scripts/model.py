@@ -901,6 +901,7 @@ class TransformerModel(Module):
                     grad_clip=4.0,
                     deepspeed_enabled=False,
                     autocast_enabled=False,
+                    trainable_index=None,
                 ):
 
         self.train()
@@ -942,17 +943,25 @@ class TransformerModel(Module):
 
                 out_gan = self.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True)
                 loss_d_fake = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
-                loss_d_fake.backward(retain_graph=True)
+                loss_d_fake.backward()
 
                 optimizer_disc.step()
                 optimizer_disc.zero_grad()
                 self.zero_grad()
 
+                out_gan = self.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True)
                 loss_gen = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
                 loss_gen.backward()
 
                 output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
-                loss = loss_criterion(rearrange(output,'b n c -> n c b'), rearrange(output_targets,'b n -> n b'))
+                if trainable_index != None:
+                    output = torch.cat([output[:,i] for i in trainable_index],dim=1)
+                    output_targets = torch.cat([output_targets[:,i] for i in trainable_index],dim=1)
+                else:
+                    output = output
+                    output_targets = output_targets
+
+                loss = loss_criterion(output.permute(1,2,0).contiguous(), output_targets.permute(1,0).contiguous())
                 loss.backward()
 
                 optimizer.step()
@@ -971,7 +980,13 @@ class TransformerModel(Module):
                 self.zero_grad()
                 output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
                 torch.cuda.empty_cache()
-                loss = loss_criterion(output.permute(1,2,0).contiguous(), targets.permute(1,0).contiguous())
+                if trainable_index != None:
+                    output = torch.cat([output[:,i] for i in trainable_index],dim=1)
+                    output_targets = torch.cat([output_targets[:,i] for i in trainable_index],dim=1)
+                else:
+                    output = output
+                    output_targets = output_targets
+                loss = loss_criterion(output.permute(1,2,0).contiguous(), output_targets.permute(1,0).contiguous())
                 loss.backward()
 
                 optimizer.step()

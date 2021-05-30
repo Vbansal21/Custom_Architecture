@@ -85,71 +85,83 @@ def random_mask_shuffle_encoder(
                             shuffle_continuous_pos: float = -101
                         ) -> Tensor:
     inp_2: Tensor = inp.clone().detach()
-    for i in range(inp.size(0)):
-        count: int = 0
-        together_count: int = 0
-        for j in range(inp.size(1)):
-            if not shuffle:
-                break
-            rnd: float = -1
-            if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
-                rnd: float = random.randint(0,100000)/1000
-            elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
-                shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
-                if shuffle_continuous_pos < 0:
-                    if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
-                        rnd: float = shuffle_percentage/2
-                else:
-                    if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
-                        rnd: float = shuffle_percentage/2
-            if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
-                while True:
-                    r = random.randint(0,inp.size(1)-1)
-                    if r!=j:
-                        break
-                inp_2[i,j],inp_2[i,r] = inp[i,r],inp[i,j]
-                count += 1
-                together_count += 1
-            elif together_count>=shuffle_together_nos:
-                together_count = 0
+    index_to_be_trained_on = []
 
-        count: int = 0
-        together_count: int = 0
-        for j in range(inp.size(1)):
-            rnd: float = -1
-            if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
-                rnd: float = random.randint(0,100000)/1000
-            elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
-                mask_together_nos = mask_percentage * (inp.size(1)/100)
-                if mask_continuous_pos < 0:
-                    if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
-                        rnd: float = mask_percentage/2
-                else:
-                    if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
-                        rnd: float = mask_percentage/2
-            if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
+    count: int = 0
+    together_count: int = 0
+    for j in range(inp.size(1)):
+        if not shuffle:
+            break
+        rnd: float = -1
+        if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
+            rnd: float = random.randint(0,100000)/1000
+        elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
+            shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
+            if shuffle_continuous_pos < 0:
+                if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                    rnd: float = shuffle_percentage/2
+            else:
+                if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
+                    rnd: float = shuffle_percentage/2
+        if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
+            while True:
+                r = random.randint(0,inp.size(1)-1)
+                if r!=j:
+                    break
+            if j not in index_to_be_trained_on:
+                index_to_be_trained_on.append(j)
+            if r not in index_to_be_trained_on:
+                index_to_be_trained_on.append(r)
+            inp_2[:,j],inp_2[:,r] = inp[:,r],inp[:,j]
+            count += 1
+            together_count += 1
+        elif together_count>=shuffle_together_nos:
+            together_count = 0
+
+    count: int = 0
+    together_count: int = 0
+    for j in range(inp.size(1)):
+        rnd: float = -1
+        if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
+            rnd: float = random.randint(0,100000)/1000
+        elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
+            mask_together_nos = mask_percentage * (inp.size(1)/100)
+            if mask_continuous_pos < 0:
+                if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                    rnd: float = mask_percentage/2
+            else:
+                if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
+                    rnd: float = mask_percentage/2
+        if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
+            for i in range(inp.size(0)):
                 inp_2[i,j] = 5
-                count += 1
-                together_count += 1
-            elif together_count>=mask_together_nos:
-                together_count = 0
-    return inp_2.clone().detach()
+            if j not in index_to_be_trained_on:
+                index_to_be_trained_on.append(j)
+            count += 1
+            together_count += 1
+        elif together_count>=mask_together_nos:
+            together_count = 0
+    out = inp_2.clone().detach().to(dtype=torch.long)
+    del(inp_2,inp)
+    torch.cuda.empty_cache()
+    return out,index_to_be_trained_on
 
 def get_batch(source,j,bptt=bptt,progressive=True,shuffle=False):
     rnd = 0 if not shuffle else random.randint(0,10)//10
     if progressive:
         seq_len = min(bptt, source.size(1) - j) -1 -1
-        data = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
         data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
         targets = torch.cat((targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
     else:
         seq_len = min(bptt, source.size(1) - j) -1 -1 -1
-        data = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=34.1,mask_together_nos=10,mask_continuous_pos=66,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=34.1,mask_together_nos=10,mask_continuous_pos=66,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
         data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
         targets = torch.cat((torch.full((targets.size(0),1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
-    return data,targets
+    torch.cuda.empty_cache()
+    return data,targets,index_to_be_trained_on
 
 try:
     processed_train_data = torch.load("models/data/"+file+"_train.tar",map_location=torch.device('cpu'))
@@ -489,10 +501,10 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 continue
         if epoch%2==1:
             single_pass_mem = None
-        data, targets = get_batch(processed_train_data, i,progressive=progressive_generation)
+        data, targets, trainable_index = get_batch(processed_train_data, i,progressive=progressive_generation)
         torch.cuda.empty_cache()
 
-        outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer)
+        outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer,trainable_index=trainable_index)
 
         try:
             ppl = math.exp(losses['loss'])
@@ -640,7 +652,7 @@ def evaluate(eval_model, data_source):
     stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
     with torch.no_grad():
         for i in range(0, data_source.size(1), stride_size):
-            data, targets = get_batch(data_source, i)
+            data, targets, trainable_index = get_batch(data_source, i)
             if use_deepspeed:
                 with autocast():
                     output,single_pass_mem = eval_model(data,mem = single_pass_mem)
