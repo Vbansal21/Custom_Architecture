@@ -746,6 +746,8 @@ class TransformerModel(Module):
             elif together_count>=mask_together_nos:
                 together_count = 0
         out = inp_2.clone().detach().to(dtype=torch.long)
+        rnd = [random.randint(0,inp_2.size(1)-1) for _ in range(inp_2.size(1)//20)]
+        index_to_be_trained_on = list(set(index_to_be_trained_on.extend(rnd)))
         del(inp_2,inp)
         torch.cuda.empty_cache()
         return out,index_to_be_trained_on

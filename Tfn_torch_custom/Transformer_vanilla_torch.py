@@ -141,6 +141,8 @@ def random_mask_shuffle_encoder(
             together_count += 1
         elif together_count>=mask_together_nos:
             together_count = 0
+    rnd = [random.randint(0,inp_2.size(1)-1) for _ in range(inp_2.size(1)//20)]
+    index_to_be_trained_on = list(set(index_to_be_trained_on.extend(rnd)))
     out = inp_2.clone().detach().to(dtype=torch.long)
     del(inp_2,inp)
     torch.cuda.empty_cache()
