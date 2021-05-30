@@ -65,9 +65,7 @@ seq_scale_down = 128
 
 discriminator_enabled = False
 progressive_generation = True
-
 use_deepspeed = False
-
 
 def data_process(raw_text_iter):
   data = tokenizer.encode(raw_text_iter)
@@ -189,10 +187,7 @@ except Exception as e:
     torch.save(processed_test_data,"models/data/"+file+"_test.tar")
     torch.save(processed_val_data,"models/data/"+file+"_val.tar")
 
-torch.cuda.empty_cache()
-
 from scripts.model import TransformerModel
-
 torch.cuda.empty_cache()
 
 deepspeed_args = {
@@ -251,8 +246,6 @@ deepspeed_args = {
     "profile": False
     }
 }
-
-
 if use_deepspeed:
     import deepspeed
 
@@ -296,6 +289,7 @@ path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"
 
 criterion = nn.CrossEntropyLoss()
 lr = 0.1
+
 if not use_deepspeed:
     if discriminator_enabled:
         for p in model.discriminator.parameters():
@@ -445,7 +439,6 @@ try:
             print("Exception",e,f)
     del(checkpoint_)
     torch.cuda.empty_cache()
-
 except Exception as e:
     print("Exception",e)
     pass
