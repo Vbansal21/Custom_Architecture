@@ -22,7 +22,7 @@ torch.autograd.set_detect_anomaly(True)
 autocast = torch.cuda.amp.autocast
 
 
-file = "wikitextv2"
+file = "wikitextv103"
 if file == "wikitextv2":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
 elif file == "wikitextv103":
@@ -57,7 +57,7 @@ nlayers = 1
 deberta_layers = 4
 repeated_deberta_layers = 4
 nhead = 16
-dropout = 0.7
+dropout = 0.2
 mem_tokens = 128*4
 bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**16
@@ -281,7 +281,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1
+lr = 0.1
 if not use_deepspeed:
     if discriminator_enabled:
         for p in model.discriminator.parameters():
@@ -306,17 +306,19 @@ a = 5000000
 b = 1000
 c = 0.0
 step = 1
-lambda_1 = lambda step: (((a/b * (step) + 1) / ((step)**2 + a)) + c)/((step)**0.1+1)
+lambda_1 = lambda step: (((a/b * (step*(bptt//1024)*batch_size) + 1) / ((step*(bptt//1024)*batch_size)**2 + a)) + c)/((step*(bptt//1024)*batch_size)**0.1+1)
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
 
-load_scheduler = True
+load_scheduler = False
+load_optimizer = False
+load_step_number = False
 epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-epochs = 30
+epochs = 45
 
 train_eval_event = [date_time]
 
@@ -378,22 +380,38 @@ try:
         except Exception as e:
             print("Exception",e)
             
-    optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
-    if discriminator_enabled:
-        optimizer_disc.load_state_dict(checkpoint_['optimizer_disc_state_dict'])
+    if load_optimizer:
+        optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
+        if discriminator_enabled:
+            optimizer_disc.load_state_dict(checkpoint_['optimizer_disc_state_dict'])
+    else:
+        if discriminator_enabled:
+            for p in model.discriminator.parameters():
+                p.requires_grad_(False)
+            optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+            for p in model.parameters():
+                p.requires_grad_(False)
+            for p in model.discriminator.parameters():
+                p.requires_grad_(True)
+            optimizer_disc = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+            for p in model.parameters():
+                p.requires_grad_(True)
+        else:
+            for p in model.parameters():
+                p.requires_grad_(True)
+            optimizer = torch.optim.SGD(model.parameters(),lr=lr)
 
-    step = checkpoint_['step_number']
+            
+
+    step = checkpoint_['step_number'] if load_step_number else step
 
     if load_scheduler:
         scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
-
         if discriminator_enabled:
             scheduler_disc.load_state_dict(checkpoint_['scheduler_disc_state_dict'])
 
     else:
-        #lambda_1 = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
-
         if discriminator_enabled:
             scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1)
 
@@ -654,58 +672,58 @@ while True:
         best_val_loss = val_loss
         best_model = model
 
-        if discriminator_enabled:
-            torch.save(
-            {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'best_model_state_dict': best_model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'optimizer_disc_state_dict': optimizer_disc.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'scheduler_disc_state_dict':scheduler_disc.state_dict(),
-                'best_val_loss': best_val_loss,
-                'vocab': vocab,
-                'tokenizer': tokenizer,
-                'resume_batch':0,
-                'train_eval_events': train_eval_event,
-                'step_number': step
-            },
-            path
-            )
-        else:
-            torch.save(
-            {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'best_model_state_dict': best_model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'optimizer_disc_state_dict': None,
-                'scheduler_state_dict': scheduler.state_dict(),
-                'scheduler_disc_state_dict':None,
-                'best_val_loss': best_val_loss,
-                'vocab': vocab,
-                'tokenizer': tokenizer,
-                'resume_batch':0,
-                'train_eval_events': train_eval_event,
-                'step_number': step
-            },
-            path
-            )
-        """
-        ckpt_id = epoch*(processed_train_data.size(-1)//bptt) + batch
-        model.save_checkpoint(path,ckpt_id,client_sd = {
-                'epoch': epoch,
-                'best_model': best_model,
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_val_loss': best_val_loss,
-                'vocab': vocab,
-                'tokenizer': tokenizer,
-                'resume_batch':0,
-                'train_eval_events': train_eval_event,
-                'step_number': step
-            })"""
+    if discriminator_enabled:
+        torch.save(
+        {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'best_model_state_dict': best_model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'optimizer_disc_state_dict': optimizer_disc.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scheduler_disc_state_dict':scheduler_disc.state_dict(),
+            'best_val_loss': best_val_loss,
+            'vocab': vocab,
+            'tokenizer': tokenizer,
+            'resume_batch':0,
+            'train_eval_events': train_eval_event,
+            'step_number': step
+        },
+        path
+        )
+    else:
+        torch.save(
+        {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'best_model_state_dict': best_model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'optimizer_disc_state_dict': None,
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scheduler_disc_state_dict':None,
+            'best_val_loss': best_val_loss,
+            'vocab': vocab,
+            'tokenizer': tokenizer,
+            'resume_batch':0,
+            'train_eval_events': train_eval_event,
+            'step_number': step
+        },
+        path
+        )
+    """
+    ckpt_id = epoch*(processed_train_data.size(-1)//bptt) + batch
+    model.save_checkpoint(path,ckpt_id,client_sd = {
+            'epoch': epoch,
+            'best_model': best_model,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'best_val_loss': best_val_loss,
+            'vocab': vocab,
+            'tokenizer': tokenizer,
+            'resume_batch':0,
+            'train_eval_events': train_eval_event,
+            'step_number': step
+        })"""
 model = best_model
 
 test_loss,test_acc = evaluate(best_model, processed_test_data)

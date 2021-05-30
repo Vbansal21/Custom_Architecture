@@ -274,7 +274,8 @@ class TransformerBlock(Module):
                                                     nhead,
                                                     inp_dim=d_model,
                                                     out_dim=d_model,
-                                                    ffd_dim=dim_feedforward
+                                                    ffd_dim=dim_feedforward,
+                                                    num_layers=4
                                                 ))
 
         if hopfield:
