@@ -306,7 +306,7 @@ a = 5000000
 b = 1000
 c = 0.0
 step = 1
-lambda_1 = lambda step: (((a/b * (step*(bptt//1024)*batch_size) + 1) / ((step*(bptt//1024)*batch_size)**2 + a)) + c)/((step*(bptt//1024)*batch_size)**0.1+1)
+lambda_1 = lambda step: (((a/b * (step*(bptt/1024)*batch_size) + 1) / ((step*(bptt/1024)*batch_size)**2 + a)) + c)/((step*(bptt/1024)*batch_size)**0.1+1)
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
