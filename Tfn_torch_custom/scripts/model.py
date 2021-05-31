@@ -240,7 +240,9 @@ class TransformerBlock(Module):
                      pkm_dim=None,
                      pkm_keys=64,
                      decoder=False,
-                     hopfield=False
+                     hopfield=False,
+                     hop_dim=None,
+                     fno_layers=4
                 ):
         super(TransformerBlock, self).__init__()
 
@@ -256,6 +258,8 @@ class TransformerBlock(Module):
 
         if pkm_dim==None:
             pkm_dim = d_model//4
+        if hop_dim==None:
+            hop_dim = d_model//4
 
         pkm_heads = (nhead * pkm_dim) // d_model
 
@@ -275,21 +279,23 @@ class TransformerBlock(Module):
                                                     inp_dim=d_model,
                                                     out_dim=d_model,
                                                     ffd_dim=dim_feedforward,
-                                                    num_layers=4
+                                                    num_layers=fno_layers
                                                 ))
 
         if hopfield:
             hop_attn = nn.Sequential(
-                                    nn.Linear(d_model,d_model//4),
-                                    GRUGating(d_model//4,HopfieldEncoderLayer(HopfieldLayer(
-                                                input_size=d_model//4,
+                                    nn.Linear(d_model,hop_dim),
+                                    GRUGating(hop_dim,HopfieldEncoderLayer(HopfieldLayer(
+                                                input_size=hop_dim,
+                                                hidden_size=hop_dim*4,
+                                                output_size=hop_dim,
                                                 num_heads=nhead,
                                                 pattern_size=2**8,
                                                 dropout=dropout_hopfield,
                                                 quantity=2**8
                                             ),
                                             dim_feedforward=dim_feedforward//4) ),
-                                    nn.Linear(d_model//4,d_model)
+                                    nn.Linear(hop_dim,d_model)
                                     )
         else:
             hop_attn = None
@@ -388,24 +394,24 @@ class TransformerBlock(Module):
 
 class TransformerModule(ModuleList):
 
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192):
+    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,fno_layers=4):
         super(TransformerModule, self).__init__()
 
         self.enable_encoder=enable_encoder
         self.repeated_deberta_layers = repeated_deberta_layers
 
         if not enable_encoder:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers)
             self.decoder = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
         else:
-            block = TransformerBlock(d_model, nhead, nhid, dropout)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers)
             self.encoder = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
             block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True)
             self.decoder_cross = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True)
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,fno_layers=fno_layers)
         self.deberta_layers = nn.ModuleList([copy.deepcopy(block) for _ in range(deberta_layers)]) if deberta_layers else None
         
         self.norm = RMSNorm(d_model,eps=1e-16)
@@ -415,8 +421,8 @@ class TransformerModule(ModuleList):
 
         del(block)
 
-        self.prev_state_attend_0 = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True)
-        self.prev_state_attend_1 = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True)
+        self.prev_state_attend_0 = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers)
+        self.prev_state_attend_1 = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,fno_layers=fno_layers)
 
         self.register_buffer(
             name='prev_state',
@@ -428,7 +434,7 @@ class TransformerModule(ModuleList):
                             input_size=d_model//4,
                         ),
                 nn.Linear(d_model//4,d_model),
-                nn.SiLU()
+                nn.ReLU()
                         )
         self.prev_state_update = nn.Sequential(
             FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=nhid,transpose_req=False,num_layers=1),
@@ -474,7 +480,6 @@ class TransformerModule(ModuleList):
         output = ckpt(self.prev_state_attend_0,output,repeat(self.prev_state,'1 n d -> b n d',b=output.size(0)))
 
         out = self.absolutepositionalembedding(output) if len(self.deberta_layers)!=0 else output
-        out = (out*self.scale_abs_pos_emb) + (self.norm(output * self.scale_output)).clamp(min=-0.125,max=0.125)
 
         for _ in range(self.repeated_deberta_layers+1):
             for enc in self.deberta_layers:
@@ -517,7 +522,7 @@ class TransformerModel(Module):
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
         self.encoder_decoder = encoder_decoder
-        self.transformer_encoder = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len)
+        self.transformer_block = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len)
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)
 
@@ -604,7 +609,7 @@ class TransformerModel(Module):
                                                     inp_dim=ninp,
                                                     out_dim=ninp,
                                                     ffd_dim=nhid,
-                                                    num_layers=8
+                                                    num_layers=1
                                                 ))
 
         self.padding_for_conv_scale = nn.Parameter(torch.randn((ninp,(self.seq_scale_down*3)-1)))
@@ -618,7 +623,7 @@ class TransformerModel(Module):
                                                     inp_dim=ninp,
                                                     out_dim=ninp,
                                                     ffd_dim=nhid,
-                                                    num_layers=8
+                                                    num_layers=1
                                                 ))
 
         #self.to(device)
@@ -633,10 +638,10 @@ class TransformerModel(Module):
         return sum(p.numel() for p in self.parameters())
             
     def multiply_pretrained_transformer_layers(self,num: int = 1,deb_num: int = 1) -> NoReturn :
-        self.transformer_encoder.pretrained_layer_multiplier(num,deb_num)
+        self.transformer_block.pretrained_layer_multiplier(num,deb_num)
 
     def convert_decoder_only_to_encoder_decoder(self) -> NoReturn:
-        self.transformer_encoder.convert_decoder_only_to_encoder_decoder()
+        self.transformer_block.convert_decoder_only_to_encoder_decoder()
         if self.discriminator_enabled:
             self.discriminator.convert_decoder_only_to_encoder_decoder()
 
@@ -745,8 +750,11 @@ class TransformerModel(Module):
                 together_count += 1
             elif together_count>=mask_together_nos:
                 together_count = 0
-        out = inp_2.clone().detach().to(dtype=torch.long)
-        rnd = [random.randint(0,inp_2.size(1)-1) for _ in range(inp_2.size(1)//20)]
+        for _ in range(inp_2.size(1)//20):
+            rnd = random.randint(0,inp_2.size(1)-1)
+            if rnd not in index_to_be_trained_on:
+                index_to_be_trained_on.append(rnd)
+        index_to_be_trained_on = list(set(index_to_be_trained_on))
         index_to_be_trained_on = list(set(index_to_be_trained_on.extend(rnd)))
         del(inp_2,inp)
         torch.cuda.empty_cache()
@@ -971,10 +979,13 @@ class TransformerModel(Module):
 
                 output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
                 if trainable_index != None:
-                    output = torch.cat([output[:,i] for i in trainable_index],dim=1)
-                    output_targets = torch.cat([output_targets[:,i] for i in trainable_index],dim=1)
+                    trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
+                    trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
+                else:
+                    trainable_output = output
+                    trainable_output_targets = output_targets
 
-                loss = loss_criterion(output.permute(1,2,0).contiguous(), output_targets.permute(1,0).contiguous())
+                loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
                 loss.backward()
 
                 optimizer.step()
@@ -992,13 +1003,16 @@ class TransformerModel(Module):
             else:
                 self.zero_grad()
                 output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
-                torch.cuda.empty_cache()
                 if trainable_index != None:
-                    output = torch.cat([output[:,i] for i in trainable_index],dim=1)
-                    output_targets = torch.cat([output_targets[:,i] for i in trainable_index],dim=1)
+                    trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
+                    trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
+                else:
+                    trainable_output = output
+                    trainable_output_targets = output_targets
                     
-                loss = loss_criterion(output.permute(1,2,0).contiguous(), output_targets.permute(1,0).contiguous())
+                loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
                 loss.backward()
+                torch.cuda.empty_cache()
 
                 optimizer.step()
                 optimizer.zero_grad()
@@ -1039,7 +1053,12 @@ class TransformerModel(Module):
             total_loss_d = 0
 
         return outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc_gen,(step_start_time-time.time()),optimizer,optimizer_disc,mem_
+        
+    def get_prev_state(self):
+        return self.transformer_block.prev_state
 
+    def set_prev_state(self,prev_state:Tensor):
+        self.transformer_block.prev_state = prev_state
 
     #@autocast()
     def forward(self,
@@ -1129,7 +1148,7 @@ class TransformerModel(Module):
                 context2 = ckpt(self.ffd3,context)
                 context = ckpt(self.norm1, context2) + context
 
-            output = ckpt(self.transformer_encoder,output,context)
+            output = ckpt(self.transformer_block,output,context)
 
             output = ckpt(self.ffd2,output)
             output = ckpt(self.norm2,output) + output

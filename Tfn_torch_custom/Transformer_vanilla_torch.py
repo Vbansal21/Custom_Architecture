@@ -1,12 +1,9 @@
-import io
-import time
-#import copy
-import math
-import torch
+import io, os
 import random,wandb
 from torch import nn
 from torch import Tensor
 from einops import rearrange
+import math, time, torch #,copy
 #from performer_torch import PerformerLM
 #from pytorch_model_summary import summary
 from torchnlp.encoders.text import SubwordEncoder
@@ -29,14 +26,18 @@ elif file == "wikitextv103":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 
+
+#TODO: Define a better file parsing mechanism
 try:
-    tokenizer = torch.load("models/tokenizer.tar")
+    tokenizer = torch.load("models/tokenizer_8214.tar")
+    vocab_size = tokenizer.vocab_size
 except:
     tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**13,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
     ],
     eos_index=3,unknown_index=1,padding_index=0)
-    torch.save(tokenizer,"models/tokenizer.tar")
+    vocab_size = tokenizer.vocab_size
+    torch.save(tokenizer,"models/tokenizer_"+str(vocab_size)+".tar")
 vocab = tokenizer.vocab
 
 def batchify(data, bsz,dim=0):
@@ -53,14 +54,14 @@ eval_batch_size = batch_size
 ntokens = tokenizer.vocab_size
 emsize = 256 #2048//4
 nhid = emsize * 4
-nlayers = 1
-deberta_layers = 4
-repeated_deberta_layers = 4
+nlayers = 4
+deberta_layers = 8
+repeated_deberta_layers = 1
 nhead = 16
-dropout = 0.2
-mem_tokens = 128*4
+dropout = 0.0
+mem_tokens = 128*8
 bptt = (1024*16+mem_tokens) - mem_tokens
-max_seq_len = 2**16
+max_seq_len = 2**14
 seq_scale_down = 128
 
 discriminator_enabled = False
@@ -139,34 +140,37 @@ def random_mask_shuffle_encoder(
             together_count += 1
         elif together_count>=mask_together_nos:
             together_count = 0
-    rnd = [random.randint(0,inp_2.size(1)-1) for _ in range(inp_2.size(1)//20)]
-    index_to_be_trained_on = list(set(index_to_be_trained_on.extend(rnd)))
-    out = inp_2.clone().detach().to(dtype=torch.long)
+    for _ in range(inp_2.size(1)//20):
+        rnd = random.randint(0,inp_2.size(1)-1)
+        if rnd not in index_to_be_trained_on:
+            index_to_be_trained_on.append(rnd)
+    index_to_be_trained_on = list(set(index_to_be_trained_on))
+    out = inp_2.clone().detach().to(dtype=torch.long).contiguous()
     del(inp_2,inp)
     torch.cuda.empty_cache()
     return out,index_to_be_trained_on
 
-def get_batch(source,j,bptt=bptt,progressive=True,shuffle=False):
-    rnd = 0 if not shuffle else random.randint(0,10)//10
+def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
+    rnd = 0 if not shuffle else random.randint(0,100)/10
     if progressive:
         seq_len = min(bptt, source.size(1) - j) -1 -1
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=15.1,mask_together_nos=10,mask_continuous_pos=85,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
-        data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=30.1,mask_together_nos=10,mask_continuous_pos=70,shuffle_percentage=rnd,shuffle_together_nos=5)
+        data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
         targets = torch.cat((targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
     else:
         seq_len = min(bptt, source.size(1) - j) -1 -1 -1
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=34.1,mask_together_nos=10,mask_continuous_pos=66,shuffle_percentage=rnd,shuffle_together_nos=5).to(device)
-        data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data,torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=30.1,mask_together_nos=10,mask_continuous_pos=70,shuffle_percentage=rnd,shuffle_together_nos=5)
+        data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
         targets = torch.cat((torch.full((targets.size(0),1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
     torch.cuda.empty_cache()
     return data,targets,index_to_be_trained_on
 
 try:
-    processed_train_data = torch.load("models/data/"+file+"_train.tar",map_location=torch.device('cpu'))
-    processed_test_data = torch.load("models/data/"+file+"_test.tar",map_location=torch.device('cpu'))
-    processed_val_data = torch.load("models/data/"+file+"_val.tar",map_location=torch.device('cpu'))
+    processed_train_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_train.tar",map_location=torch.device('cpu'))
+    processed_test_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_test.tar",map_location=torch.device('cpu'))
+    processed_val_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_val.tar",map_location=torch.device('cpu'))
 
     processed_train_data = batchify(processed_train_data,batch_size,-1)
     processed_test_data = batchify(processed_test_data,eval_batch_size,-1)
@@ -183,9 +187,9 @@ except Exception as e:
 
     del(train_data,test_data,val_data)
 
-    torch.save(processed_train_data,"models/data/"+file+"_train.tar")
-    torch.save(processed_test_data,"models/data/"+file+"_test.tar")
-    torch.save(processed_val_data,"models/data/"+file+"_val.tar")
+    torch.save(processed_train_data,"models/data_"+str(vocab_size)+"/"+file+"_train.tar")
+    torch.save(processed_test_data,"models/data_"+str(vocab_size)+"/"+file+"_test.tar")
+    torch.save(processed_val_data,"models/data_"+str(vocab_size)+"/"+file+"_val.tar")
 
 from scripts.model import TransformerModel
 torch.cuda.empty_cache()
@@ -288,7 +292,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.1
+lr = 1
 
 if not use_deepspeed:
     if discriminator_enabled:
@@ -314,7 +318,8 @@ a = 5000000
 b = 1000
 c = 0.0
 step = 1
-lambda_1 = lambda step: (((a/b * (step*(bptt/1024)*batch_size) + 1) / ((step*(bptt/1024)*batch_size)**2 + a)) + c)/((step*(bptt/1024)*batch_size)**0.1+1)
+pseudo_lambda = lambda step: (((a/b * (step*(bptt/2048)*batch_size) + 1) / ((step*(bptt/2048)*batch_size)**2 + a)) + c)/((step*(bptt/2048)*batch_size/100)**0.1+1)
+lambda_1 = lambda step: (pseudo_lambda(step) if step<(8192) else pseudo_lambda(step)/8)
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
@@ -326,7 +331,12 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-epochs = 45
+epochs = 7
+
+import matplotlib.pyplot as plt
+plt.plot([lambda_1(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
+plt.show()
+del(plt)
 
 train_eval_event = [date_time]
 
@@ -496,7 +506,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 continue
         if epoch%2==1:
             single_pass_mem = None
-        data, targets, trainable_index = get_batch(processed_train_data, i,progressive=progressive_generation)
+        data, targets, trainable_index = get_batch(processed_train_data, i,progressive=progressive_generation) #Indexed Selective training broken
+        trainable_index = None
         torch.cuda.empty_cache()
 
         outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer,trainable_index=trainable_index)
