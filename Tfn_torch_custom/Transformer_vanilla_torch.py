@@ -319,19 +319,19 @@ b = 1000
 c = 0.0
 step = 1
 pseudo_lambda = lambda step: (((a/b * (step*(bptt/2048)*batch_size) + 1) / ((step*(bptt/2048)*batch_size)**2 + a)) + c)/((step*(bptt/2048)*batch_size/100)**0.1+1)
-lambda_1 = lambda step: (pseudo_lambda(step) if step<(8192) else pseudo_lambda(step)/8)
+lambda_1 = lambda step: (pseudo_lambda(step) if step<(8192) else (pseudo_lambda(step)/25 if step<16384 else pseudo_lambda(step)/625))
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
 
-load_scheduler = False
-load_optimizer = False
-load_step_number = False
+load_scheduler = True
+load_optimizer = True
+load_step_number = True
 epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-epochs = 7
+epochs = 6
 
 import matplotlib.pyplot as plt
 plt.plot([lambda_1(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
