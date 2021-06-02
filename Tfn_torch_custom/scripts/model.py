@@ -411,15 +411,13 @@ class TransformerModule(ModuleList):
             self.decoder_cross = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,fno_layers=fno_layers)
-        self.deberta_layers = nn.ModuleList([copy.deepcopy(block) for _ in range(deberta_layers)]) if deberta_layers else None
+        self.deberta_layers = nn.ModuleList([copy.deepcopy(TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,fno_layers=fno_layers)) for _ in range(deberta_layers)]) if deberta_layers else None
         
         self.norm = RMSNorm(d_model,eps=1e-16)
 
         self.scale_output = nn.Parameter(torch.zeros(d_model))
         self.scale_abs_pos_emb = nn.Parameter(torch.ones(d_model))
 
-        del(block)
 
         self.prev_state_attend_0 = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers)
         self.prev_state_attend_1 = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,fno_layers=fno_layers)
@@ -925,12 +923,12 @@ class TransformerModel(Module):
                     grad_clip=4.0,
                     deepspeed_enabled=False,
                     autocast_enabled=False,
-                    trainable_index=None,
+                    trainable_index=None
                 ):
 
         self.train()
         step_start_time = time.time()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+        #torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
 
         if opt == None:
             optimizer = self.optimizer

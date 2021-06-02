@@ -29,7 +29,16 @@ test_filepath, valid_filepath, train_filepath = extract_archive(download_from_ur
 
 #TODO: Define a better file parsing mechanism
 try:
-    tokenizer = torch.load("models/tokenizer_8214.tar")
+    files = os.listdir("models/")
+    tokenizer_files = []
+    for i in files:
+        if "tokenizer" in i:
+            tokenizer_files += [i]
+    tokenizer_name = tokenizer_files[0]
+    for i in tokenizer_files:
+        if int(i[10:-4]) < int(tokenizer_name[10:-4]):
+            tokenizer_name = i
+    tokenizer = torch.load("models/"+str(tokenizer_name))
     vocab_size = tokenizer.vocab_size
 except:
     tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**13,reserved_tokens=[
@@ -57,9 +66,9 @@ nhid = emsize * 4
 nlayers = 4
 deberta_layers = 8
 repeated_deberta_layers = 1
-nhead = 16
-dropout = 0.0
-mem_tokens = 128*8
+nhead = 4
+dropout = 0.3
+mem_tokens = 128*4
 bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**14
 seq_scale_down = 128
@@ -67,6 +76,8 @@ seq_scale_down = 128
 discriminator_enabled = False
 progressive_generation = True
 use_deepspeed = False
+
+use_sgd = True
 
 def data_process(raw_text_iter):
   data = tokenizer.encode(raw_text_iter)
@@ -187,6 +198,9 @@ except Exception as e:
 
     del(train_data,test_data,val_data)
 
+    if not os.path.exists("models/data_"+str(vocab_size)+"/"):
+        os.mkdir("models/data_"+str(vocab_size)+"/")
+
     torch.save(processed_train_data,"models/data_"+str(vocab_size)+"/"+file+"_train.tar")
     torch.save(processed_test_data,"models/data_"+str(vocab_size)+"/"+file+"_test.tar")
     torch.save(processed_val_data,"models/data_"+str(vocab_size)+"/"+file+"_val.tar")
@@ -295,21 +309,22 @@ criterion = nn.CrossEntropyLoss()
 lr = 1
 
 if not use_deepspeed:
+    optimizer = torch.optim.SGD if use_sgd else torch.optim.Adadelta
     if discriminator_enabled:
         for p in model.discriminator.parameters():
             p.requires_grad_(False)
-        optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+        optimizer = optimizer(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
         for p in model.parameters():
             p.requires_grad_(False)
         for p in model.discriminator.parameters():
             p.requires_grad_(True)
-        optimizer_disc = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+        optimizer_disc = optimizer(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
         for p in model.parameters():
             p.requires_grad_(True)
     else:
         for p in model.parameters():
             p.requires_grad_(True)
-        optimizer = torch.optim.SGD(model.parameters(),lr=lr)
+        optimizer = optimizer(model.parameters(),lr=lr)
         optimizer_disc = None
 else:
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
@@ -331,7 +346,7 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-epochs = 6
+epochs = 15
 
 import matplotlib.pyplot as plt
 plt.plot([lambda_1(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
@@ -373,8 +388,10 @@ wandb.init(project=project_name,config={
     "seq_scale_down":seq_scale_down,
     "discriminator_enabled":discriminator_enabled,
     "Number of Parameters":len(model),
-    "Progressive generation training":progressive_generation
-})
+    "Progressive generation training":progressive_generation,
+    "use_sgd":use_sgd
+}
+)
 
 #wandb.watch(model,criterion=criterion,log_freq=20)
 
@@ -647,7 +664,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     "input":wandb.Html(inputs),
                     "output":wandb.Html(output),
                     "target":wandb.Html(req_targets),
-                }
+                },
+                
             )
 
 def evaluate(eval_model, data_source):
