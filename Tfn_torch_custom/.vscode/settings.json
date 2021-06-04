@@ -11,5 +11,8 @@
     "editor.defaultFormatter": "lacroixdavid1.vscode-format-context-menu",
     "[jsonc]": {
         "editor.defaultFormatter": "esbenp.prettier-vscode"
-    }
+    },
+    "python.linting.banditEnabled": true,
+    "python.linting.pylintEnabled": false,
+    "python.linting.enabled": true
 }
