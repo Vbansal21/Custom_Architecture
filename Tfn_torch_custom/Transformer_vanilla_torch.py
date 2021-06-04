@@ -61,12 +61,12 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 256 #2048//4
+emsize = 512
 nhid = emsize * 4
-nlayers = 4
-deberta_layers = 8
+nlayers = 2
+deberta_layers = 6
 repeated_deberta_layers = 1
-nhead = 4
+nhead = 8
 dropout = 0.3
 mem_tokens = 128*4
 bptt = (1024*16+mem_tokens) - mem_tokens

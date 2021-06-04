@@ -228,7 +228,7 @@ class gMLPGPT(nn.Module):
         seq_len,
         num_tokens=None,
         heads = 1,
-        ff_mult = 4,
+        ff_mult = 1,
         prob_survival = 1.,
         reversible = False,
         window = None,

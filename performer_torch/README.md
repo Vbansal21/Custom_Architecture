@@ -12,6 +12,12 @@ An implementation of <a href="https://arxiv.org/abs/2009.14794">Performer</a>, a
 $ pip install performer-pytorch
 ```
 
+Then you must run the following, if you plan on training an autoregressive model
+
+```bash
+$ pip install -r requirements.txt
+```
+
 ## Usage
 
 Performer Language Model
@@ -41,7 +47,8 @@ model = PerformerLM(
     ff_dropout = 0.1,               # feedforward dropout
     attn_dropout = 0.1,             # post-attn dropout
     local_attn_heads = 4,           # 4 heads are local attention, 4 others are global performers
-    local_window_size = 256         # window size of local attention
+    local_window_size = 256,        # window size of local attention
+    rotary_position_emb = True      # use rotary positional embedding, which endows linear attention with relative positional encoding with no learned parameters. should always be turned on unless if you want to go back to old absolute positional encoding
 )
 
 x = torch.randint(0, 20000, (1, 2048))
@@ -122,6 +129,23 @@ attn = SelfAttention(
 
 x = torch.randn(1, 1024, 512).cuda()
 attn(x) # (1, 1024, 512)
+```
+
+Cross attention is similarly
+
+```python
+import torch
+from performer_pytorch import CrossAttention
+
+attn = CrossAttention(
+    dim = 512,
+    heads = 8
+).cuda()
+
+x = torch.randn(1, 1024, 512).cuda()
+context = torch.randn(1, 512, 512).cuda()
+
+attn(x, context = context) # (1, 1024, 512)
 ```
 
 To minimize model surgery, you could also simply rewrite the code, so that the attention step is done by the `FastAttention` module, as follows.
@@ -222,5 +246,17 @@ Now your model will have fixed projection matrices across all layers
     author  = {Aurko Roy* and Mohammad Taghi Saffar* and David Grangier and Ashish Vaswani},
     year    = {2020},
     url     = {https://arxiv.org/pdf/2003.05997.pdf}
+}
+```
+
+```bibtex
+@misc{su2021roformer,
+    title   = {RoFormer: Enhanced Transformer with Rotary Position Embedding},
+    author  = {Jianlin Su and Yu Lu and Shengfeng Pan and Bo Wen and Yunfeng Liu},
+    year    = {2021},
+    eprint  = {2104.09864},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CL},
+    url     = {https://arxiv.org/abs/2104.09864}
 }
 ```

@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'performer-pytorch',
   packages = find_packages(exclude=['examples']),
-  version = '0.14.9',
+  version = '1.0.11',
   license='MIT',
   description = 'Performer - Pytorch',
   author = 'Phil Wang',
@@ -18,8 +18,8 @@ setup(
   install_requires=[
     'einops>=0.3',
     'local-attention>=1.1.1',
-    'pytorch-fast-transformers>=0.3.0',
     'torch>=1.6',
+    'axial-positional-embedding>=0.1.0'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',
