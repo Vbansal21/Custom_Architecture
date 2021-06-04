@@ -66,6 +66,7 @@ nhid = emsize * 4
 nlayers = 2
 deberta_layers = 6
 repeated_deberta_layers = 1
+full_block_repeat = False
 nhead = 8
 dropout = 0.3
 mem_tokens = 128*4
@@ -389,7 +390,8 @@ wandb.init(project=project_name,config={
     "discriminator_enabled":discriminator_enabled,
     "Number of Parameters":len(model),
     "Progressive generation training":progressive_generation,
-    "use_sgd":use_sgd
+    "use_sgd":use_sgd,
+    "full_block_repeat":full_block_repeat
 }
 )
 

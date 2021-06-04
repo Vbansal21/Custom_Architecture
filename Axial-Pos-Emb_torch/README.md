@@ -1,4 +1,4 @@
-# Axial Positional Embedding
+## Axial Positional Embedding
 
 [![PyPI version](https://badge.fury.io/py/axial-positional-embedding.svg)](https://badge.fury.io/py/axial-positional-embedding)
 
@@ -27,6 +27,16 @@ tokens = pos_emb(tokens) + tokens   # add positional embedding to token embeddin
 ```
 
 ## Citations
+
+```bibtex
+@inproceedings{kitaev2020reformer,
+    title       = {Reformer: The Efficient Transformer},
+    author      = {Nikita Kitaev and Lukasz Kaiser and Anselm Levskaya},
+    booktitle   = {International Conference on Learning Representations},
+    year        = {2020},
+    url         = {https://openreview.net/forum?id=rkgNKkHtvB}
+}
+```
 
 ```bibtex
 @misc{ho2019axial,

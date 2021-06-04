@@ -398,9 +398,10 @@ class TransformerBlock(Module):
 class TransformerModule(ModuleList):
 
     #@profile
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,fno_layers=4):
+    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,fno_layers=4,full_block_repeat=False):
         super(TransformerModule, self).__init__()
 
+        self.full_block_repeat = full_block_repeat
         self.enable_encoder=enable_encoder
         self.repeated_deberta_layers = repeated_deberta_layers
 
@@ -478,16 +479,22 @@ class TransformerModule(ModuleList):
             for dec in self.decoder:
                 output = ckpt(dec,output)
 
-        output = ckpt(self.prev_state_attend,output,repeat(self.prev_state,'1 n d -> b n d',b=output.size(0)))
-
         out = self.absolutepositionalembedding(output) if len(self.deberta_layers)!=0 else output
 
-        for _ in range(self.repeated_deberta_layers+1):
-            for enc in self.deberta_layers:
-                out = ckpt(enc,out,output)
+        if self.full_block_repeat:
+            for _ in range(self.repeated_deberta_layers+1):
+                for enc in self.deberta_layers:
+                    out = ckpt(enc,out,output)
+            else:
+                if self.deberta_layers!=None:
+                    output = out
         else:
-            if self.deberta_layers!=None:
-                output = out
+            for enc in self.deberta_layers:
+                for _ in range(self.repeated_deberta_layers+1):
+                    out = ckpt(enc,out,output)
+            else:
+                if self.deberta_layers!=None:
+                    output = out
 
         output = ckpt(self.prev_state_attend,output,repeat(self.prev_state,'1 n d -> b n d',b=output.size(0)))
 
@@ -520,12 +527,13 @@ class TransformerModel(Module):
                     seq_scale_down: int = 8,
                     auto_check_redraw = True,
                     feature_redraw_interval = 1024,
+                    full_block_repeat=False,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
         self.encoder_decoder = encoder_decoder
-        self.transformer_block = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len)
+        self.transformer_block = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len,full_block_repeat=full_block_repeat)
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)
 
@@ -584,7 +592,7 @@ class TransformerModel(Module):
                 _get_activation_fn(activation),
                 nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
-                TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len),
+                TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len,full_block_repeat=full_block_repeat),
                 _get_activation_fn(activation),
                 nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
