@@ -237,7 +237,7 @@ def _involution_cuda(input, weight, bias=None, stride=1, padding=0, dilation=1):
     if input.is_cuda:
         out = _involution.apply(input, weight, _pair(stride), _pair(padding), _pair(dilation))
         if bias is not None:
-            out += bias.view(1,-1,1,1)
+            out += bias.reshape(1,-1,1,1)
     else:
         raise NotImplementedError
     return out
@@ -277,6 +277,6 @@ class involution(nn.Module):
     def forward(self, x):
         weight = self.conv2(self.conv1(x if self.stride == 1 else self.avgpool(x)))
         b, c, h, w = weight.shape
-        weight = weight.view(b, self.groups, self.kernel_size, self.kernel_size, h, w)
+        weight = weight.reshape(b, self.groups, self.kernel_size, self.kernel_size, h, w)
         out = _involution_cuda(x, weight, stride=self.stride, padding=(self.kernel_size-1)//2)
         return out

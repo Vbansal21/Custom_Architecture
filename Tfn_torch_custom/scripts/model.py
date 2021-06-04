@@ -217,14 +217,14 @@ class TransformerBlock(Module):
 
     #@profile
     def __init__(self,
-                     d_model,
-                     nhead, 
-                     dim_feedforward=1024, 
-                     dropout=0.5, 
+                     d_model=128,
+                     nhead=4, 
+                     dim_feedforward=512, 
+                     dropout=0.1, 
                      dropout_hopfield=0.0,
                      activation="gelu",
                      mem_kv=64*4,
-                     pkm_dim=None,
+                     pkm_dims=None,
                      pkm_keys=64,
                      decoder=False,
                      hopfield=False,
@@ -232,6 +232,7 @@ class TransformerBlock(Module):
                      fno_layers=4,
                      conv_emb=True,
                      fixed_emb=False,
+                     causal=False,
                 ):
         super(TransformerBlock, self).__init__()
 
@@ -245,21 +246,21 @@ class TransformerBlock(Module):
 
         self.ffd1 = ET_ffd(dim=d_model)
 
-        if pkm_dim==None:
-            pkm_dim = d_model//2
+        if pkm_dims==None:
+            pkm_dims = d_model//4
         if hop_dim==None:
-            hop_dim = d_model//2
+            hop_dim = d_model//4
 
-        pkm_heads = (nhead * pkm_dim) // d_model
+        pkm_heads = (nhead * pkm_dims) // d_model
 
         self.pkm1 = nn.Sequential(
-            nn.Linear(d_model,pkm_dim),
+            nn.Linear(d_model,pkm_dims),
             _get_activation_fn(activation),
-            PKM(pkm_dim,heads=pkm_heads,num_keys=pkm_keys,dim_head=d_model//nhead),
+            PKM(pkm_dims,heads=pkm_heads,num_keys=pkm_keys,dim_head=d_model//nhead),
             _get_activation_fn(activation),
-            nn.Linear(pkm_dim,d_model),
+            nn.Linear(pkm_dims,d_model),
             _get_activation_fn(activation),
-            )
+            ) if pkm_dims!=0 else None
 
         self.gate = GRUGating(d_model)
         
@@ -276,8 +277,6 @@ class TransformerBlock(Module):
                                         nn.Linear(d_model,hop_dim),
                                         HopfieldLayer(
                                                     input_size=hop_dim,
-                                                    hidden_size=hop_dim*4,
-                                                    output_size=hop_dim,
                                                     num_heads=nhead,
                                                     pattern_size=2**8,
                                                     dropout=dropout_hopfield,
@@ -300,7 +299,7 @@ class TransformerBlock(Module):
                                                     hop_attn=hop_attn,
                                                     rotary_pos_emb=True,
                                                     fixed_emb=fixed_emb,
-                                                    causal=True
+                                                    causal=causal
                                                 ),
                                 pkm=copy.deepcopy(self.pkm1),
                                 )
@@ -313,14 +312,14 @@ class TransformerBlock(Module):
                                         hop_attn=hop_attn,
                                         rotary_pos_emb=True,
                                         fixed_emb=fixed_emb,
-                                        causal=True),
+                                        causal=causal),
                 'self_2':SelfAttention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv*4,
                                         rotary_pos_emb=True,
                                         fixed_emb=fixed_emb,
-                                        causal=True),
+                                        causal=causal),
                 'cross_1':SelfAttention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
@@ -363,7 +362,7 @@ class TransformerBlock(Module):
                                                     local_heads=2,
                                                     rotary_pos_emb=True,
                                                     fixed_emb=fixed_emb,
-                                                    causal=True
+                                                    causal=causal
                                                 ),
                                 pkm=copy.deepcopy(self.pkm2)
                                 )
@@ -377,15 +376,25 @@ class TransformerBlock(Module):
         output = ckpt(self.norm1,src)
         output = Positional_Encoding(output)
         if self.conv_emb != None:
-            output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.conv_emb,output)
+            if self.pkm1 != None:
+                output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.conv_emb,output)
+            else:
+                output2 = ckpt(self.ffd1,output) + ckpt(self.conv_emb,output)
         else:
-            output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output)
+            if self.pkm1 != None:
+                output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output)
+            else:
+                output2 = ckpt(self.ffd1,output)
+
         output = ckpt(self.gate,output,self.dropout1(output2))
 
         if self.decoder:
             context = self.norm2(context)
             context = Positional_Encoding(context)
-            context_ = ckpt(self.ffd2,context) + ckpt(self.pkm2,context)
+            if self.pkm2 != None:
+                context_ = ckpt(self.ffd2,context) + ckpt(self.pkm2,context)
+            else:
+                context_ = ckpt(self.ffd2,context)
             context_ = ckpt(self.self_attn_context,context,context_)
 
         output = ckpt(self.fno,output)
@@ -398,25 +407,28 @@ class TransformerBlock(Module):
 class TransformerModule(ModuleList):
 
     #@profile
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,fno_layers=4,full_block_repeat=False):
+    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=4,full_block_repeat=False,causal=True):
         super(TransformerModule, self).__init__()
 
         self.full_block_repeat = full_block_repeat
         self.enable_encoder=enable_encoder
         self.repeated_deberta_layers = repeated_deberta_layers
 
+        if hop_dim==None:
+            hop_dim = d_model//4
+
         if not enable_encoder:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims)
             self.decoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         else:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims)
             self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,causal=causal,pkm_dims=pkm_dims)
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
-        block = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=0,conv_emb=False,activation='relu') if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
         self.norm = RMSNorm(d_model,eps=1e-4)
@@ -424,22 +436,22 @@ class TransformerModule(ModuleList):
         self.scale_output = nn.Parameter(torch.zeros(d_model))
         self.scale_abs_pos_emb = nn.Parameter(torch.ones(d_model))
         
-        self.prev_state_attend = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,fno_layers=fno_layers)
+        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=0,conv_emb=False,activation='relu',pkm_dims=0)
 
         self.register_buffer(
             name='prev_state',
             tensor=torch.zeros((1,prev_state_len,d_model))
         )
         self.hop_pool = nn.Sequential(
-                nn.Linear(d_model,d_model//4),
+                nn.Linear(d_model,hop_dim),
                 HopfieldPooling(
-                            input_size=d_model//4,
+                            input_size=hop_dim,
                         ),
-                nn.Linear(d_model//4,d_model),
+                nn.Linear(hop_dim,d_model),
                 nn.ReLU()
                         )
         self.prev_state_update = nn.Sequential(
-            FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=nhid,transpose_req=False,num_layers=1),
+            FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=d_model,transpose_req=False,num_layers=1),
             nn.Conv1d(d_model,d_model,kernel_size=11,stride=1,padding=5,groups=d_model),
             nn.Conv1d(d_model,d_model,kernel_size=2,stride=1,groups=d_model)
             )
@@ -498,8 +510,8 @@ class TransformerModule(ModuleList):
 
         output = ckpt(self.prev_state_attend,output,repeat(self.prev_state,'1 n d -> b n d',b=output.size(0)))
 
-        tmp = ckpt(self.hop_pool,output)
-        tmp = torch.sum(tmp,dim=0,keepdim=True).view(1,1,-1)
+        tmp = ckpt(self.hop_pool,self.norm(output))
+        tmp = torch.sum(tmp,dim=0,keepdim=True).reshape(1,1,-1)
         self.prev_state = torch.cat((self.prev_state,tmp),dim=1)
         self.prev_state = ckpt(self.prev_state_update, self.prev_state.transpose(-1,-2)).transpose(-1,-2)
 
@@ -528,12 +540,26 @@ class TransformerModel(Module):
                     auto_check_redraw = True,
                     feature_redraw_interval = 1024,
                     full_block_repeat=False,
+                    causal=True,
+                    prev_state_len=8192,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
         self.encoder_decoder = encoder_decoder
-        self.transformer_block = TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len,full_block_repeat=full_block_repeat)
+        self.transformer_block = TransformerModule(nhead, 
+                                                        nhid, 
+                                                        nlayers, 
+                                                        ninp,
+                                                        dropout,
+                                                        enable_encoder=encoder_decoder,
+                                                        deberta_layers=deberta_layers,
+                                                        repeated_deberta_layers=repeated_deberta_layers,
+                                                        max_len=max_seq_len,
+                                                        full_block_repeat=full_block_repeat,
+                                                        causal=causal,
+                                                        prev_state_len=prev_state_len,
+                                                        )
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)
 
@@ -592,7 +618,19 @@ class TransformerModel(Module):
                 _get_activation_fn(activation),
                 nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
-                TransformerModule(nhead, nhid, nlayers, ninp,dropout,enable_encoder=encoder_decoder,deberta_layers=deberta_layers,repeated_deberta_layers=repeated_deberta_layers,max_len=max_seq_len,full_block_repeat=full_block_repeat),
+                TransformerModule(nhead, 
+                                        nhid, 
+                                        nlayers, 
+                                        ninp,
+                                        dropout,
+                                        enable_encoder=encoder_decoder,
+                                        deberta_layers=deberta_layers,
+                                        repeated_deberta_layers=repeated_deberta_layers,
+                                        max_len=max_seq_len,
+                                        full_block_repeat=full_block_repeat,
+                                        causal=causal,
+                                        prev_state_len=prev_state_len,
+                                        ),
                 _get_activation_fn(activation),
                 nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
@@ -965,6 +1003,7 @@ class TransformerModel(Module):
         else:
             optimizer_disc = None
 
+        torch.cuda.empty_cache()
 
         def step_optimizer(input_data=data,output_targets=targets):
             outputs = {}
@@ -1023,6 +1062,7 @@ class TransformerModel(Module):
             else:
                 self.zero_grad()
                 output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
+                torch.cuda.empty_cache()
                 if trainable_index != None:
                     trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
                     trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)

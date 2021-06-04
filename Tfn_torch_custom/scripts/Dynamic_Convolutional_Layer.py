@@ -59,9 +59,9 @@ class ConvBasis2d(nn.Module):
     def forward(self, input, idw):
         # idw: conditional input
         output = F.conv2d(input, self.weight_basis, self.bias, self.stride, self.padding, self.dilation, self.groups)
-        output = output.view(output.size(0), self.idfcn, self.out_channels, output.size(2), output.size(3)) * \
-                 idw.view(-1, self.idfcn, 1, 1, 1).expand(output.size(0), self.idfcn, self.out_channels, output.size(2), output.size(3))
-        output = output.sum(1).view(output.size(0), output.size(2), output.size(3), output.size(4))
+        output = output.reshape(output.size(0), self.idfcn, self.out_channels, output.size(2), output.size(3)) * \
+                 idw.reshape(-1, self.idfcn, 1, 1, 1).expand(output.size(0), self.idfcn, self.out_channels, output.size(2), output.size(3))
+        output = output.sum(1).reshape(output.size(0), output.size(2), output.size(3), output.size(4))
         return output
 
 
@@ -93,7 +93,7 @@ class condition_idfcn_basis_comb_resnet(nn.Module):
 
     x3 = self.relu(x3)
     x3 = self.resnet.avgpool(x3)
-    x3 = x3.view(x3.size(0), -1)
+    x3 = x3.reshape(x3.size(0), -1)
     x3 = self.fc_output(x3)
 
     return x3

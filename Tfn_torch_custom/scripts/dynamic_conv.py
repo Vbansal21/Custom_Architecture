@@ -40,7 +40,7 @@ class attention1d(nn.Module):
         x = self.avgpool(x)
         x = self.fc1(x)
         x = F.relu(x)
-        x = self.fc2(x).view(x.size(0), -1)
+        x = self.fc2(x).reshape(x.size(0), -1)
         return F.softmax(x/self.temperature, 1)
 
 
@@ -79,20 +79,20 @@ class Dynamic_conv1d(nn.Module):
     def forward(self, x):#将batch视作维度变量，进行组卷积，因为组卷积的权重是不同的，动态卷积的权重也是不同的
         softmax_attention = self.attention(x)
         batch_size, in_planes, height = x.size()
-        x = x.view(1, -1, height, )# 变化成一个维度进行组卷积
-        weight = self.weight.view(self.K, -1)
+        x = x.reshape(1, -1, height, )# Change into a dimension for group volume
+        weight = self.weight.reshape(self.K, -1)
 
         # 动态卷积的权重的生成， 生成的是batch_size个卷积参数（每个参数不同）
-        aggregate_weight = torch.mm(softmax_attention, weight).view(-1, self.in_planes, self.kernel_size,)
+        aggregate_weight = torch.mm(softmax_attention, weight).reshape(-1, self.in_planes, self.kernel_size,)
         if self.bias is not None:
-            aggregate_bias = torch.mm(softmax_attention, self.bias).view(-1)
+            aggregate_bias = torch.mm(softmax_attention, self.bias).reshape(-1)
             output = F.conv1d(x, weight=aggregate_weight, bias=aggregate_bias, stride=self.stride, padding=self.padding,
                               dilation=self.dilation, groups=self.groups*batch_size)
         else:
             output = F.conv1d(x, weight=aggregate_weight, bias=None, stride=self.stride, padding=self.padding,
                               dilation=self.dilation, groups=self.groups * batch_size)
 
-        output = output.view(batch_size, self.out_planes, output.size(-1))
+        output = output.reshape(batch_size, self.out_planes, output.size(-1))
         return output
 
 
@@ -134,7 +134,7 @@ class attention2d(nn.Module):
         x = self.avgpool(x)
         x = self.fc1(x)
         x = F.relu(x)
-        x = self.fc2(x).view(x.size(0), -1)
+        x = self.fc2(x).reshape(x.size(0), -1)
         return F.softmax(x/self.temperature, 1)
 
 
@@ -173,20 +173,20 @@ class Dynamic_conv2d(nn.Module):
     def forward(self, x):#将batch视作维度变量，进行组卷积，因为组卷积的权重是不同的，动态卷积的权重也是不同的
         softmax_attention = self.attention(x)
         batch_size, in_planes, height, width = x.size()
-        x = x.view(1, -1, height, width)# 变化成一个维度进行组卷积
-        weight = self.weight.view(self.K, -1)
+        x = x.reshape(1, -1, height, width)# 变化成一个维度进行组卷积
+        weight = self.weight.reshape(self.K, -1)
 
         # 动态卷积的权重的生成， 生成的是batch_size个卷积参数（每个参数不同）
-        aggregate_weight = torch.mm(softmax_attention, weight).view(-1, self.in_planes, self.kernel_size, self.kernel_size)
+        aggregate_weight = torch.mm(softmax_attention, weight).reshape(-1, self.in_planes, self.kernel_size, self.kernel_size)
         if self.bias is not None:
-            aggregate_bias = torch.mm(softmax_attention, self.bias).view(-1)
+            aggregate_bias = torch.mm(softmax_attention, self.bias).reshape(-1)
             output = F.conv2d(x, weight=aggregate_weight, bias=aggregate_bias, stride=self.stride, padding=self.padding,
                               dilation=self.dilation, groups=self.groups*batch_size)
         else:
             output = F.conv2d(x, weight=aggregate_weight, bias=None, stride=self.stride, padding=self.padding,
                               dilation=self.dilation, groups=self.groups * batch_size)
 
-        output = output.view(batch_size, self.out_planes, output.size(-2), output.size(-1))
+        output = output.reshape(batch_size, self.out_planes, output.size(-2), output.size(-1))
         return output
 
 
@@ -212,7 +212,7 @@ class attention3d(nn.Module):
         x = self.avgpool(x)
         x = self.fc1(x)
         x = F.relu(x)
-        x = self.fc2(x).view(x.size(0), -1)
+        x = self.fc2(x).reshape(x.size(0), -1)
         return F.softmax(x / self.temperature, 1)
 
 class Dynamic_conv3d(nn.Module):
@@ -246,20 +246,20 @@ class Dynamic_conv3d(nn.Module):
     def forward(self, x):#将batch视作维度变量，进行组卷积，因为组卷积的权重是不同的，动态卷积的权重也是不同的
         softmax_attention = self.attention(x)
         batch_size, in_planes, depth, height, width = x.size()
-        x = x.view(1, -1, depth, height, width)# 变化成一个维度进行组卷积
-        weight = self.weight.view(self.K, -1)
+        x = x.reshape(1, -1, depth, height, width)# 变化成一个维度进行组卷积
+        weight = self.weight.reshape(self.K, -1)
 
         # 动态卷积的权重的生成， 生成的是batch_size个卷积参数（每个参数不同）
-        aggregate_weight = torch.mm(softmax_attention, weight).view(-1, self.in_planes, self.kernel_size, self.kernel_size, self.kernel_size)
+        aggregate_weight = torch.mm(softmax_attention, weight).reshape(-1, self.in_planes, self.kernel_size, self.kernel_size, self.kernel_size)
         if self.bias is not None:
-            aggregate_bias = torch.mm(softmax_attention, self.bias).view(-1)
+            aggregate_bias = torch.mm(softmax_attention, self.bias).reshape(-1)
             output = F.conv3d(x, weight=aggregate_weight, bias=aggregate_bias, stride=self.stride, padding=self.padding,
                               dilation=self.dilation, groups=self.groups*batch_size)
         else:
             output = F.conv3d(x, weight=aggregate_weight, bias=None, stride=self.stride, padding=self.padding,
                               dilation=self.dilation, groups=self.groups * batch_size)
 
-        output = output.view(batch_size, self.out_planes, output.size(-3), output.size(-2), output.size(-1))
+        output = output.reshape(batch_size, self.out_planes, output.size(-3), output.size(-2), output.size(-1))
         return output
 
 

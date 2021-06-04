@@ -54,25 +54,26 @@ def batchify(data, bsz,dim=0):
         data = data[0]
     nbatch = data.size(dim) // bsz
     data = data.narrow(dim, 0, nbatch * bsz)
-    data = data.view(bsz, -1).contiguous()
+    data = data.reshape(bsz, -1).contiguous()
     return data
 
 batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 512
+emsize = 256
 nhid = emsize * 4
-nlayers = 2
-deberta_layers = 6
-repeated_deberta_layers = 1
+nlayers = 6
+deberta_layers = 24
+repeated_deberta_layers = 0
 full_block_repeat = False
-nhead = 8
+nhead = 4
 dropout = 0.3
 mem_tokens = 128*4
 bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**14
-seq_scale_down = 128
+seq_scale_down = 256
+causal = False
 
 discriminator_enabled = False
 progressive_generation = True
@@ -281,7 +282,9 @@ if use_deepspeed:
                                         mem_token=mem_tokens,
                                         discriminator=discriminator_enabled,
                                         seq_scale_down=seq_scale_down,
-                                        max_seq_len=max_seq_len
+                                        max_seq_len=max_seq_len,
+                                        full_block_repeat=full_block_repeat,
+                                        causal=causal,
                                 ).half()
 else:
     model = TransformerModel(ntokens, 
@@ -296,7 +299,9 @@ else:
                                     max_seq_len=max_seq_len,
                                     discriminator=discriminator_enabled,
                                     seq_scale_down=seq_scale_down,
-                                    device=device
+                                    full_block_repeat=full_block_repeat,
+                                    causal=causal,
+                                    device=device,
                             ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
@@ -366,7 +371,7 @@ if use_deepspeed:
         out,mem = model(inp,assign_to_alt_mem=False)
 else:
     out,mem = model(inp,assign_to_alt_mem=False)
-print(torch.argmax((out.view(-1,ntokens)),dim=-1))
+print(torch.argmax((out.reshape(-1,ntokens)),dim=-1))
 del(out,mem,inp)
 
 best_model = model
@@ -391,7 +396,8 @@ wandb.init(project=project_name,config={
     "Number of Parameters":len(model),
     "Progressive generation training":progressive_generation,
     "use_sgd":use_sgd,
-    "full_block_repeat":full_block_repeat
+    "full_block_repeat":full_block_repeat,
+    "causal":causal,
 }
 )
 
@@ -491,9 +497,9 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
             out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
     else:
         out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
-    out = torch.argmax(out.view(-1, ntokens),dim=-1).to(torch.device('cpu'))
+    out = torch.argmax(out.reshape(-1, ntokens),dim=-1).to(torch.device('cpu'))
     result = tokenizer.decode(out)
-    print("Your input:\n\t",tokenizer.decode(text_input.view(-1).to(torch.device('cpu'))))
+    print("Your input:\n\t",tokenizer.decode(text_input.reshape(-1).to(torch.device('cpu'))))
     print("Model's Output:\n\t\t\b\b",result)
     print('')
     torch.cuda.empty_cache()
@@ -547,11 +553,16 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
             inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 
+            model.eval()
+            best_model.eval()
+
             if discriminator_enabled:
                 torch.save(
                 {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
+                    'model':model,
+                    'best_model':best_model,
                     'best_model_state_dict': best_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'optimizer_disc_state_dict': optimizer_disc.state_dict(),
@@ -571,6 +582,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
+                    'model':model,
+                    'best_model':best_model,
                     'best_model_state_dict': best_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'optimizer_disc_state_dict': None,
@@ -601,6 +614,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             })
             """
             intermediate_save_time = time.time()
+            model.train()
         if step_scheduler != None:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
                 scheduler.step(step)
@@ -710,11 +724,15 @@ while True:
         best_val_loss = val_loss
         best_model = model
 
+    model.eval()
+    best_model.eval()
     if discriminator_enabled:
         torch.save(
         {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
+            'model':model,
+            'best_model':best_model,
             'best_model_state_dict': best_model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'optimizer_disc_state_dict': optimizer_disc.state_dict(),

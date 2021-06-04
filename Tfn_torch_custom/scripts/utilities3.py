@@ -137,24 +137,24 @@ class GaussianNormalizer(object):
 class RangeNormalizer(object):
     def __init__(self, x, low=0.0, high=1.0):
         super(RangeNormalizer, self).__init__()
-        mymin = torch.min(x, 0)[0].view(-1)
-        mymax = torch.max(x, 0)[0].view(-1)
+        mymin = torch.min(x, 0)[0].reshape(-1)
+        mymax = torch.max(x, 0)[0].reshape(-1)
 
         self.a = (high - low)/(mymax - mymin)
         self.b = -self.a*mymax + high
 
     def encode(self, x):
         s = x.size()
-        x = x.view(s[0], -1)
+        x = x.reshape(s[0], -1)
         x = self.a*x + self.b
-        x = x.view(s)
+        x = x.reshape(s)
         return x
 
     def decode(self, x):
         s = x.size()
-        x = x.view(s[0], -1)
+        x = x.reshape(s[0], -1)
         x = (x - self.b)/self.a
-        x = x.view(s)
+        x = x.reshape(s)
         return x
 
 #loss function with rel/abs Lp loss
@@ -176,7 +176,7 @@ class LpLoss(object):
         #Assume uniform mesh
         h = 1.0 / (x.size()[1] - 1.0)
 
-        all_norms = (h**(self.d/self.p))*torch.norm(x.view(num_examples,-1) - y.view(num_examples,-1), self.p, 1)
+        all_norms = (h**(self.d/self.p))*torch.norm(x.reshape(num_examples,-1) .reshapeeshape(num_examples,-1), self.p, 1)
 
         if self.reduction:
             if self.size_average:
@@ -240,8 +240,8 @@ class HsLoss(object):
         k = self.k
         balanced = self.balanced
         a = self.a
-        x = x.view(x.shape[0], nx, ny, -1)
-        y = y.view(y.shape[0], nx, ny, -1)
+        x = x.reshape(x.shape[0], nx, ny, -1)
+        y = y.reshape(y.shape[0], nx, ny, -1)
 
         k_x = torch.cat((torch.arange(start=0, end=nx//2, step=1),torch.arange(start=-nx//2, end=0, step=1)), 0).reshape(nx,1).repeat(1,ny)
         k_y = torch.cat((torch.arange(start=0, end=ny//2, step=1),torch.arange(start=-ny//2, end=0, step=1)), 0).reshape(1,ny).repeat(nx,1)

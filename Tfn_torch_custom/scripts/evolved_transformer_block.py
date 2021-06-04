@@ -115,9 +115,9 @@ class ET_Encoder_Block(nn.Module):
 
         normed = self.layer_norms[3](attended)
         if self.pkm == None:
-            forwarded = ckpt(self.feed_forward,normed) + attended
+            forwarded = ckpt(self.feed_forward,normed.transpose(1,2)).transpose(1,2) + attended
         else:
-            forwarded = ckpt(self.feed_forward,normed.transpose(1,2)).transpose(1,2)+ckpt(self.pkm,normed)+attended
+            forwarded = ckpt(self.feed_forward,normed.transpose(1,2)).transpose(1,2) + ckpt(self.pkm,normed) + attended
         return forwarded
         
 
@@ -186,7 +186,7 @@ class ET_Decoder_Block(nn.Module):
         attn_normed = self.layer_norms[4](cross_attn)
 
         if self.pkm==None:
-            forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn
+            forwarded = ckpt(self.feed_forward,attn_normed.transpose(1,2)).transpose(1,2) + cross_attn
         else:
             forwarded = ckpt(self.feed_forward,attn_normed.transpose(1,2)).transpose(1,2) + cross_attn + ckpt(self.pkm,attn_normed)
 
