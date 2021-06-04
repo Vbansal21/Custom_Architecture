@@ -508,6 +508,7 @@ class Attention(nn.Module):
         q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+        tmp_k,tmp_v = k,v
         (q, lq), (k, lk), (v, lv) = map(lambda t: (t[:, :gh], t[:, gh:]), (q, k, v))
 
         attn_outs = []
@@ -533,8 +534,8 @@ class Attention(nn.Module):
         if self.num_mem_kv > 0:
             mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v))
             if exists(self.hop_attn):
-                hop_k = self.hop_attn(k.reshape(b,n,d)).reshape(b,k.size(1),n,k.size(-1))
-                hop_v = self.hop_attn(v.reshape(b,n,d)).reshape(b,v.size(1),n,v.size(-1))
+                hop_k = self.hop_attn(tmp_k.reshape(b,n,d)).reshape(b,tmp_k.size(1),n,tmp_k.size(-1))
+                hop_v = self.hop_attn(tmp_v.reshape(b,n,d)).reshape(b,tmp_v.size(1),n,tmp_v.size(-1))
                 mem_k = torch.cat((mem_k,hop_k),dim=-2)
                 mem_v = torch.cat((mem_v,hop_v),dim=-2)
             out = self.mem_attn(out,mem_k,mem_v) + out

@@ -296,6 +296,7 @@ class TransformerBlock(Module):
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
+                                                    local_heads=2,
                                                     hop_attn=hop_attn,
                                                     rotary_pos_emb=True,
                                                     fixed_emb=fixed_emb,
@@ -324,6 +325,7 @@ class TransformerBlock(Module):
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
+                                        local_heads=2,
                                         hop_attn=copy.deepcopy(hop_attn),
                                         rotary_pos_emb=False),
                 'cross_2':SelfAttention(d_model,
@@ -358,6 +360,7 @@ class TransformerBlock(Module):
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
+                                                    local_heads=2,
                                                     rotary_pos_emb=True,
                                                     fixed_emb=fixed_emb,
                                                     causal=True
