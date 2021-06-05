@@ -606,12 +606,12 @@ class Attention(nn.Module):
             if exists(pos_emb) and not cross_attend:
                 q, k = apply_rotary_pos_emb(q, k, pos_emb)
 
-            out = self.fast_attention(q, k, v)
+            out = ckpt(self.fast_attention,q, k, v)
             attn_outs.append(out)
 
         if not empty(lq):
             assert not cross_attend, 'local attention is not compatible with cross attention'
-            out = self.local_attn(lq, lk, lv, mask)
+            out = ckpt(self.local_attn,lq, lk, lv, mask)
             attn_outs.append(out)
 
         out = torch.cat(attn_outs, dim = 1)
@@ -621,9 +621,9 @@ class Attention(nn.Module):
             if exists(self.hop_attn):
                 hop_k = self.hop_attn(tmp_k.reshape(b,n,d)).reshape(b,tmp_k.size(1),n,tmp_k.size(-1))
                 hop_v = self.hop_attn(tmp_v.reshape(b,n,d)).reshape(b,tmp_v.size(1),n,tmp_v.size(-1))
-                mem_k = torch.cat((mem_k,hop_k),dim=-2)
-                mem_v = torch.cat((mem_v,hop_v),dim=-2)
-            out = self.mem_attn(out,mem_k,mem_v) + out
+                mem_k = torch.cat((mem_k,hop_k),dim=-2).requires_grad_(True)
+                mem_v = torch.cat((mem_v,hop_v),dim=-2).requires_grad_(True)
+            out = ckpt(self.mem_attn,out,mem_k,mem_v) + out
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         out =  self.to_out(out)

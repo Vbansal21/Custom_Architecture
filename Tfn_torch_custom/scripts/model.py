@@ -278,11 +278,8 @@ class TransformerBlock(Module):
 
         self.pkm1 = nn.Sequential(
             nn.Linear(d_model,pkm_dims),
-            _get_activation_fn(activation),
             PKM(pkm_dims,heads=pkm_heads,num_keys=pkm_keys,dim_head=d_model//nhead),
-            _get_activation_fn(activation),
             nn.Linear(pkm_dims,d_model),
-            _get_activation_fn(activation),
             ) if pkm_dims!=0 else None
 
         self.gate = GRUGating(d_model)
@@ -404,7 +401,7 @@ class TransformerBlock(Module):
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
 
         output = self.norm1(src)
-        output = Positional_Encoding(output)
+        #output = Positional_Encoding(output)
         if self.conv_emb != None:
             if self.pkm1 != None:
                 output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.conv_emb,output)
@@ -420,7 +417,7 @@ class TransformerBlock(Module):
 
         if self.decoder:
             context = self.norm2(context)
-            context = Positional_Encoding(context)
+            #context = Positional_Encoding(context)
             if self.pkm2 != None:
                 context_ = ckpt(self.ffd2,context) + ckpt(self.pkm2,context)
             else:
@@ -431,13 +428,13 @@ class TransformerBlock(Module):
 
         output = ckpt(self.attn,output,output,context)
         output = self.dropout2(output)
-        output = ckpt(self.mlp,output,output)
+        output = ckpt(self.mlp,output)
         return output
 
 class TransformerModule(ModuleList):
 
     #@profile
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=4,full_block_repeat=False,causal=True,nystrom=True):
+    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=4,full_block_repeat=False,causal=True,nystrom=True,local_heads=2):
         super(TransformerModule, self).__init__()
 
         self.full_block_repeat = full_block_repeat
@@ -454,11 +451,11 @@ class TransformerModule(ModuleList):
             block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom)
             self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,causal=causal,pkm_dims=pkm_dims,local_heads=2)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,causal=causal,pkm_dims=pkm_dims,local_heads=local_heads)
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=2) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
         self.norm = ScaleNorm(d_model,eps=1e-4)
@@ -466,7 +463,7 @@ class TransformerModule(ModuleList):
         self.scale_output = nn.Parameter(torch.zeros(d_model))
         self.scale_abs_pos_emb = nn.Parameter(torch.ones(d_model))
         
-        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=0,conv_emb=False,activation='relu',pkm_dims=0,nystrom=nystrom)
+        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=0,conv_emb=False,activation='relu',pkm_dims=0)
 
         self.register_buffer(
             name='prev_state',
@@ -567,12 +564,13 @@ class TransformerModel(Module):
                     max_seq_len=2**17,
                     discriminator: bool = False,
                     seq_scale_down: int = 8,
-                    auto_check_redraw = True,
-                    feature_redraw_interval = 1024,
-                    full_block_repeat=False,
-                    causal=True,
-                    prev_state_len=8192,
-                    nystrom=True,
+                    auto_check_redraw: bool = True,
+                    feature_redraw_interval: int = 256,
+                    full_block_repeat: bool = False,
+                    causal: bool = True,
+                    prev_state_len: int = 8192,
+                    nystrom: bool = True,
+                    local_heads: int = 2,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
@@ -591,6 +589,7 @@ class TransformerModel(Module):
                                                         causal=causal,
                                                         prev_state_len=prev_state_len,
                                                         nystrom=nystrom,
+                                                        local_heads=local_heads,
                                                         )
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)
@@ -599,24 +598,18 @@ class TransformerModel(Module):
         self.ninp = ninp
         self.ntokens = ntoken
         
-        self.decoder = nn.Linear(ninp,ntoken)
+        self.decoder = nn.Sequential(
+            nn.Linear(ninp,ntoken),
+            nn.LeakyReLU(0.2, True),
+            )
 
-        self.ffd1 = nn.Sequential(
+        self.ffd1 = GRUGating(ninp,nn.Sequential(
             nn.Linear(ninp,nhid),
             _get_activation_fn(activation),
             nn.Linear(nhid,ninp),
             _get_activation_fn(activation),
-            FNO1d(nhead,nhead,ninp,ninp,ninp,num_layers=1),
-            _get_activation_fn(activation),
-            nn.Linear(ninp,nhid),
-            _get_activation_fn(activation),
-            nn.Linear(nhid,ninp),
-            _get_activation_fn(activation),
-        )
+        ))
         self.ffd2 = copy.deepcopy(self.ffd1)
-
-        self.norm1 = ScaleNorm(ninp)
-        self.norm2 = ScaleNorm(ninp)
 
         self.mem_exist = True if mem_token else False
         if self.mem_exist:
@@ -646,34 +639,26 @@ class TransformerModel(Module):
                 _get_activation_fn(activation),
                 nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
-                nn.Linear(ninp,nhid),
-                _get_activation_fn(activation),
-                nn.Linear(nhid,ninp),
-                _get_activation_fn(activation),
-                TransformerModule(nhead*2, 
-                                        nhid*2, 
-                                        nlayers*2, 
+                TransformerModule(nhead, 
+                                        nhid, 
+                                        nlayers, 
                                         ninp,
                                         dropout,
                                         enable_encoder=encoder_decoder,
-                                        deberta_layers=deberta_layers*2,
+                                        deberta_layers=deberta_layers,
                                         repeated_deberta_layers=repeated_deberta_layers,
                                         max_len=max_seq_len,
                                         full_block_repeat=full_block_repeat,
                                         causal=causal,
-                                        prev_state_len=prev_state_len*2,
+                                        prev_state_len=prev_state_len,
                                         nystrom=nystrom,
+                                        local_heads=local_heads,
                                         ),
                 _get_activation_fn(activation),
                 nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
-                nn.Linear(nhid,ninp),
-                _get_activation_fn(activation),
-                nn.Linear(ninp,nhid),
-                _get_activation_fn(activation),
-                nn.Linear(nhid,ninp),
-                _get_activation_fn(activation),
-                nn.Linear(ninp,2)
+                nn.Linear(nhid,2),
+                nn.LeakyReLU(0.01, True),
             )
         
         self.alt_mem = None
@@ -1174,6 +1159,7 @@ class TransformerModel(Module):
         #src.requires_grad_(True)
         src = self.embedding_encoder(src)
         src = src * math.sqrt(self.ninp)
+        src = Positional_Encoding(src)
 
         if generator or not self.discriminator_enabled:
 
@@ -1188,6 +1174,9 @@ class TransformerModel(Module):
             if self.encoder_decoder:
                 context = ckpt(self.embedding_encoder,context)
                 context = context * math.sqrt(self.ninp)
+
+                context = Positional_Encoding(context)
+
                 context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
                 if context.size(2)%self.seq_scale_down!=0:
                     context = torch.cat((context,repeat(self.padding_for_conv_scale,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
@@ -1237,17 +1226,14 @@ class TransformerModel(Module):
             output = output.contiguous()
 
             output = ckpt(self.ffd1,output)
-            output = ckpt(self.norm1,output) + output
 
             if self.encoder_decoder:
                 context = ckpt(self.scale_down_fno,context)
                 context2 = ckpt(self.ffd3,context)
-                context = ckpt(self.norm1, context2) + context
 
             output = ckpt(self.transformer_block,output,context)
 
             output = ckpt(self.ffd2,output)
-            output = ckpt(self.norm2,output) + output
 
 
             for i in range(b):

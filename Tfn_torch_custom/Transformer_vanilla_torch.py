@@ -62,14 +62,14 @@ eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
 emsize = 256
-nhid = emsize * 8
+nhid = emsize * 4
 nlayers = 4
 deberta_layers = 16
 repeated_deberta_layers = 0
 full_block_repeat = False
-nhead = 4
+nhead = 16
 dropout = 0.3
-mem_tokens = 128*4
+mem_tokens = 128*2
 bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**14
 seq_scale_down = 256
@@ -401,6 +401,7 @@ wandb.init(project=project_name,config={
     "use_sgd":use_sgd,
     "full_block_repeat":full_block_repeat,
     "causal":causal,
+    "nystromer":nystrom,
 }
 )
 
@@ -512,9 +513,36 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
 
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 
+def evaluate(eval_model, data_source, print_val_loss=False):
+    eval_model.eval()
+    total_loss = 0.
+    total_acc = 0.
+    single_pass_mem = None
+    stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
+    with torch.no_grad():
+        for i in range(0, data_source.size(1), stride_size):
+            torch.cuda.empty_cache()
+            data, targets, trainable_index = get_batch(data_source, i)
+            if use_deepspeed:
+                with autocast():
+                    output,single_pass_mem = eval_model(data,mem = single_pass_mem)
+                    total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
+                    total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
+            else:
+                output,single_pass_mem = eval_model(data,mem = single_pass_mem)
+                total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
+                total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
+    val_loss = total_loss / (data_source.size(1))
+    val_acc = total_acc/data_source.size(1)
+    if print_val_loss:
+        print('-' * 110)
+        print('valid acc {:3.2f}% | valid loss {:5.3f} | valid ppl {:10.3f}'.format(val_acc*100,val_loss, math.exp(val_loss)))
+        print('-' * 110)
+    return val_loss, val_acc
+
 torch.cuda.empty_cache()
-def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=1800,optimizer=optimizer,optimizer_disc=optimizer_disc):
-    model.train() 
+def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,optimizer=optimizer,optimizer_disc=optimizer_disc):
+    
     global step
     total_loss = 0.
     total_loss_d = 0.
@@ -528,6 +556,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     total_acc_d = 0
     stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
     for batch, i in enumerate(range(0, processed_train_data.size(1), stride_size)):
+        model.train()
         step_time = time.time()
         if resume_batch != None:
             if batch < resume_batch:
@@ -628,6 +657,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
             total_ppl /= log_interval
+            _,__ = evaluate(model,processed_val_data,True)
             elapsed = time.time() - start_time
             if discriminator_enabled:
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '
@@ -686,26 +716,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 },
                 
             )
-
-def evaluate(eval_model, data_source):
-    eval_model.eval()
-    total_loss = 0.
-    total_acc = 0.
-    single_pass_mem = None
-    stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
-    with torch.no_grad():
-        for i in range(0, data_source.size(1), stride_size):
-            data, targets, trainable_index = get_batch(data_source, i)
-            if use_deepspeed:
-                with autocast():
-                    output,single_pass_mem = eval_model(data,mem = single_pass_mem)
-                    total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
-                    total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
-            else:
-                output,single_pass_mem = eval_model(data,mem = single_pass_mem)
-                total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
-                total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
-    return total_loss / (data_source.size(1)), total_acc/data_source.size(1)
 
 while True:
     if epoch >= epochs:
