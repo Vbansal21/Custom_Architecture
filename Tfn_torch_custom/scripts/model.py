@@ -25,8 +25,8 @@ from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block, GLU
 from .product_key_memory import PKM
 from .hopfield_modules import HopfieldLayer,HopfieldPooling
 from .hopfield_modules.transformer import HopfieldEncoderLayer
-from .performer_pytorch import SelfAttention,ProjectionUpdater
-from .conformer import conformer
+from .performer_pytorch import Attention,ProjectionUpdater
+from .conformer import ConformerConvModule as conformer
 
 from .fourier_1d import FNO1d
 
@@ -78,7 +78,7 @@ class Identity(Module):
         super(Identity,self).__init__()
     
     def forward(self,*args):
-        return *args
+        return args
 
 class convolutional_embedding(Module):
 
@@ -254,6 +254,8 @@ class TransformerBlock(Module):
                      conv_emb=True,
                      fixed_emb=False,
                      causal=False,
+                     local_heads=0,
+                     nystrom=False,
                 ):
         super(TransformerBlock, self).__init__()
 
@@ -315,46 +317,49 @@ class TransformerBlock(Module):
             
             attn_block = ET_Encoder_Block(d_model,
                                 num_heads=nhead,
-                                attn=SelfAttention(d_model,
+                                attn=Attention(d_model,
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
-                                                    local_heads=2,
+                                                    local_heads=local_heads,
                                                     hop_attn=hop_attn,
                                                     rotary_pos_emb=True,
                                                     fixed_emb=fixed_emb,
-                                                    causal=causal
+                                                    causal=causal,
+                                                    nystrom=nystrom
                                                 ),
                                 pkm=copy.deepcopy(self.pkm1),
                                 )
         else:
             attn = {
-                'self_1':SelfAttention(d_model,
+                'self_1':Attention(d_model,
                                         heads=nhead*2,
                                         dim_head=d_model//(nhead*2),
                                         num_mem_kv=mem_kv,
                                         hop_attn=hop_attn,
                                         rotary_pos_emb=True,
                                         fixed_emb=fixed_emb,
-                                        causal=causal),
-                'self_2':SelfAttention(d_model,
-                                        heads=nhead,
-                                        dim_head=d_model//nhead,
-                                        num_mem_kv=mem_kv*4,
-                                        rotary_pos_emb=True,
-                                        fixed_emb=fixed_emb,
-                                        causal=causal),
-                'cross_1':SelfAttention(d_model,
+                                        causal=causal,
+                                        nystrom=nystrom),
+                'self_2':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
-                                        local_heads=2,
-                                        hop_attn=copy.deepcopy(hop_attn),
-                                        rotary_pos_emb=False),
-                'cross_2':SelfAttention(d_model,
+                                        local_heads=local_heads,
+                                        rotary_pos_emb=True,
+                                        fixed_emb=fixed_emb,
+                                        causal=causal,
+                                        nystrom=nystrom),
+                'cross_1':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
-                                        num_mem_kv=mem_kv*4,
+                                        num_mem_kv=mem_kv,
+                                        hop_attn=copy.deepcopy(hop_attn),
+                                        rotary_pos_emb=False),
+                'cross_2':Attention(d_model,
+                                        heads=nhead,
+                                        dim_head=d_model//nhead,
+                                        num_mem_kv=mem_kv,
                                         rotary_pos_emb=False)
             }
 
@@ -379,14 +384,15 @@ class TransformerBlock(Module):
         
             self_attn_context = ET_Encoder_Block(d_model,
                                 num_heads=nhead,
-                                attn=SelfAttention(d_model,
+                                attn=Attention(d_model,
                                                     heads=nhead,
                                                     dim_head=d_model//nhead,
                                                     num_mem_kv=mem_kv,
-                                                    local_heads=2,
+                                                    local_heads=local_heads,
                                                     rotary_pos_emb=True,
                                                     fixed_emb=fixed_emb,
-                                                    causal=causal
+                                                    causal=causal,
+                                                    nystrom=nystrom
                                                 ),
                                 pkm=copy.deepcopy(self.pkm2)
                                 )
@@ -397,7 +403,7 @@ class TransformerBlock(Module):
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
 
-        output = ckpt(self.norm1,src)
+        output = self.norm1(src)
         output = Positional_Encoding(output)
         if self.conv_emb != None:
             if self.pkm1 != None:
@@ -431,7 +437,7 @@ class TransformerBlock(Module):
 class TransformerModule(ModuleList):
 
     #@profile
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=4,full_block_repeat=False,causal=True):
+    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=4,full_block_repeat=False,causal=True,nystrom=True):
         super(TransformerModule, self).__init__()
 
         self.full_block_repeat = full_block_repeat
@@ -442,17 +448,17 @@ class TransformerModule(ModuleList):
             hop_dim = d_model//4
 
         if not enable_encoder:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom)
             self.decoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         else:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom)
             self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,causal=causal,pkm_dims=pkm_dims)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,causal=causal,pkm_dims=pkm_dims,local_heads=2)
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=2) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
         self.norm = ScaleNorm(d_model,eps=1e-4)
@@ -460,7 +466,7 @@ class TransformerModule(ModuleList):
         self.scale_output = nn.Parameter(torch.zeros(d_model))
         self.scale_abs_pos_emb = nn.Parameter(torch.ones(d_model))
         
-        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=0,conv_emb=False,activation='relu',pkm_dims=0)
+        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=0,conv_emb=False,activation='relu',pkm_dims=0,nystrom=nystrom)
 
         self.register_buffer(
             name='prev_state',
@@ -566,6 +572,7 @@ class TransformerModel(Module):
                     full_block_repeat=False,
                     causal=True,
                     prev_state_len=8192,
+                    nystrom=True,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
@@ -583,6 +590,7 @@ class TransformerModel(Module):
                                                         full_block_repeat=full_block_repeat,
                                                         causal=causal,
                                                         prev_state_len=prev_state_len,
+                                                        nystrom=nystrom,
                                                         )
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)
@@ -642,18 +650,19 @@ class TransformerModel(Module):
                 _get_activation_fn(activation),
                 nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
-                TransformerModule(nhead, 
-                                        nhid, 
-                                        nlayers, 
+                TransformerModule(nhead*2, 
+                                        nhid*2, 
+                                        nlayers*2, 
                                         ninp,
                                         dropout,
                                         enable_encoder=encoder_decoder,
-                                        deberta_layers=deberta_layers,
+                                        deberta_layers=deberta_layers*2,
                                         repeated_deberta_layers=repeated_deberta_layers,
                                         max_len=max_seq_len,
                                         full_block_repeat=full_block_repeat,
                                         causal=causal,
-                                        prev_state_len=prev_state_len,
+                                        prev_state_len=prev_state_len*2,
+                                        nystrom=nystrom,
                                         ),
                 _get_activation_fn(activation),
                 nn.Linear(ninp,nhid),

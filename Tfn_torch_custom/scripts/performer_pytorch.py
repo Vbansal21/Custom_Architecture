@@ -541,13 +541,13 @@ class Attention(nn.Module):
         to_v = None,
         to_out = None,
         hop_attn = None,
-        nystorm = False,
+        nystrom = False,
     ):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
         inner_dim = dim_head * heads
-        self.fast_attention = FastAttention(dim_head, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystorm else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True,conv_kernal_size=7)
+        self.fast_attention = FastAttention(dim_head, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystrom else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True,conv_kernal_size=7)
 
         self.heads = heads
         self.global_heads = heads - local_heads
@@ -576,9 +576,9 @@ class Attention(nn.Module):
             self.mem_k = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
             self.mem_v = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
             self.hop_attn = hop_attn
-            self.mem_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystorm else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True,conv_kernal_size=7)
+            self.mem_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystrom else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True)
 
-    def forward(self, x, pos_emb = None, context = None, mask = None, context_mask = None, **kwargs):
+    def forward(self, x, context = None, pos_emb = None, mask = None, context_mask = None, **kwargs):
         b, n, d, h, gh = *x.shape, self.heads, self.global_heads
         
         cross_attend = exists(context)
@@ -611,7 +611,7 @@ class Attention(nn.Module):
 
         if not empty(lq):
             assert not cross_attend, 'local attention is not compatible with cross attention'
-            out = self.local_attn(lq, lk, lv, input_mask = mask)
+            out = self.local_attn(lq, lk, lv, mask)
             attn_outs.append(out)
 
         out = torch.cat(attn_outs, dim = 1)

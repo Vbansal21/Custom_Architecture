@@ -62,9 +62,9 @@ eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
 emsize = 256
-nhid = emsize * 4
-nlayers = 6
-deberta_layers = 24
+nhid = emsize * 8
+nlayers = 4
+deberta_layers = 16
 repeated_deberta_layers = 0
 full_block_repeat = False
 nhead = 4
@@ -74,6 +74,7 @@ bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**14
 seq_scale_down = 256
 causal = False
+nystrom = True
 
 discriminator_enabled = False
 progressive_generation = True
@@ -285,6 +286,7 @@ if use_deepspeed:
                                         max_seq_len=max_seq_len,
                                         full_block_repeat=full_block_repeat,
                                         causal=causal,
+                                        nystrom=nystrom,
                                 ).half()
 else:
     model = TransformerModel(ntokens, 
@@ -302,6 +304,7 @@ else:
                                     full_block_repeat=full_block_repeat,
                                     causal=causal,
                                     device=device,
+                                    nystrom=nystrom,
                             ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
@@ -499,7 +502,7 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
         out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
     out = torch.argmax(out.reshape(-1, ntokens),dim=-1).to(torch.device('cpu'))
     result = tokenizer.decode(out)
-    print("Your input:\n\t",tokenizer.decode(text_input.reshape(-1).to(torch.device('cpu'))))
+    print("Your input:\n\t  ",tokenizer.decode(text_input.reshape(-1).to(torch.device('cpu'))))
     print("Model's Output:\n\t\t\b\b",result)
     print('')
     torch.cuda.empty_cache()
