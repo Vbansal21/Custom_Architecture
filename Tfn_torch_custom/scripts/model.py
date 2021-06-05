@@ -26,6 +26,7 @@ from .product_key_memory import PKM
 from .hopfield_modules import HopfieldLayer,HopfieldPooling
 from .hopfield_modules.transformer import HopfieldEncoderLayer
 from .performer_pytorch import SelfAttention,ProjectionUpdater
+from .conformer import conformer
 
 from .fourier_1d import FNO1d
 
@@ -71,6 +72,14 @@ def Positional_Encoding(x: Tensor) -> Tensor :
     pe = pe.unsqueeze(0).to(x.device)
     return x + pe[:]
 
+class Identity(Module):
+
+    def __init__(self):
+        super(Identity,self).__init__()
+    
+    def forward(self,*args):
+        return *args
+
 class convolutional_embedding(Module):
 
     def __init__(self,
@@ -101,11 +110,23 @@ class RMSNorm(Module):
         norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
         return x / norm.clamp(min = self.eps) * self.g
 
+class ScaleNorm(Module):
+    def __init__(self, dim, eps = 1e-4):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(1))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
 class GEGLU(Module):
     def __init__(self, dim_in, dim_out,layers=1):
         super().__init__()
         self.proj = nn.Sequential(
             GLU(dim_in,layers),
+            nn.GELU(),
             nn.Linear(dim_in, dim_out * 2),
             )
 
@@ -130,11 +151,11 @@ class nBRC(nn.Module):
         return c * h + (1 - c) * torch.tanh(l(self.U, x) + a * h)
 
 class GRUGating(nn.Module):
-    def __init__(self, dim, fn=None, mogrify = False):
+    def __init__(self, dim, fn=None, mogrify = True, norm = True):
         super().__init__()
         self.dim = dim
         self.fn = fn
-        self.norm = nn.LayerNorm(dim)
+        self.norm = ScaleNorm(dim) if norm else Identity()
         self.gru = nBRC(dim, dim)
         self.mogrify = Mogrifier(dim, factorize_k = dim // 4) if mogrify else None
 
@@ -145,7 +166,7 @@ class GRUGating(nn.Module):
         if y==None:
             y = x
 
-        y = self.norm(ckpt(self.fn,y,*args)) + y if self.fn!=None else y
+        y = self.norm(ckpt(self.fn,y,*args)) + y if self.fn!=None else self.norm(y)
 
         if self.mogrify is not None:
             y, x = self.mogrify(y, x)
@@ -159,7 +180,7 @@ class GRUGating(nn.Module):
 
 class ET_ffd(Module):
 
-    def __init__(self,dim,activation="gelu",layers=1):
+    def __init__(self,dim,activation="gelu",layers=1,kernal_size=1):
         super(ET_ffd,self).__init__()
         self.l_1 = nn.Sequential(
             GEGLU(dim,dim,layers),
@@ -167,9 +188,9 @@ class ET_ffd(Module):
         )
 
         self.l_2 = nn.Sequential(
-            nn.Conv1d(dim,dim*4,1,1,groups=dim),
+            nn.Conv1d(dim,dim*4,kernal_size,1,padding=kernal_size//2,groups=dim),
             _get_activation_fn(activation),
-            nn.Conv1d(dim*4,dim,1,1,groups=dim),
+            nn.Conv1d(dim*4,dim,kernal_size,1,padding=kernal_size//2,groups=dim),
             _get_activation_fn(activation),
         )
 
@@ -236,9 +257,9 @@ class TransformerBlock(Module):
                 ):
         super(TransformerBlock, self).__init__()
 
-        self.norm1 = RMSNorm(d_model)
-        self.norm2 = RMSNorm(d_model)
-        self.norm3 = RMSNorm(d_model)
+        self.norm1 = ScaleNorm(d_model)
+        self.norm2 = ScaleNorm(d_model)
+        self.norm3 = ScaleNorm(d_model)
         self.dropout2 = Dropout(dropout)
         self.dropout1 = Dropout(dropout)
 
@@ -264,13 +285,16 @@ class TransformerBlock(Module):
 
         self.gate = GRUGating(d_model)
         
-        self.fno = GRUGating(d_model,FNO1d(nhead,
+        self.fno = nn.Sequential(
+                                GRUGating(d_model,FNO1d(nhead,
                                                     nhead,
                                                     inp_dim=d_model,
                                                     out_dim=d_model,
                                                     ffd_dim=dim_feedforward,
                                                     num_layers=fno_layers
-                                                ))
+                                                )),
+                                GRUGating(d_model,conformer(d_model,causal=True))
+        )
 
         if hopfield:
             hop_attn = GRUGating(d_model,nn.Sequential(
@@ -342,7 +366,7 @@ class TransformerBlock(Module):
         
         self.attn = GRUGating(d_model,attn_block)
 
-        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**16,window=d_model//4))
+        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**16,window=d_model))
 
         self.conv_emb = convolutional_embedding(d_model) if conv_emb else None
 
@@ -431,7 +455,7 @@ class TransformerModule(ModuleList):
         block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
-        self.norm = RMSNorm(d_model,eps=1e-4)
+        self.norm = ScaleNorm(d_model,eps=1e-4)
 
         self.scale_output = nn.Parameter(torch.zeros(d_model))
         self.scale_abs_pos_emb = nn.Parameter(torch.ones(d_model))
@@ -583,8 +607,8 @@ class TransformerModel(Module):
         )
         self.ffd2 = copy.deepcopy(self.ffd1)
 
-        self.norm1 = RMSNorm(ninp)
-        self.norm2 = RMSNorm(ninp)
+        self.norm1 = ScaleNorm(ninp)
+        self.norm2 = ScaleNorm(ninp)
 
         self.mem_exist = True if mem_token else False
         if self.mem_exist:
@@ -597,7 +621,7 @@ class TransformerModel(Module):
         
         if encoder_decoder:
             self.ffd3 = copy.deepcopy(self.ffd1)
-            self.norm2 = RMSNorm(ninp)
+            self.norm2 = ScaleNorm(ninp)
 
             self.context_mem_exist = True if context_mem_token else False
             if self.mem_exist:
