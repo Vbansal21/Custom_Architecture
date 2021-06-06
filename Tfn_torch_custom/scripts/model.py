@@ -301,9 +301,9 @@ class TransformerBlock(Module):
                                         HopfieldLayer(
                                                     input_size=hop_dim,
                                                     num_heads=nhead,
-                                                    pattern_size=2**8,
+                                                    #pattern_size=2**8,
                                                     dropout=dropout_hopfield,
-                                                    quantity=2**8
+                                                    #quantity=2**8
                                                 ),
                                         nn.Linear(hop_dim,d_model)
                                     ))
@@ -434,7 +434,7 @@ class TransformerBlock(Module):
 class TransformerModule(ModuleList):
 
     #@profile
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=4,full_block_repeat=False,causal=True,nystrom=True,local_heads=2):
+    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=8,full_block_repeat=False,causal=True,nystrom=True,local_heads=2):
         super(TransformerModule, self).__init__()
 
         self.full_block_repeat = full_block_repeat
