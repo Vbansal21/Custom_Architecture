@@ -1153,13 +1153,28 @@ class TransformerModel(Module):
         
         b,s_ = src.size(0),src.size(1)
 
+        if not self.discriminator_enabled:
+            discriminator = False
+            generator = True
+
         if self.auto_check_redraw:
             self.proj_updater.redraw_projections()
 
-        #src.requires_grad_(True)
         src = self.embedding_encoder(src)
         src = src * math.sqrt(self.ninp)
         src = Positional_Encoding(src)
+
+
+        if self.encoder_decoder:
+            context = ckpt(self.embedding_encoder,context)
+            context = context * math.sqrt(self.ninp)
+            context = Positional_Encoding(context)
+
+        src = ckpt(self.ffd1,src)
+
+        if self.encoder_decoder:
+            context = ckpt(self.scale_down_fno,context)
+            context = ckpt(self.ffd3,context)
 
         if generator or not self.discriminator_enabled:
 
@@ -1172,11 +1187,6 @@ class TransformerModel(Module):
             s = src.size(1)
 
             if self.encoder_decoder:
-                context = ckpt(self.embedding_encoder,context)
-                context = context * math.sqrt(self.ninp)
-
-                context = Positional_Encoding(context)
-
                 context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
                 if context.size(2)%self.seq_scale_down!=0:
                     context = torch.cat((context,repeat(self.padding_for_conv_scale,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
@@ -1218,23 +1228,11 @@ class TransformerModel(Module):
                         context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
 
 
-            #output = Positional_Encoding(output,device=self.device)
+            output = output.contiguous()
             if self.encoder_decoder:
-                #context = Positional_Encoding(context,device=self.device)
                 context = context.contiguous()
 
-            output = output.contiguous()
-
-            output = ckpt(self.ffd1,output)
-
-            if self.encoder_decoder:
-                context = ckpt(self.scale_down_fno,context)
-                context2 = ckpt(self.ffd3,context)
-
             output = ckpt(self.transformer_block,output,context)
-
-            output = ckpt(self.ffd2,output)
-
 
             for i in range(b):
                 if i == 0:
@@ -1250,13 +1248,15 @@ class TransformerModel(Module):
             output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
             out = output[:,:s_]
 
-            output = ckpt(self.decoder,out)
-
         if discriminator and not generator:
             out = src
 
         if discriminator:
             output = ckpt(self.discriminator,out,context)
+        else:
+            output = ckpt(self.ffd2,out)
+            output = ckpt(self.decoder,output)
+
 
         if return_mem:
             return output, mem
