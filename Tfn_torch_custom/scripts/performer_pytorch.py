@@ -536,6 +536,7 @@ class Attention(nn.Module):
         axial_position_emb = False,
         axial_position_shape = None,
         num_mem_kv = 128,
+        num_prev_state = None,
         to_q = None,
         to_k = None,
         to_v = None,
@@ -572,11 +573,19 @@ class Attention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         self.num_mem_kv = num_mem_kv
+        num_prev_state = num_mem_kv if num_prev_state == None else num_prev_state
         if num_mem_kv > 0:
             self.mem_k = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
             self.mem_v = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
+            self.register_buffer(
+                                name='prev_state',
+                                tensor=torch.zeros((heads, num_prev_state, dim_head))
+                                )
             self.hop_attn = hop_attn
+            self.mem_lin_k = n.Linear(dim_head,dim_head)
+            self.mem_lin_v = n.Linear(dim_head,dim_head)
             self.mem_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystrom else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True)
+            self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystrom else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True)
 
     def forward(self, x, context = None, pos_emb = None, mask = None, context_mask = None, **kwargs):
         b, n, d, h, gh = *x.shape, self.heads, self.global_heads
@@ -592,8 +601,9 @@ class Attention(nn.Module):
 
         q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
 
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
         tmp_k,tmp_v = k,v
+
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
         (q, lq), (k, lk), (v, lv) = map(lambda t: (t[:, :gh], t[:, gh:]), (q, k, v))
 
         attn_outs = []
@@ -617,13 +627,22 @@ class Attention(nn.Module):
         out = torch.cat(attn_outs, dim = 1)
 
         if self.num_mem_kv > 0:
-            mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v))
+            mem_k, mem_v, prev_state = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v, self.prev_state))
+
             if exists(self.hop_attn):
-                hop_k = self.hop_attn(tmp_k.reshape(b,n,d)).reshape(b,tmp_k.size(1),n,tmp_k.size(-1))
-                hop_v = self.hop_attn(tmp_v.reshape(b,n,d)).reshape(b,tmp_v.size(1),n,tmp_v.size(-1))
-                mem_k = torch.cat((mem_k,hop_k),dim=-2).requires_grad_(True)
-                mem_v = torch.cat((mem_v,hop_v),dim=-2).requires_grad_(True)
-            out = ckpt(self.mem_attn,out,mem_k,mem_v) + out
+                hop_k = self.hop_attn(tmp_k.reshape(b,tmp_k.size(-2),d)).reshape(b,tmp_k.size(1),-1,tmp_k.size(-1))
+                hop_v = self.hop_attn(tmp_v.reshape(b,tmp_v.size(-2),d)).reshape(b,tmp_v.size(1),-1,tmp_v.size(-1))
+                mem_k = torch.cat((mem_k,hop_k),dim=-2)
+                mem_v = torch.cat((mem_v,hop_v),dim=-2)
+
+            mem_k = torch.cat((mem_k,prev_state),dim=-2).requires_grad_(True)
+            mem_v = torch.cat((mem_v,prev_state),dim=-2).requires_grad_(True)
+            mem_k = self.mem_lin_k(mem_k)
+            mem_v = self.mem_lin_v(mem_v) 
+            out = ckpt(self.mem_attn,out,mem_k,mem_v)
+
+            prev_state = ckpt(self.prev_state_attn,prev_state,out,out)
+            self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((mem_k.size(1),-1,mem_k.size(-1)))
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         out =  self.to_out(out)
