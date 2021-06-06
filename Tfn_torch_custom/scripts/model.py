@@ -1163,17 +1163,12 @@ class TransformerModel(Module):
         src = self.embedding_encoder(src)
         src = src * math.sqrt(self.ninp)
         src = Positional_Encoding(src)
-
+        src = ckpt(self.ffd1,src)
 
         if self.encoder_decoder:
             context = ckpt(self.embedding_encoder,context)
             context = context * math.sqrt(self.ninp)
             context = Positional_Encoding(context)
-
-        src = ckpt(self.ffd1,src)
-
-        if self.encoder_decoder:
-            context = ckpt(self.scale_down_fno,context)
             context = ckpt(self.ffd3,context)
 
         if generator or not self.discriminator_enabled:
@@ -1246,15 +1241,15 @@ class TransformerModel(Module):
 
             output = ckpt(self.scale_up_fno,output)
             output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
-            out = output[:,:s_]
+            output = output[:,:s_]
 
         if discriminator and not generator:
-            out = src
+            output = src
 
         if discriminator:
-            output = ckpt(self.discriminator,out,context)
+            output = ckpt(self.discriminator,output,context)
         else:
-            output = ckpt(self.ffd2,out)
+            output = ckpt(self.ffd2,output)
             output = ckpt(self.decoder,output)
 
 
