@@ -582,8 +582,8 @@ class Attention(nn.Module):
                                 tensor=torch.zeros((heads, num_prev_state, dim_head))
                                 )
             self.hop_attn = hop_attn
-            self.mem_lin_k = n.Linear(dim_head,dim_head)
-            self.mem_lin_v = n.Linear(dim_head,dim_head)
+            self.mem_lin_k = nn.Linear(dim_head,dim_head)
+            self.mem_lin_v = nn.Linear(dim_head,dim_head)
             self.mem_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystrom else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True)
             self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystrom else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True)
 
@@ -630,8 +630,8 @@ class Attention(nn.Module):
             mem_k, mem_v, prev_state = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v, self.prev_state))
 
             if exists(self.hop_attn):
-                hop_k = self.hop_attn(tmp_k.reshape(b,tmp_k.size(-2),d)).reshape(b,tmp_k.size(1),-1,tmp_k.size(-1))
-                hop_v = self.hop_attn(tmp_v.reshape(b,tmp_v.size(-2),d)).reshape(b,tmp_v.size(1),-1,tmp_v.size(-1))
+                hop_k = self.hop_attn(tmp_k.reshape(b,tmp_k.size(-2),d)).reshape(b,mem_k.size(1),-1,mem_k.size(-1))
+                hop_v = self.hop_attn(tmp_v.reshape(b,tmp_v.size(-2),d)).reshape(b,mem_v.size(1),-1,mem_v.size(-1))
                 mem_k = torch.cat((mem_k,hop_k),dim=-2)
                 mem_v = torch.cat((mem_v,hop_v),dim=-2)
 
