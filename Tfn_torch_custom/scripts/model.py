@@ -603,12 +603,7 @@ class TransformerModel(Module):
             nn.LeakyReLU(0.2, True),
             )
 
-        self.ffd1 = GRUGating(ninp,nn.Sequential(
-            nn.Linear(ninp,nhid),
-            _get_activation_fn(activation),
-            nn.Linear(nhid,ninp),
-            _get_activation_fn(activation),
-        ))
+        self.ffd1 = GRUGating(ninp,ET_ffd(dim=ninp))
         self.ffd2 = copy.deepcopy(self.ffd1)
 
         self.mem_exist = True if mem_token else False
