@@ -196,7 +196,7 @@ class ET_ffd(Module):
 
         self.l_2 = nn.Sequential(
             nn.Conv1d(dim,dim*mult,kernal_size,1,padding=kernal_size//2,groups=dim),
-            nn.SiLU(),
+            _get_activation_fn(activation),
             nn.Conv1d(dim*mult,dim,kernal_size,1,padding=kernal_size//2,groups=dim),
             _get_activation_fn(activation),
         )
@@ -267,6 +267,7 @@ class TransformerBlock(Module):
                 ):
         super(TransformerBlock, self).__init__()
 
+        self.norm = ScaleNorm(d_model)
         #self.norm1 = ScaleNorm(d_model)
         #self.norm2 = ScaleNorm(d_model)
         #self.norm3 = ScaleNorm(d_model)
@@ -440,6 +441,7 @@ class TransformerBlock(Module):
         output = self.dropout2(output)
         output = ckpt(self.mlp,output)
         output = self.dropout3(output)
+        output = self.norm(output+src)
         return output
 
 class TransformerModule(ModuleList):
@@ -490,7 +492,7 @@ class TransformerModule(ModuleList):
                         )
         self.prev_state_update = nn.Sequential(
             FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=d_model,transpose_req=False,num_layers=1),
-            nn.Conv1d(d_model,d_model,kernel_size=11,stride=1,padding=5,groups=d_model),
+            nn.Conv1d(d_model,d_model,kernel_size=3,stride=1,padding=1,groups=d_model),
             nn.Conv1d(d_model,d_model,kernel_size=2,stride=1,groups=d_model)
             )
 
@@ -612,7 +614,6 @@ class TransformerModel(Module):
         self.decoder = nn.Sequential(
             nn.Linear(ninp,ntoken),
             #nn.LeakyReLU(0.2),
-            nn.Sigmoid()
             )
 
         self.ffd1 = GRUGating(ninp,ET_ffd(dim=ninp,layers=1,kernal_size=1,mult=4))
@@ -1068,7 +1069,7 @@ class TransformerModel(Module):
                     trainable_output = output
                     trainable_output_targets = output_targets
 
-                loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
+                loss = loss_criterion(trainable_output.permute(1,2,0).contiguous().cpu(), trainable_output_targets.permute(1,0).contiguous().cpu()).to(self.device)
                 loss.backward()
 
                 optimizer.step()
@@ -1172,7 +1173,7 @@ class TransformerModel(Module):
         src = ckpt(self.ffd1,src)
 
         if self.encoder_decoder:
-            context = ckpt(self.embedding_encoder,context)
+            context = self.embedding_encoder(context)
             context = context * math.sqrt(self.ninp)
             context = Positional_Encoding(context)
             context = ckpt(self.ffd3,context)

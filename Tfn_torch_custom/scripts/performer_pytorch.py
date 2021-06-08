@@ -1,9 +1,10 @@
 import math
 import torch
+from math import ceil
 import torch.nn.functional as F
 from torch import nn
 from torch.cuda.amp import autocast
-from einops import rearrange, repeat
+from einops import rearrange, repeat, reduce
 
 from functools import partial
 from contextlib import contextmanager
@@ -11,6 +12,7 @@ from contextlib import contextmanager
 from local_attention import LocalAttention
 from .axial_positional_embedding import AxialPositionalEmbedding
 from .reversible import ReversibleSequence, SequentialSequence
+from .evolved_transformer_block import GLU
 
 try:
     from apex import amp
@@ -194,6 +196,17 @@ def causal_linear_attention_noncuda(q, k, v, chunk_size = 128, eps = 1e-6):
 
     return torch.cat(outs, dim = -2)
 
+def Positional_Encoding(x):
+    max_len = x.size(1)
+    d_model = x.size(2)
+    pe = torch.zeros(max_len, d_model)
+    position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    pe = pe.unsqueeze(0).to(x.device)
+    return x + pe[:]
+
 class FastAttention(nn.Module):
     def __init__(self, dim_heads, nb_features = None, ortho_scaling = 0, causal = False, generalized_attention = False, kernel_fn = nn.ReLU(), no_projection = False):
         super().__init__()
@@ -249,7 +262,270 @@ class FastAttention(nn.Module):
         out = attn_fn(q, k, v)
         return out
 
+def moore_penrose_iter_pinv(x, iters = 6):
+    device = x.device
 
+    abs_x = torch.abs(x)
+    col = abs_x.sum(dim = -1)
+    row = abs_x.sum(dim = -2)
+    z = rearrange(x, '... i j -> ... j i') / (torch.max(col) * torch.max(row))
+
+    I = torch.eye(x.shape[-1], device = device)
+    I = rearrange(I, 'i j -> () i j')
+
+    for _ in range(iters):
+        xz = x @ z
+        z = 0.25 * z @ (13 * I - (xz @ (15 * I - (xz @ (7 * I - xz)))))
+
+    return z
+
+# main attention class
+
+class NystromAttention_Full(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        num_landmarks = 256,
+        pinv_iterations = 6,
+        residual = True,
+        residual_conv_kernel = 33,
+        eps = 1e-8,
+        dropout = 0.
+    ):
+        super().__init__()
+        self.eps = eps
+        inner_dim = heads * dim_head
+
+        self.num_landmarks = num_landmarks
+        self.pinv_iterations = pinv_iterations
+
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+        self.residual = residual
+        if residual:
+            kernel_size = residual_conv_kernel
+            padding = residual_conv_kernel // 2
+            self.res_conv = nn.Conv2d(heads, heads, (kernel_size, 1), padding = (padding, 0), groups = heads, bias = False)
+
+    def forward(self, x, mask = None, return_attn = False):
+        b, n, _, h, m, iters, eps = *x.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
+
+        # pad so that sequence can be evenly divided into m landmarks
+
+        remainder = n % m
+        if remainder > 0:
+            padding = m - (n % m)
+            x = F.pad(x, (0, 0, padding, 0), value = 0)
+
+            if exists(mask):
+                mask = F.pad(mask, (padding, 0), value = False)
+
+        # derive query, keys, values
+
+        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+
+        # set masked positions to 0 in queries, keys, values
+
+        if exists(mask):
+            mask = rearrange(mask, 'b n -> b () n')
+            q, k, v = map(lambda t: t * mask[..., None], (q, k, v))
+
+        q = q * self.scale
+
+        # generate landmarks by sum reduction, and then calculate mean using the mask
+
+        l = ceil(n / m)
+        landmark_einops_eq = '... (n l) d -> ... n d'
+        q_landmarks = reduce(q, landmark_einops_eq, 'sum', l = l)
+        k_landmarks = reduce(k, landmark_einops_eq, 'sum', l = l)
+
+        # calculate landmark mask, and also get sum of non-masked elements in preparation for masked mean
+
+        divisor = l
+        if exists(mask):
+            mask_landmarks_sum = reduce(mask, '... (n l) -> ... n', 'sum', l = l)
+            divisor = mask_landmarks_sum[..., None] + eps
+            mask_landmarks = mask_landmarks_sum > 0
+
+        # masked mean (if mask exists)
+
+        q_landmarks /= divisor
+        k_landmarks /= divisor
+
+        # similarities
+
+        einops_eq = '... i d, ... j d -> ... i j'
+        sim1 = einsum(einops_eq, q, k_landmarks)
+        sim2 = einsum(einops_eq, q_landmarks, k_landmarks)
+        sim3 = einsum(einops_eq, q_landmarks, k)
+
+        # masking
+
+        if exists(mask):
+            mask_value = -torch.finfo(q.dtype).max
+            sim1.masked_fill_(~(mask[..., None] * mask_landmarks[..., None, :]), mask_value)
+            sim2.masked_fill_(~(mask_landmarks[..., None] * mask_landmarks[..., None, :]), mask_value)
+            sim3.masked_fill_(~(mask_landmarks[..., None] * mask[..., None, :]), mask_value)
+
+        # eq (15) in the paper and aggregate values
+
+        attn1, attn2, attn3 = map(lambda t: t.softmax(dim = -1), (sim1, sim2, sim3))
+        attn2_inv = moore_penrose_iter_pinv(attn2, iters)
+
+        out = (attn1 @ attn2_inv) @ (attn3 @ v)
+
+        # add depth-wise conv residual of values
+
+        if self.residual:
+            out += self.res_conv(v)
+
+        # merge and combine heads
+
+        out = rearrange(out, 'b h n d -> b n (h d)', h = h)
+        out = self.to_out(out)
+        out = out[:, -n:]
+
+        if return_attn:
+            attn = attn1 @ attn2_inv @ attn3
+            return out, attn
+
+        return out
+
+
+class NystromAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        num_landmarks = 256,
+        pinv_iterations = 6,
+        residual = True,
+        residual_conv_kernel = 33,
+        eps = 1e-8,
+        dropout = 0.
+    ):
+        super().__init__()
+        self.eps = eps
+        inner_dim = heads * dim_head
+
+        self.num_landmarks = num_landmarks
+        self.pinv_iterations = pinv_iterations
+
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        """
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        )
+        """
+
+        self.residual = residual
+        if residual:
+            kernel_size = residual_conv_kernel
+            padding = residual_conv_kernel // 2
+            self.res_conv = nn.Conv2d(heads, heads, (kernel_size, 1), padding = (padding, 0), groups = heads, bias = False)
+
+    def forward(self, q,k,v, mask = None, return_attn = False):
+        b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
+
+        # pad so that sequence can be evenly divided into m landmarks
+
+        remainder = n % m
+        if remainder > 0:
+            padding = m - (n % m)
+            #x = F.pad(x, (0, 0, padding, 0), value = 0)
+            q,k,v = map(lambda x: F.pad(x, (0, 0, padding, 0), value = 0), (q, k, v))
+
+            if exists(mask):
+                mask = F.pad(mask, (padding, 0), value = False)
+
+        # derive query, keys, values
+        """
+        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+        """
+        # set masked positions to 0 in queries, keys, values
+
+        if exists(mask):
+            mask = rearrange(mask, 'b n -> b () n')
+            q, k, v = map(lambda t: t * mask[..., None], (q, k, v))
+
+        q = q * self.scale
+
+        # generate landmarks by sum reduction, and then calculate mean using the mask
+
+        l = ceil(n / m)
+        landmark_einops_eq = '... (n l) d -> ... n d'
+        q_landmarks = reduce(q, landmark_einops_eq, 'sum', l = l)
+        k_landmarks = reduce(k, landmark_einops_eq, 'sum', l = l)
+
+        # calculate landmark mask, and also get sum of non-masked elements in preparation for masked mean
+
+        divisor = l
+        if exists(mask):
+            mask_landmarks_sum = reduce(mask, '... (n l) -> ... n', 'sum', l = l)
+            divisor = mask_landmarks_sum[..., None] + eps
+            mask_landmarks = mask_landmarks_sum > 0
+
+        # masked mean (if mask exists)
+
+        q_landmarks /= divisor
+        k_landmarks /= divisor
+
+        # similarities
+
+        einops_eq = '... i d, ... j d -> ... i j'
+        sim1 = einsum(einops_eq, q, k_landmarks)
+        sim2 = einsum(einops_eq, q_landmarks, k_landmarks)
+        sim3 = einsum(einops_eq, q_landmarks, k)
+
+        # masking
+
+        if exists(mask):
+            mask_value = -torch.finfo(q.dtype).max
+            sim1.masked_fill_(~(mask[..., None] * mask_landmarks[..., None, :]), mask_value)
+            sim2.masked_fill_(~(mask_landmarks[..., None] * mask_landmarks[..., None, :]), mask_value)
+            sim3.masked_fill_(~(mask_landmarks[..., None] * mask[..., None, :]), mask_value)
+
+        # eq (15) in the paper and aggregate values
+
+        attn1, attn2, attn3 = map(lambda t: t.softmax(dim = -1), (sim1, sim2, sim3))
+        attn2_inv = moore_penrose_iter_pinv(attn2, iters)
+
+        out = (attn1 @ attn2_inv) @ (attn3 @ v)
+
+        # add depth-wise conv residual of values
+
+        if self.residual:
+            out += self.res_conv(v)
+
+        # merge and combine heads
+
+        #out = rearrange(out, 'b h n d -> b n (h d)', h = h)
+        #out = self.to_out(out)
+        out = out[:, -n:]
+
+        if return_attn:
+            attn = attn1 @ attn2_inv @ attn3
+            return out, attn
+
+        return out
+
+"""
 class NystromAttention(nn.Module):
     def __init__(self,
                     head_dim,
@@ -286,15 +562,15 @@ class NystromAttention(nn.Module):
             Q = Q * mask[:, None, :, None] / math.sqrt(math.sqrt(self.head_dim))
             K = K * mask[:, None, :, None] / math.sqrt(math.sqrt(self.head_dim))
 
-        if self.num_landmarks <= self.seq_len:
+        if self.num_landmarks == self.seq_len:
             if mask != None:
                 attn = torch.nn.functional.softmax(torch.matmul(Q, K.transpose(-1, -2)) - 1e9 * (1 - mask[:, None, None, :]), dim = -1)
             else:
                 attn = torch.nn.functional.softmax(torch.matmul(Q, K.transpose(-1, -2)), dim = -1)
             X = torch.matmul(attn, V)
         else:
-            Q_landmarks = Q.reshape(-1, self.num_head, self.num_landmarks, Q.size(-2) // self.num_landmarks, self.head_dim).mean(dim = -2)
-            K_landmarks = K.reshape(-1, self.num_head, self.num_landmarks, V.size(-2) // self.num_landmarks, self.head_dim).mean(dim = -2)
+            Q_landmarks = Q.reshape(Q.size(0), self.num_head, self.num_landmarks, Q.size(-2) // self.num_landmarks, self.head_dim).mean(dim = -2)
+            K_landmarks = K.reshape(K.size(0), self.num_head, self.num_landmarks, V.size(-2) // self.num_landmarks, self.head_dim).mean(dim = -2)
 
             kernel_1 = torch.nn.functional.softmax(torch.matmul(Q, K_landmarks.transpose(-1, -2)), dim = -1)
             kernel_2 = torch.nn.functional.softmax(torch.matmul(Q_landmarks, K_landmarks.transpose(-1, -2)), dim = -1)
@@ -332,7 +608,7 @@ class NystromAttention(nn.Module):
 
     def extra_repr(self):
         return f'num_landmarks={self.num_landmarks}, seq_len={self.seq_len}'
-
+"""
 # a module for keeping track of when to update the projections
 
 class ProjectionUpdater(nn.Module):
@@ -522,6 +798,7 @@ class Attention(nn.Module):
         dim_head = 32,
         local_heads = 0,
         local_window_size = 256,
+        nystromer_landmarks = None,
         nb_features = None,
         feature_redraw_interval = 1024,
         generalized_attention = False,
@@ -548,7 +825,11 @@ class Attention(nn.Module):
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
         inner_dim = dim_head * heads
-        self.fast_attention = FastAttention(dim_head, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystrom else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True,conv_kernal_size=7)
+        nystromer_landmarks = default(nystromer_landmarks,local_window_size//4)
+        if nystrom and causal:
+            self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head,heads=heads,num_landmarks=nystromer_landmarks)
+        else:
+            self.fast_attention = FastAttention(dim_head, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
         self.heads = heads
         self.global_heads = heads - local_heads
@@ -586,8 +867,8 @@ class Attention(nn.Module):
             self.mem_lin_v = nn.Linear(dim_head,dim_head)
             self.out = nn.Linear(dim_head,dim_head)
             
-            self.mem_attn = NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True) #FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
-            self.prev_state_attn = NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True) #FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+            self.mem_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+            self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
     def forward(self, x, context = None, pos_emb = None, mask = None, context_mask = None, **kwargs):
         b, n, d, h, gh = *x.shape, self.heads, self.global_heads
@@ -601,7 +882,7 @@ class Attention(nn.Module):
         context = default(context, x)
         context_mask = default(context_mask, mask) if not cross_attend else context_mask
 
-        q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
+        q, k, v = self.to_q(Positional_Encoding(x)), self.to_k(Positional_Encoding(context)), self.to_v(context)
 
         tmp_k,tmp_v = k,v
 

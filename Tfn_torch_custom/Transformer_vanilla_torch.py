@@ -74,7 +74,7 @@ bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**14
 seq_scale_down = 256
 causal = False
-nystrom = True
+nystrom = False
 
 discriminator_enabled = False
 progressive_generation = True
