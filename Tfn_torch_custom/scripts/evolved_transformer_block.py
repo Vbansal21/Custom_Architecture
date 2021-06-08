@@ -64,6 +64,28 @@ class SeparableConv1D(nn.Module):
         return x
 
 
+class RMSNorm(Module):
+    def __init__(self, dim, eps = 1e-8):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
+class ScaleNorm(Module):
+    def __init__(self, dim, eps = 1e-4):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(1))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
 class ET_Encoder_Block(nn.Module):
     def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,pkm=None):
         super(ET_Encoder_Block,self).__init__()
@@ -71,7 +93,7 @@ class ET_Encoder_Block(nn.Module):
             self.attention = nn.MultiheadAttention(d_model, num_heads) 
         else:
             self.attention = attn
-        self.layer_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(4)])
+        self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(4)])
         if ffd == None:
             self.feed_forward = nn.Sequential(
                 nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0),
@@ -93,12 +115,13 @@ class ET_Encoder_Block(nn.Module):
             nn.Conv1d(in_channels=d_model//2,out_channels=d_model,kernel_size=1,padding=0),
         )
 
-        self.mid_layer_norm=nn.LayerNorm(d_model)
+        self.mid_layer_norm=ScaleNorm(d_model)
         self.sep_conv = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=9,padding=4)
 
     def forward(self,x:Tensor,*args) -> Tensor:
 
-        glued = ckpt(self.glu,self.layer_norms[0](x))+x
+        glued = ckpt(self.glu,x)+x
+        #glued = ckpt(self.glu,self.layer_norms[0](x))+x
         glu_normed = self.layer_norms[1](glued)
 
         left_branch = ckpt(self.left_net,glu_normed.transpose(1,2)).transpose(1,2)
@@ -137,7 +160,7 @@ class ET_Decoder_Block(nn.Module):
             self.attention_cross_1 = attn['cross_1'] 
             self.attention_cross_2 = attn['cross_2'] 
 
-        self.layer_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(5)])
+        self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(5)])
 
         self.pkm = pkm
 
@@ -150,14 +173,14 @@ class ET_Decoder_Block(nn.Module):
         else:
             self.feed_forward = ffd
 
-        self.sep_norm=nn.LayerNorm(d_model)
+        self.sep_norm=ScaleNorm(d_model)
         self.sep_conv_l = SeparableConv1D(d_model,d_model*2,d_model,kernel_size=11,padding=5)
         self.sep_conv_r = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=7,padding=3)
         self.sep_mid = SeparableConv1D(d_model,d_model,d_model,kernel_size=7,padding=3)
 
     def forward(self,x:Tensor,context:Tensor) -> Tensor:
 
-        normed_x = self.layer_norms[0](x)
+        normed_x = x #self.layer_norms[0](x)
 
         self_attn = ckpt(self.attention_self_1,normed_x)
         cross_attn = ckpt(self.attention_cross_1,normed_x,context)

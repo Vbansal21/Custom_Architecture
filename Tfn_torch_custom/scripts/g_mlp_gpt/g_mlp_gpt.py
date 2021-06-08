@@ -43,6 +43,29 @@ def dropout_layers(layers, prob_survival):
 
 # helper classes
 
+
+class RMSNorm(Module):
+    def __init__(self, dim, eps = 1e-8):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
+class ScaleNorm(Module):
+    def __init__(self, dim, eps = 1e-4):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(1))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
@@ -55,7 +78,7 @@ class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
         self.fn = fn
-        self.norm = nn.LayerNorm(dim)
+        self.norm = ScaleNorm(dim)
 
     def forward(self, x, **kwargs):
         x = self.norm(x)
@@ -92,7 +115,7 @@ class CausalSGU(nn.Module):
         super().__init__()
         dim_out = dim // 2
 
-        self.norm = nn.LayerNorm(dim_out)
+        self.norm = ScaleNorm(dim_out)
 
         self.heads = heads
         self.weight = nn.Parameter(torch.zeros(heads, dim_seq, dim_seq))
@@ -136,7 +159,7 @@ class CausalLocalSGU(nn.Module):
         super().__init__()
         dim_out = dim // 2
 
-        self.norm = nn.LayerNorm(dim_out)
+        self.norm = ScaleNorm(dim_out)
 
         self.heads = heads
         self.window = window
@@ -263,7 +286,7 @@ class gMLPGPT(nn.Module):
         self.net = execute_klass(layers)
 
         self.to_logits = nn.Sequential(
-            nn.LayerNorm(dim),
+            ScaleNorm(dim),
             nn.Linear(dim, num_tokens)
         ) if type(num_tokens)==int else nn.Linear(dim,dim)
 

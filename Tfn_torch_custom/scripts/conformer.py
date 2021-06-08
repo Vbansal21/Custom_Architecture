@@ -53,11 +53,33 @@ class Scale(nn.Module):
     def forward(self, x, **kwargs):
         return self.fn(x, **kwargs) * self.scale
 
+class RMSNorm(Module):
+    def __init__(self, dim, eps = 1e-8):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
+class ScaleNorm(Module):
+    def __init__(self, dim, eps = 1e-4):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(1))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
         self.fn = fn
-        self.norm = nn.LayerNorm(dim)
+        self.norm = ScaleNorm(dim)
 
     def forward(self, x, **kwargs):
         x = self.norm(x)
@@ -149,7 +171,6 @@ class ConformerConvModule(nn.Module):
         padding = calc_same_padding(kernel_size) if not causal else (kernel_size - 1, 0)
 
         self.net = nn.Sequential(
-            nn.LayerNorm(dim),
             Rearrange('b n c -> b c n'),
             nn.Conv1d(dim, inner_dim * 2, 1),
             GLU(dim=1),
@@ -190,7 +211,7 @@ class ConformerBlock(nn.Module):
         self.ff1 = Scale(0.5, PreNorm(dim, self.ff1))
         self.ff2 = Scale(0.5, PreNorm(dim, self.ff2))
 
-        self.post_norm = nn.LayerNorm(dim)
+        self.post_norm = ScaleNorm(dim)
 
     def forward(self, x, mask = None):
         x = self.ff1(x) + x

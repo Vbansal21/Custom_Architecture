@@ -79,7 +79,7 @@ class PKM(nn.Module):
         x = self.input_dropout(x)
 
         queries = self.to_queries(x)
-        queries = self.norm(queries, mask = input_mask)
+        #queries = self.norm(queries, mask = input_mask)
         queries = self.query_dropout(queries)
 
         queries = queries.chunk(2, dim=-1)

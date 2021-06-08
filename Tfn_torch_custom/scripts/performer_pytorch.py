@@ -792,7 +792,7 @@ class PerformerLM(nn.Module):
         self.dropout = nn.Dropout(emb_dropout)
 
         self.performer = Performer(dim, depth, heads, dim_head, local_attn_heads, local_window_size, causal, ff_mult, nb_features, feature_redraw_interval, reversible, ff_chunks, generalized_attention, kernel_fn, use_scalenorm, use_rezero, ff_glu, ff_dropout, attn_dropout, cross_attend, no_projection, auto_check_redraw, qkv_bias, attn_out_bias)
-        self.norm = nn.LayerNorm(dim)
+        self.norm = ScaleNorm(dim)
         self.to_out = nn.Linear(dim, num_tokens) if not tie_embed else None
 
     def check_redraw_projections(self):

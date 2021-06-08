@@ -72,33 +72,6 @@ def Positional_Encoding(x: Tensor) -> Tensor :
     pe = pe.unsqueeze(0).to(x.device)
     return x + pe[:]
 
-class Identity(Module):
-
-    def __init__(self):
-        super(Identity,self).__init__()
-    
-    def forward(self,*args):
-        return args
-
-class convolutional_embedding(Module):
-
-    def __init__(self,
-        channels,
-        kernal_size=1,
-        stride_size=1
-        ):
-        super(convolutional_embedding,self).__init__()
-        self.involution_layer = involution(channels,kernal_size,stride_size)
-        self.dyn_conv_1d = Dynamic_conv1d(channels,channels,kernal_size,stride_size)
-        self.norm = nn.LayerNorm(channels)
-    
-    def forward(self,x):
-        out = x.transpose(-1,-2).unsqueeze(-1).contiguous()
-        out = ckpt(self.involution_layer,out)
-        out = rearrange(out,'b d n o -> b (n o) d').contiguous()
-        out2 = ckpt(self.dyn_conv_1d,x.transpose(-1,-2)).transpose(-1,-2)
-        return self.norm(out+out2) + x
-
 class RMSNorm(Module):
     def __init__(self, dim, eps = 1e-8):
         super().__init__()
@@ -120,6 +93,32 @@ class ScaleNorm(Module):
     def forward(self, x):
         norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
         return x / norm.clamp(min = self.eps) * self.g
+
+class Identity(Module):
+
+    def __init__(self):
+        super(Identity,self).__init__()
+    
+    def forward(self,*args):
+        return args
+
+class convolutional_embedding(Module):
+
+    def __init__(self,
+        channels,
+        kernal_size=1,
+        stride_size=1
+        ):
+        super(convolutional_embedding,self).__init__()
+        self.involution_layer = involution(channels,kernal_size,stride_size)
+        self.dyn_conv_1d = Dynamic_conv1d(channels,channels,kernal_size,stride_size)
+    
+    def forward(self,x):
+        out = x.transpose(-1,-2).unsqueeze(-1).contiguous()
+        out = ckpt(self.involution_layer,out)
+        out = rearrange(out,'b d n o -> b (n o) d').contiguous()
+        out2 = ckpt(self.dyn_conv_1d,x.transpose(-1,-2)).transpose(-1,-2)
+        return out+out2
 
 class GEGLU(Module):
     def __init__(self, dim_in, dim_out,layers=1):
@@ -155,7 +154,10 @@ class GRUGating(nn.Module):
         super().__init__()
         self.dim = dim
         self.fn = fn
-        self.norm = ScaleNorm(dim) if norm else Identity()
+        if norm:
+            self.norm = ScaleNorm(dim)
+        else:
+            self.norm = None
         self.gru = nBRC(dim, dim)
         self.mogrify = Mogrifier(dim, factorize_k = dim // 4) if mogrify else None
 
@@ -166,7 +168,13 @@ class GRUGating(nn.Module):
         if y==None:
             y = x
 
-        y = self.norm(ckpt(self.fn,y,*args)) + y if self.fn!=None else self.norm(y)
+        if self.fn != None:
+            y = ckpt(self.fn,y,*args) + y
+            if self.norm != None:
+                y = self.norm(y)
+        else:
+            if self.norm1 != None:
+                y = self.norm1(y)
 
         if self.mogrify is not None:
             y, x = self.mogrify(y, x)
@@ -244,7 +252,7 @@ class TransformerBlock(Module):
                      dropout=0.1, 
                      dropout_hopfield=0.0,
                      activation="gelu",
-                     mem_kv=64*4,
+                     mem_kv=64*16,
                      pkm_dims=None,
                      pkm_keys=64,
                      decoder=False,
@@ -259,11 +267,12 @@ class TransformerBlock(Module):
                 ):
         super(TransformerBlock, self).__init__()
 
-        self.norm1 = ScaleNorm(d_model)
-        self.norm2 = ScaleNorm(d_model)
-        self.norm3 = ScaleNorm(d_model)
-        self.dropout2 = Dropout(dropout)
+        #self.norm1 = ScaleNorm(d_model)
+        #self.norm2 = ScaleNorm(d_model)
+        #self.norm3 = ScaleNorm(d_model)
         self.dropout1 = Dropout(dropout)
+        self.dropout2 = Dropout(dropout)
+        self.dropout3 = Dropout(dropout)
 
         self.decoder = decoder
 
@@ -301,9 +310,9 @@ class TransformerBlock(Module):
                                         HopfieldLayer(
                                                     input_size=hop_dim,
                                                     num_heads=nhead,
-                                                    #pattern_size=2**8,
+                                                    pattern_size=2**10,
                                                     dropout=dropout_hopfield,
-                                                    #quantity=2**8
+                                                    quantity=2**10
                                                 ),
                                         nn.Linear(hop_dim,d_model)
                                     ))
@@ -400,7 +409,8 @@ class TransformerBlock(Module):
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
 
-        output = self.norm1(src)
+        output = src
+        #output = self.norm1(src)
         #output = Positional_Encoding(output)
         if self.conv_emb != None:
             if self.pkm1 != None:
@@ -416,7 +426,7 @@ class TransformerBlock(Module):
         output = ckpt(self.gate,output,self.dropout1(output2))
 
         if self.decoder:
-            context = self.norm2(context)
+            #context = self.norm2(context)
             #context = Positional_Encoding(context)
             if self.pkm2 != None:
                 context_ = ckpt(self.ffd2,context) + ckpt(self.pkm2,context)
@@ -429,6 +439,7 @@ class TransformerBlock(Module):
         output = ckpt(self.attn,output,output,context)
         output = self.dropout2(output)
         output = ckpt(self.mlp,output)
+        output = self.dropout3(output)
         return output
 
 class TransformerModule(ModuleList):
@@ -458,7 +469,7 @@ class TransformerModule(ModuleList):
         block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
-        self.norm = ScaleNorm(d_model,eps=1e-4)
+        #self.norm = ScaleNorm(d_model,eps=1e-4)
 
         self.scale_output = nn.Parameter(torch.zeros(d_model))
         self.scale_abs_pos_emb = nn.Parameter(torch.ones(d_model))
@@ -469,13 +480,13 @@ class TransformerModule(ModuleList):
             name='prev_state',
             tensor=torch.zeros((1,prev_state_len,d_model))
         )
+        hop_dim = d_model
         self.hop_pool = nn.Sequential(
                 nn.Linear(d_model,hop_dim),
                 HopfieldPooling(
                             input_size=hop_dim,
                         ),
                 nn.Linear(hop_dim,d_model),
-                nn.ReLU()
                         )
         self.prev_state_update = nn.Sequential(
             FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=d_model,transpose_req=False,num_layers=1),
@@ -537,7 +548,7 @@ class TransformerModule(ModuleList):
 
         output = ckpt(self.prev_state_attend,output,repeat(self.prev_state,'1 n d -> b n d',b=output.size(0)))
 
-        tmp = ckpt(self.hop_pool,self.norm(output))
+        tmp = ckpt(self.hop_pool,output)
         tmp = torch.sum(tmp,dim=0,keepdim=True).reshape(1,1,-1)
         self.prev_state = torch.cat((self.prev_state,tmp),dim=1)
         self.prev_state = ckpt(self.prev_state_update, self.prev_state.transpose(-1,-2)).transpose(-1,-2)
@@ -600,7 +611,8 @@ class TransformerModel(Module):
         
         self.decoder = nn.Sequential(
             nn.Linear(ninp,ntoken),
-            nn.LeakyReLU(0.2, True),
+            #nn.LeakyReLU(0.2),
+            nn.Sigmoid()
             )
 
         self.ffd1 = GRUGating(ninp,ET_ffd(dim=ninp))
@@ -617,7 +629,6 @@ class TransformerModel(Module):
         
         if encoder_decoder:
             self.ffd3 = copy.deepcopy(self.ffd1)
-            self.norm2 = ScaleNorm(ninp)
 
             self.context_mem_exist = True if context_mem_token else False
             if self.mem_exist:
@@ -703,7 +714,7 @@ class TransformerModel(Module):
 
     def init_weights(self) -> NoReturn :
         for w in self.parameters():
-            w.data.uniform_(-1/16,1/16)
+            w.data.uniform_(-1/30,1/30)
             
     def __len__(self) -> int:
         return sum(p.numel() for p in self.parameters())
