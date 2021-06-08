@@ -882,7 +882,7 @@ class Attention(nn.Module):
         context = default(context, x)
         context_mask = default(context_mask, mask) if not cross_attend else context_mask
 
-        q, k, v = self.to_q(Positional_Encoding(x)), self.to_k(Positional_Encoding(context)), self.to_v(context)
+        q, k, v = self.to_q(Positional_Encoding(x)), self.to_k(context), self.to_v(context)
 
         tmp_k,tmp_v = k,v
 
