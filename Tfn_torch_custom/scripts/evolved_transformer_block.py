@@ -30,7 +30,7 @@ def ckpt(f,arg1,arg2=None,arg3=None,checkpointed = checkpointed):
 class GatedConvolution(nn.Module):
     def __init__(self,d_model,patch_size=3,padding=1):
         super(GatedConvolution,self).__init__()
-        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=padding,bias=True)
+        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=padding,groups=d_model//8,bias=True)
         #init.xavier_uniform_(self.conv.weight, gain=1)
 
     def forward(self,x):

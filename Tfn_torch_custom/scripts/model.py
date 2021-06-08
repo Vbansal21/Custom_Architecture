@@ -125,7 +125,6 @@ class GEGLU(Module):
         super().__init__()
         self.proj = nn.Sequential(
             GLU(dim_in,layers),
-            nn.GELU(),
             nn.Linear(dim_in, dim_out * 2),
             )
 
@@ -169,12 +168,11 @@ class GRUGating(nn.Module):
             y = x
 
         if self.fn != None:
-            y = ckpt(self.fn,y,*args) + y
-            if self.norm != None:
-                y = self.norm(y)
+            y_ = ckpt(self.fn,y,*args)
+
+            y = self.norm(y_+y) if self.norm != None else y_
         else:
-            if self.norm != None:
-                y = self.norm(y)
+            y = self.norm(y) if self.norm!=None else y
 
         if self.mogrify is not None:
             y, x = self.mogrify(y, x)
@@ -188,22 +186,24 @@ class GRUGating(nn.Module):
 
 class ET_ffd(Module):
 
-    def __init__(self,dim,activation="gelu",layers=1,kernal_size=1):
+    def __init__(self,dim,activation="relu",layers=1,kernal_size=1,mult=4):
         super(ET_ffd,self).__init__()
         self.l_1 = nn.Sequential(
             GEGLU(dim,dim,layers),
-            _get_activation_fn(activation),
         )
 
+        self.norm = ScaleNorm(dim)
+
         self.l_2 = nn.Sequential(
-            nn.Conv1d(dim,dim*4,kernal_size,1,padding=kernal_size//2,groups=dim),
-            _get_activation_fn(activation),
-            nn.Conv1d(dim*4,dim,kernal_size,1,padding=kernal_size//2,groups=dim),
+            nn.Conv1d(dim,dim*mult,kernal_size,1,padding=kernal_size//2,groups=dim),
+            nn.SiLU(),
+            nn.Conv1d(dim*mult,dim,kernal_size,1,padding=kernal_size//2,groups=dim),
             _get_activation_fn(activation),
         )
 
     def forward(self,x):
         out = ckpt(self.l_1,x)
+        out = self.norm(out + x)
         out = out.transpose(1,2)
         out = ckpt(self.l_2,out)
         return out.transpose(1,2).contiguous()
@@ -287,7 +287,7 @@ class TransformerBlock(Module):
 
         self.pkm1 = nn.Sequential(
             nn.Linear(d_model,pkm_dims),
-            PKM(pkm_dims,heads=pkm_heads,num_keys=pkm_keys,dim_head=d_model//nhead),
+            PKM(pkm_dims,heads=pkm_heads,num_keys=pkm_keys,dim_head=pkm_dims//pkm_heads),
             nn.Linear(pkm_dims,d_model),
             ) if pkm_dims!=0 else None
 
@@ -312,7 +312,7 @@ class TransformerBlock(Module):
                                                     num_heads=nhead,
                                                     #pattern_size=2**8,
                                                     dropout=dropout_hopfield,
-                                                    #quantity=2**8
+                                                    #quantity=2**8,
                                                 ),
                                         nn.Linear(hop_dim,d_model)
                                     ))
@@ -581,7 +581,7 @@ class TransformerModel(Module):
                     causal: bool = True,
                     prev_state_len: int = 8192,
                     nystrom: bool = True,
-                    local_heads: int = 2,
+                    local_heads: int = 1,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
@@ -615,7 +615,7 @@ class TransformerModel(Module):
             nn.Sigmoid()
             )
 
-        self.ffd1 = GRUGating(ninp,ET_ffd(dim=ninp))
+        self.ffd1 = GRUGating(ninp,ET_ffd(dim=ninp,layers=1,kernal_size=1,mult=4))
         self.ffd2 = copy.deepcopy(self.ffd1)
 
         self.mem_exist = True if mem_token else False
