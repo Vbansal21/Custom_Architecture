@@ -173,8 +173,8 @@ class GRUGating(nn.Module):
             if self.norm != None:
                 y = self.norm(y)
         else:
-            if self.norm1 != None:
-                y = self.norm1(y)
+            if self.norm != None:
+                y = self.norm(y)
 
         if self.mogrify is not None:
             y, x = self.mogrify(y, x)
@@ -310,9 +310,9 @@ class TransformerBlock(Module):
                                         HopfieldLayer(
                                                     input_size=hop_dim,
                                                     num_heads=nhead,
-                                                    pattern_size=2**10,
+                                                    pattern_size=2**8,
                                                     dropout=dropout_hopfield,
-                                                    quantity=2**10
+                                                    quantity=2**8
                                                 ),
                                         nn.Linear(hop_dim,d_model)
                                     ))
@@ -480,7 +480,7 @@ class TransformerModule(ModuleList):
             name='prev_state',
             tensor=torch.zeros((1,prev_state_len,d_model))
         )
-        hop_dim = d_model
+        #hop_dim = d_model
         self.hop_pool = nn.Sequential(
                 nn.Linear(d_model,hop_dim),
                 HopfieldPooling(

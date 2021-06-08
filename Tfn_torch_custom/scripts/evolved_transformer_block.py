@@ -64,7 +64,7 @@ class SeparableConv1D(nn.Module):
         return x
 
 
-class RMSNorm(Module):
+class RMSNorm(nn.Module):
     def __init__(self, dim, eps = 1e-8):
         super().__init__()
         self.scale = dim ** -0.5
@@ -75,7 +75,7 @@ class RMSNorm(Module):
         norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
         return x / norm.clamp(min = self.eps) * self.g
 
-class ScaleNorm(Module):
+class ScaleNorm(nn.Module):
     def __init__(self, dim, eps = 1e-4):
         super().__init__()
         self.scale = dim ** -0.5

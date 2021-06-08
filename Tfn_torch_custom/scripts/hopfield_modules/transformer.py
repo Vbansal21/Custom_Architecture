@@ -9,7 +9,7 @@ from typing import Optional, Tuple, Union
 from . import Hopfield
 
 
-class RMSNorm(Module):
+class RMSNorm(nn.Module):
     def __init__(self, dim, eps = 1e-8):
         super().__init__()
         self.scale = dim ** -0.5
@@ -20,7 +20,7 @@ class RMSNorm(Module):
         norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
         return x / norm.clamp(min = self.eps) * self.g
 
-class ScaleNorm(Module):
+class ScaleNorm(nn.Module):
     def __init__(self, dim, eps = 1e-4):
         super().__init__()
         self.scale = dim ** -0.5
@@ -32,7 +32,7 @@ class ScaleNorm(Module):
         return x / norm.clamp(min = self.eps) * self.g
 
 
-class HopfieldEncoderLayer(Module):
+class HopfieldEncoderLayer(nn.Module):
     """
     Module with underlying Hopfield association to be used as an encoder in transformer-like architectures.
     """
@@ -121,7 +121,7 @@ class HopfieldEncoderLayer(Module):
         return self.linear_output.out_features
 
 
-class HopfieldDecoderLayer(Module):
+class HopfieldDecoderLayer(nn.Module):
 
     def __init__(self,
                  hopfield_association_self: Hopfield,

@@ -13,7 +13,7 @@ except ImportError:
     _LinearWithBias = None
 
 
-class HopfieldCore(Module):
+class HopfieldCore(nn.Module):
     r"""Allows the model to jointly attend to information
     from different representation subspaces.
     See references: "Hopfield Networks is All You Need" and

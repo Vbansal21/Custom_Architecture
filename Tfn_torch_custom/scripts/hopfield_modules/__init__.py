@@ -8,7 +8,7 @@ from typing import Optional, Tuple, Union
 
 from .activation import HopfieldCore
 
-class RMSNorm(Module):
+class RMSNorm(nn.Module):
     def __init__(self, dim, eps = 1e-8):
         super().__init__()
         self.scale = dim ** -0.5
@@ -19,7 +19,7 @@ class RMSNorm(Module):
         norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
         return x / norm.clamp(min = self.eps) * self.g
 
-class ScaleNorm(Module):
+class ScaleNorm(nn.Module):
     def __init__(self, dim, eps = 1e-4):
         super().__init__()
         self.scale = dim ** -0.5
@@ -31,7 +31,7 @@ class ScaleNorm(Module):
         return x / norm.clamp(min = self.eps) * self.g
 
 
-class Hopfield(Module):
+class Hopfield(nn.Module):
     """
     Module with underlying Hopfield association.
     """
@@ -126,7 +126,7 @@ class Hopfield(Module):
         if normalize_stored_pattern:
             normalized_shape = input_size if stored_pattern_size is None else stored_pattern_size
             assert normalized_shape is not None, "stored pattern size required for setting up normalisation"
-            self.norm_stored_pattern = ScaleNorm(
+            self.norm_stored_pattern = nn.LayerNorm(
                 normalized_shape=normalized_shape, elementwise_affine=normalize_stored_pattern_affine)
 
         # Initialise state pattern normalization.
@@ -135,7 +135,7 @@ class Hopfield(Module):
             assert normalize_state_pattern, "affine normalization without normalization has no effect."
         if normalize_state_pattern:
             assert input_size is not None, "input size required for setting up normalisation"
-            self.norm_state_pattern = ScaleNorm(
+            self.norm_state_pattern = nn.LayerNorm(
                 normalized_shape=input_size, elementwise_affine=normalize_state_pattern_affine)
 
         # Initialise pattern projection normalization.
@@ -145,7 +145,7 @@ class Hopfield(Module):
         if normalize_pattern_projection:
             normalized_shape = input_size if pattern_projection_size is None else pattern_projection_size
             assert normalized_shape is not None, "pattern projection size required for setting up normalisation"
-            self.norm_pattern_projection = ScaleNorm(
+            self.norm_pattern_projection = nn.LayerNorm(
                 normalized_shape=normalized_shape, elementwise_affine=normalize_pattern_projection_affine)
 
         # Initialise remaining auxiliary properties.
@@ -370,7 +370,7 @@ class Hopfield(Module):
         return self.hopfield.normalize_hopfield_space_affine
 
 
-class HopfieldPooling(Module):
+class HopfieldPooling(nn.Module):
     """
     Wrapper class encapsulating a trainable but fixed state pattern and "Hopfield" in
     one combined module to be used as a Hopfield-based pooling layer.
@@ -638,7 +638,7 @@ class HopfieldPooling(Module):
         return self.hopfield.normalize_pattern_projection_affine
 
 
-class HopfieldLayer(Module):
+class HopfieldLayer(nn.Module):
     """
     Wrapper class encapsulating a trainable but fixed stored pattern, pattern projection and "Hopfield" in
     one combined module to be used as a Hopfield-based pooling layer.
