@@ -252,7 +252,7 @@ class TransformerBlock(Module):
                      dropout=0.1, 
                      dropout_hopfield=0.0,
                      activation="gelu",
-                     mem_kv=64*16,
+                     mem_kv=64*8,
                      pkm_dims=None,
                      pkm_keys=64,
                      decoder=False,
@@ -310,9 +310,9 @@ class TransformerBlock(Module):
                                         HopfieldLayer(
                                                     input_size=hop_dim,
                                                     num_heads=nhead,
-                                                    pattern_size=2**8,
+                                                    #pattern_size=2**8,
                                                     dropout=dropout_hopfield,
-                                                    quantity=2**8
+                                                    #quantity=2**8
                                                 ),
                                         nn.Linear(hop_dim,d_model)
                                     ))
