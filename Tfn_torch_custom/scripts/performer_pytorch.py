@@ -584,8 +584,10 @@ class Attention(nn.Module):
             self.hop_attn = hop_attn
             self.mem_lin_k = nn.Linear(dim_head,dim_head)
             self.mem_lin_v = nn.Linear(dim_head,dim_head)
-            self.mem_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystrom else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True)
-            self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection) if not nystrom else NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True)
+            self.out = nn.Linear(dim_head,dim_head)
+            
+            self.mem_attn = NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True) #FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+            self.prev_state_attn = NystromAttention(dim_head,heads,num_landmarks=local_window_size,inv_coeff_init_option=True) #FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
     def forward(self, x, context = None, pos_emb = None, mask = None, context_mask = None, **kwargs):
         b, n, d, h, gh = *x.shape, self.heads, self.global_heads
@@ -641,7 +643,7 @@ class Attention(nn.Module):
             mem_v = self.mem_lin_v(mem_v) 
             out = ckpt(self.mem_attn,out,mem_k,mem_v)
 
-            prev_state = ckpt(self.prev_state_attn,prev_state,out,out)
+            prev_state = ckpt(self.prev_state_attn,prev_state,out,self.out(out))
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((mem_k.size(1),-1,mem_k.size(-1)))
 
         out = rearrange(out, 'b h n d -> b n (h d)')

@@ -150,7 +150,7 @@ class nBRC(nn.Module):
         return c * h + (1 - c) * torch.tanh(l(self.U, x) + a * h)
 
 class GRUGating(nn.Module):
-    def __init__(self, dim, fn=None, mogrify = True, norm = True):
+    def __init__(self, dim, fn=None, mogrify = True, norm = False):
         super().__init__()
         self.dim = dim
         self.fn = fn
@@ -714,7 +714,7 @@ class TransformerModel(Module):
 
     def init_weights(self) -> NoReturn :
         for w in self.parameters():
-            w.data.uniform_(-1/30,1/30)
+            w.data.uniform_(-1/12,1/12)
             
     def __len__(self) -> int:
         return sum(p.numel() for p in self.parameters())
