@@ -69,12 +69,12 @@ repeated_deberta_layers = 0
 full_block_repeat = False
 nhead = 8
 dropout = 0.3
-mem_tokens = 128*8
+mem_tokens = emsize*2
 bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**14
-seq_scale_down = 256
+seq_scale_down = emsize
 causal = False
-nystrom = False
+nystrom = True
 
 discriminator_enabled = False
 progressive_generation = True

@@ -268,6 +268,8 @@ class TransformerBlock(Module):
         super(TransformerBlock, self).__init__()
 
         self.norm = ScaleNorm(d_model)
+        self.zero_0 = nn.Parameter(torch.ones(d_model))
+        self.zero_1 = nn.Parameter(torch.zeros(d_model))
         #self.norm1 = ScaleNorm(d_model)
         #self.norm2 = ScaleNorm(d_model)
         #self.norm3 = ScaleNorm(d_model)
@@ -378,7 +380,7 @@ class TransformerBlock(Module):
         
         self.attn = GRUGating(d_model,attn_block)
 
-        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**16,window=d_model))
+        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**16,window=d_model*2))
 
         self.conv_emb = convolutional_embedding(d_model) if conv_emb else None
 
@@ -441,13 +443,13 @@ class TransformerBlock(Module):
         output = self.dropout2(output)
         output = ckpt(self.mlp,output)
         output = self.dropout3(output)
-        output = self.norm(output+src)
+        output = self.norm((output*self.zero_0)+(src*self.zero_1))
         return output
 
 class TransformerModule(ModuleList):
 
     #@profile
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=8,full_block_repeat=False,causal=True,nystrom=True,local_heads=2):
+    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=4,full_block_repeat=False,causal=True,nystrom=True,local_heads=2):
         super(TransformerModule, self).__init__()
 
         self.full_block_repeat = full_block_repeat
@@ -471,30 +473,18 @@ class TransformerModule(ModuleList):
         block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
-        #self.norm = ScaleNorm(d_model,eps=1e-4)
-
-        self.scale_output = nn.Parameter(torch.zeros(d_model))
-        self.scale_abs_pos_emb = nn.Parameter(torch.ones(d_model))
-        
-        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=0,conv_emb=False,activation='relu',pkm_dims=0)
+        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=32,conv_emb=False,activation='relu',pkm_dims=d_model//8)
 
         self.register_buffer(
             name='prev_state',
             tensor=torch.zeros((1,prev_state_len,d_model))
         )
-        #hop_dim = d_model
-        self.hop_pool = nn.Sequential(
-                nn.Linear(d_model,hop_dim),
-                HopfieldPooling(
-                            input_size=hop_dim,
-                        ),
-                nn.Linear(hop_dim,d_model),
-                        )
-        self.prev_state_update = nn.Sequential(
-            FNO1d(nhead,nhead,inp_dim=d_model,out_dim=d_model,ffd_dim=d_model,transpose_req=False,num_layers=1),
-            nn.Conv1d(d_model,d_model,kernel_size=3,stride=1,padding=1,groups=d_model),
-            nn.Conv1d(d_model,d_model,kernel_size=2,stride=1,groups=d_model)
-            )
+
+        self.prev_state_update = Attention(d_model,
+                                            heads=nhead,
+                                            dim_head=d_model//nhead,
+                                            num_mem_kv=0,
+                                            rotary_pos_emb=False)
 
         d_model = d_model
         self.num_layers = num_layers
@@ -531,6 +521,10 @@ class TransformerModule(ModuleList):
             for dec in self.decoder:
                 output = ckpt(dec,output)
 
+        prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
+
+        output = ckpt(self.prev_state_attend,output,prev_state)
+
         out = self.absolutepositionalembedding(output) if len(self.deberta_layers)!=0 else output
 
         if self.full_block_repeat:
@@ -548,12 +542,9 @@ class TransformerModule(ModuleList):
                 if self.deberta_layers!=None:
                     output = out
 
-        output = ckpt(self.prev_state_attend,output,repeat(self.prev_state,'1 n d -> b n d',b=output.size(0)))
+        output = ckpt(self.prev_state_attend,output,prev_state)
 
-        tmp = ckpt(self.hop_pool,output)
-        tmp = torch.sum(tmp,dim=0,keepdim=True).reshape(1,1,-1)
-        self.prev_state = torch.cat((self.prev_state,tmp),dim=1)
-        self.prev_state = ckpt(self.prev_state_update, self.prev_state.transpose(-1,-2)).transpose(-1,-2)
+        self.prev_state = ckpt(self.prev_state_update,self.prev_state,output)
 
         return output
 
