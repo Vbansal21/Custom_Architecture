@@ -1,0 +1,11 @@
+torch 
+torchtext 
+pytorch-nlp 
+einops 
+local_attention 
+mogrifier 
+deepspeed 
+memory-profiler 
+wandb 
+mmcv
+pytorch-fast-transformers

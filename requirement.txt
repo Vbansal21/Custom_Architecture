@@ -20,7 +20,8 @@ spacy
 tensorboardx
 deepspeed
 fairseq
-mpi4py # sudo apt install libopenmpi-dev
+mpi4py 
+# sudo apt install libopenmpi-dev
 # sudo pip3 install --force-reinstall Ninja
 # sudo apt install libaio-dev
 wandb

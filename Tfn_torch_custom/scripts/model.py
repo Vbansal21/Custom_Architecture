@@ -270,9 +270,7 @@ class TransformerBlock(Module):
         self.norm = ScaleNorm(d_model)
         self.zero_0 = nn.Parameter(torch.ones(d_model))
         self.zero_1 = nn.Parameter(torch.zeros(d_model))
-        #self.norm1 = ScaleNorm(d_model)
-        #self.norm2 = ScaleNorm(d_model)
-        #self.norm3 = ScaleNorm(d_model)
+        
         self.dropout1 = Dropout(dropout)
         self.dropout2 = Dropout(dropout)
         self.dropout3 = Dropout(dropout)
@@ -1173,16 +1171,14 @@ class TransformerModel(Module):
 
             src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
 
-            if src.size(2)%self.seq_scale_down != 0:
-                src = torch.cat((src,repeat(self.padding_for_conv_scale,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
+            src = torch.cat((src,repeat(self.padding_for_conv_scale,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
 
             src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
             s = src.size(1)
 
             if self.encoder_decoder:
                 context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
-                if context.size(2)%self.seq_scale_down!=0:
-                    context = torch.cat((context,repeat(self.padding_for_conv_scale,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
+                context = torch.cat((context,repeat(self.padding_for_conv_scale,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
 
                 context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
                 

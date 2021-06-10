@@ -61,13 +61,13 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 256
+emsize = 512
 nhid = emsize * 4
-nlayers = 8
-deberta_layers = 16
-repeated_deberta_layers = 0
+nlayers = 1
+deberta_layers = 2
+repeated_deberta_layers = 1
 full_block_repeat = False
-nhead = 8
+nhead = 32
 dropout = 0.3
 mem_tokens = emsize*2
 bptt = (1024*16+mem_tokens) - mem_tokens
@@ -342,8 +342,8 @@ a = 5000000
 b = 1000
 c = 0.0
 step = 1
-pseudo_lambda = lambda step: (((a/b * (step*(bptt/1024)*batch_size) + 1) / ((step*(bptt/1024)*batch_size)**2 + a)) + c)/((step*(bptt/1024)*batch_size/100)**0.1+1)
-lambda_1 = lambda step: (pseudo_lambda(step) if step<(2048) else (pseudo_lambda(step)/25 if step<(6144) else pseudo_lambda(step)/625))
+pseudo_lambda = lambda step: (((a/b * (step*(bptt/512)*batch_size) + 1) / ((step*(bptt/512)*batch_size)**2 + a)) + c)/((step*(bptt/1024)*batch_size/100)**0.1+1)
+lambda_1 = lambda step: (pseudo_lambda(step) if step<(2048/(((bptt/512)*batch_size)**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(4096/(((bptt/512)*batch_size)**(math.pi*2/10))) else pseudo_lambda(step)/625))
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
