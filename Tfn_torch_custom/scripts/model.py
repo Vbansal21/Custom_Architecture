@@ -1159,13 +1159,11 @@ class TransformerModel(Module):
 
         src = self.embedding_encoder(src)
         src = src * math.sqrt(self.ninp)
-        src = Positional_Encoding(src)
         src = ckpt(self.ffd1,src)
 
         if self.encoder_decoder:
             context = self.embedding_encoder(context)
             context = context * math.sqrt(self.ninp)
-            context = Positional_Encoding(context)
             context = ckpt(self.ffd3,context)
 
         if generator or not self.discriminator_enabled:
@@ -1177,11 +1175,15 @@ class TransformerModel(Module):
             src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
             s = src.size(1)
 
+            src = Positional_Encoding(src)
+
             if self.encoder_decoder:
                 context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
                 context = torch.cat((context,repeat(self.padding_for_conv_scale,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
 
                 context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
+
+                context = Positional_Encoding(context)
                 
 
 
