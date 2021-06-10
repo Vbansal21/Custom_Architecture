@@ -542,7 +542,8 @@ class TransformerModule(ModuleList):
 
         output = ckpt(self.prev_state_attend,output,prev_state)
 
-        self.prev_state = ckpt(self.prev_state_update,self.prev_state,output)
+        prev_state = ckpt(self.prev_state_update,prev_state,output)
+        self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
 
         return output
 
