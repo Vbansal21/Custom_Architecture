@@ -5,7 +5,9 @@ einops
 local_attention 
 mogrifier 
 deepspeed 
+mpi4py 
 memory-profiler 
 wandb 
 mmcv
 pytorch-fast-transformers
+# sudo apt install libopenmpi-dev
