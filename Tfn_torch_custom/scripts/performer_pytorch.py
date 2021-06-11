@@ -831,6 +831,7 @@ class Attention(nn.Module):
         to_out = None,
         hop_attn = None,
         nystrom = False,
+        attend_to_self = False,
     ):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
@@ -863,6 +864,14 @@ class Attention(nn.Module):
         self.to_v = default(nn.Linear(dim, inner_dim, bias = qkv_bias),to_v)
         self.to_out = default(nn.Linear(inner_dim, dim, bias = attn_out_bias),to_out)
         self.dropout = nn.Dropout(dropout)
+
+        self.attn_to_self = None
+        if attend_to_self:
+            self.to_q_self = nn.Linear(1, dim_head)
+            self.to_k_self = nn.Linear(1, dim_head)
+            self.to_v_self = nn.Linear(1, dim_head)
+            self.to_out_self = nn.Linear(dim_head, 1)
+            self.attn_to_self = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
         self.num_mem_kv = num_mem_kv
         num_prev_state = num_mem_kv if num_prev_state == None else num_prev_state
@@ -943,6 +952,16 @@ class Attention(nn.Module):
 
             prev_state = ckpt(self.prev_state_attn,prev_state,out,self.out(out))
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((mem_k.size(1),-1,mem_k.size(-1)))
+
+        if self.attn_to_self != None:
+            org_shape = out.shape
+            out = rearrange(out, 'b h n d -> (b h n) 1 d 1')
+            q = self.to_q_self(out)
+            k = self.to_k_self(out)
+            v = self.to_v_self(out)
+            out = ckpt(self.attn_to_self,q,k,v)
+            out = self.to_out_self(out)
+            out = rearrange(out, 'x 1 d 1 -> x d').reshape(org_shape)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         out =  self.to_out(out)

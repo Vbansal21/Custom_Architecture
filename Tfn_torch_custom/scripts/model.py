@@ -303,7 +303,8 @@ class TransformerBlock(Module):
                                                     rotary_pos_emb=True,
                                                     fixed_emb=fixed_emb,
                                                     causal=causal,
-                                                    nystrom=nystrom
+                                                    nystrom=nystrom,
+                                                    attend_to_self=True
                                                 ),
                                 pkm=copy.deepcopy(self.pkm1),
                                 )
@@ -317,7 +318,7 @@ class TransformerBlock(Module):
                                         rotary_pos_emb=True,
                                         fixed_emb=fixed_emb,
                                         causal=causal,
-                                        nystrom=nystrom),
+                                        nystrom=nystrom,),
                 'self_2':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
