@@ -56,7 +56,7 @@ class SeparableConv1D(nn.Module):
     def __init__(self, in_channel, inner_channels, out_channel, kernel_size=1, padding=0):
         super().__init__()
         self.deep_wise = nn.Conv1d(in_channel, inner_channels, kernel_size=kernel_size, padding=padding, groups=min(in_channel,inner_channels))
-        self.point_wise = nn.Conv1d(inner_channels, out_channel, kernel_size=1)
+        self.point_wise = nn.Conv1d(inner_channels, out_channel, kernel_size=1,groups=min(inner_channels,out_channel))
 
     def forward(self, x):
         x = self.deep_wise(x)
@@ -96,23 +96,23 @@ class ET_Encoder_Block(nn.Module):
         self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(4)])
         if ffd == None:
             self.feed_forward = nn.Sequential(
-                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0),
+                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0,groups=d_model),
                 nn.ReLU(),
-                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0),
+                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0,groups=d_model),
             )
         else:
             self.feed_forward = ffd
         self.pkm = pkm
         self.glu = GLU(d_model,1)
         self.left_net = nn.Sequential(
-            nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,padding=0),
+            nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,padding=0,groups=d_model),
             nn.ReLU(),
-            nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,padding=0),
+            nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,padding=0,groups=d_model//2),
         )
         self.right_net = nn.Sequential(
-            nn.Conv1d(in_channels=d_model,out_channels=d_model//2,kernel_size=3,padding=1),
+            nn.Conv1d(in_channels=d_model,out_channels=d_model//2,kernel_size=3,padding=1,groups=d_model//2),
             nn.ReLU(),
-            nn.Conv1d(in_channels=d_model//2,out_channels=d_model,kernel_size=1,padding=0),
+            nn.Conv1d(in_channels=d_model//2,out_channels=d_model,kernel_size=1,padding=0,groups=d_model//2),
         )
 
         self.mid_layer_norm=ScaleNorm(d_model)
@@ -121,7 +121,7 @@ class ET_Encoder_Block(nn.Module):
     def forward(self,x:Tensor,*args) -> Tensor:
 
         glued = ckpt(self.glu,x)+x
-        #glued = ckpt(self.glu,self.layer_norms[0](x))+x
+        glued = ckpt(self.glu,self.layer_norms[0](x))+x
         glu_normed = self.layer_norms[1](glued)
 
         left_branch = ckpt(self.left_net,glu_normed.transpose(1,2)).transpose(1,2)
@@ -166,9 +166,9 @@ class ET_Decoder_Block(nn.Module):
 
         if ffd == None:
             self.feed_forward = nn.Sequential(
-                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0),
+                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0,groups=d_model),
                 nn.SiLU(),
-                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0),
+                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0,groups=d_model),
             )
         else:
             self.feed_forward = ffd
@@ -180,7 +180,7 @@ class ET_Decoder_Block(nn.Module):
 
     def forward(self,x:Tensor,context:Tensor) -> Tensor:
 
-        normed_x = x #self.layer_norms[0](x)
+        normed_x = self.layer_norms[0](x)
 
         self_attn = ckpt(self.attention_self_1,normed_x)
         cross_attn = ckpt(self.attention_cross_1,normed_x,context)

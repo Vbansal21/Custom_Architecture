@@ -23,15 +23,11 @@ from mogrifier import Mogrifier
 
 from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block, GLU
 from .product_key_memory import PKM
-from .hopfield_modules import HopfieldLayer,HopfieldPooling
-from .hopfield_modules.transformer import HopfieldEncoderLayer
+from .hopfield_modules import HopfieldLayer
 from .performer_pytorch import Attention,ProjectionUpdater
 from .conformer import ConformerConvModule as conformer
 
 from .fourier_1d import FNO1d
-
-from .dynamic_conv import Dynamic_conv1d
-from .involution.involution_naive import involution
 
 from .g_mlp_gpt import gMLPGPT
 
@@ -102,24 +98,6 @@ class Identity(Module):
     def forward(self,*args):
         return args
 
-class convolutional_embedding(Module):
-
-    def __init__(self,
-        channels,
-        kernal_size=1,
-        stride_size=1
-        ):
-        super(convolutional_embedding,self).__init__()
-        self.involution_layer = involution(channels,kernal_size,stride_size)
-        self.dyn_conv_1d = Dynamic_conv1d(channels,channels,kernal_size,stride_size)
-    
-    def forward(self,x):
-        out = x.transpose(-1,-2).unsqueeze(-1).contiguous()
-        out = ckpt(self.involution_layer,out)
-        out = rearrange(out,'b d n o -> b (n o) d').contiguous()
-        out2 = ckpt(self.dyn_conv_1d,x.transpose(-1,-2)).transpose(-1,-2)
-        return out+out2
-
 class GEGLU(Module):
     def __init__(self, dim_in, dim_out,layers=1):
         super().__init__()
@@ -188,11 +166,7 @@ class ET_ffd(Module):
 
     def __init__(self,dim,activation="relu",layers=1,kernal_size=1,mult=4):
         super(ET_ffd,self).__init__()
-        self.l_1 = nn.Sequential(
-            GEGLU(dim,dim,layers),
-        )
-
-        self.norm = ScaleNorm(dim)
+        self.l_1 = GEGLU(dim,dim,layers)
 
         self.l_2 = nn.Sequential(
             nn.Conv1d(dim,dim*mult,kernal_size,1,padding=kernal_size//2,groups=dim),
@@ -203,7 +177,6 @@ class ET_ffd(Module):
 
     def forward(self,x):
         out = ckpt(self.l_1,x)
-        out = self.norm(out + x)
         out = out.transpose(1,2)
         out = ckpt(self.l_2,out)
         return out.transpose(1,2).contiguous()
@@ -259,7 +232,6 @@ class TransformerBlock(Module):
                      hopfield=False,
                      hop_dim=None,
                      fno_layers=4,
-                     conv_emb=True,
                      fixed_emb=False,
                      causal=False,
                      local_heads=0,
@@ -269,13 +241,11 @@ class TransformerBlock(Module):
 
         self.norm = ScaleNorm(d_model)
         self.zero_0 = nn.Parameter(torch.ones(d_model))
-        self.zero_1 = nn.Parameter(torch.zeros(d_model))
+        self.zero_1 = nn.Parameter(torch.ones(d_model))
         
         self.dropout1 = Dropout(dropout)
         self.dropout2 = Dropout(dropout)
         self.dropout3 = Dropout(dropout)
-
-        self.decoder = decoder
 
         self.ffd1 = ET_ffd(dim=d_model)
 
@@ -302,7 +272,7 @@ class TransformerBlock(Module):
                                                     ffd_dim=dim_feedforward,
                                                     num_layers=fno_layers
                                                 )),
-                                GRUGating(d_model,conformer(d_model,causal=True))
+                                GRUGating(d_model,conformer(d_model,causal=True,dropout=dropout))
         )
 
         if hopfield:
@@ -380,8 +350,6 @@ class TransformerBlock(Module):
 
         self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**16,window=d_model*2))
 
-        self.conv_emb = convolutional_embedding(d_model) if conv_emb else None
-
         self.decoder = decoder
 
         if decoder:
@@ -413,16 +381,10 @@ class TransformerBlock(Module):
         output = src
         #output = self.norm1(src)
         #output = Positional_Encoding(output)
-        if self.conv_emb != None:
-            if self.pkm1 != None:
-                output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output) + ckpt(self.conv_emb,output)
-            else:
-                output2 = ckpt(self.ffd1,output) + ckpt(self.conv_emb,output)
+        if self.pkm1 != None:
+            output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output)
         else:
-            if self.pkm1 != None:
-                output2 = ckpt(self.ffd1,output) + ckpt(self.pkm1,output)
-            else:
-                output2 = ckpt(self.ffd1,output)
+            output2 = ckpt(self.ffd1,output)
 
         output = ckpt(self.gate,output,self.dropout1(output2))
 
@@ -471,7 +433,7 @@ class TransformerModule(ModuleList):
         block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
-        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=32,conv_emb=False,activation='relu',pkm_dims=d_model//8)
+        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=16,pkm_dims=d_model//8)
 
         self.register_buffer(
             name='prev_state',

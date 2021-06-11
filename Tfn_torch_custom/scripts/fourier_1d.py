@@ -107,7 +107,6 @@ class FNO1d(nn.Module):
         self.conv_layers = nn.ModuleList([dcpy(conv_block) for _ in range(num_layers)])
         w_block = nn.Conv1d(self.width, self.width, 1)
         self.w_layers = nn.ModuleList([dcpy(w_block) for _ in range(num_layers)])
-        self.rezero_parameters = [[nn.Parameter(torch.zeros((1,self.width))),nn.Parameter(torch.ones((1,self.width)))] for _ in range(num_layers)]
         self.num_layers = num_layers
 
         self.fc1 = nn.Linear(self.width, ffd_dim)
@@ -125,8 +124,7 @@ class FNO1d(nn.Module):
         for i in range(self.num_layers):
             x_ = ckpt(self.conv_layers[i],x) + ckpt(self.w_layers[i],x)
             x_ = F.relu(x_)
-            x = ((x_.transpose(-1,-2)*self.rezero_parameters[i][0].to(x.device)) + (x.transpose(-1,-2)*self.rezero_parameters[i][1].to(x.device))).transpose(-1,-2)
-
+            
         x = x.transpose(-1,-2)
         x = self.fc1(x)
         x = F.relu(x)

@@ -23,20 +23,38 @@ class Swish(nn.Module):
     def forward(self, x):
         return x * x.sigmoid()
 
+class GatedConvolution(nn.Module):
+    def __init__(self,d_model,patch_size=3,padding=1,dim=-1):
+        super(GatedConvolution,self).__init__()
+        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=padding,groups=d_model//2,bias=True)
+        self.dim = dim
+        #init.xavier_uniform_(self.conv.weight, gain=1)
+
+    def forward(self,x):
+        convoluted = self.conv(x)
+        out, gate = convoluted.chunk(2, dim=self.dim)
+        out = out * torch.sigmoid(gate)
+        return out
+
 class GLU(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
+    def __init__(self,dim,d_model,num_layers=1,patch_size=3,padding=1,gated_conv=True):#Dauphin's m_input= n_input= d_model
+        super(GLU,self).__init__()
+        self.gated_convs = nn.ModuleList([GatedConvolution(d_model,patch_size,padding,dim=dim) for _ in range(num_layers)]) if gated_conv else None
         self.dim = dim
 
-    def forward(self, x):
+    def forward(self,x):
+        if self.gated_convs != None:
+            for convolution in self.gated_convs:
+                x = convolution(x)
         out, gate = x.chunk(2, dim=self.dim)
-        return out * gate.sigmoid()
-
+        x = out * gate.sigmoid()
+        return x
+        
 class DepthWiseConv1d(nn.Module):
     def __init__(self, chan_in, chan_out, kernel_size, padding):
         super().__init__()
         self.padding = padding
-        self.conv = nn.Conv1d(chan_in, chan_out, kernel_size, groups = chan_in)
+        self.conv = nn.Conv1d(chan_in, chan_out, kernel_size, groups = min(chan_out,chan_in))
 
     def forward(self, x):
         x = F.pad(x, self.padding)
@@ -84,6 +102,54 @@ class PreNorm(nn.Module):
     def forward(self, x, **kwargs):
         x = self.norm(x)
         return self.fn(x, **kwargs)
+
+class FeedForward(nn.Module):
+    def __init__(
+        self,
+        dim,
+        mult = 4,
+        dropout = 0.
+    ):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim * mult),
+            Swish(),
+            nn.Dropout(dropout),
+            nn.Linear(dim * mult, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class ConformerConvModule(nn.Module):
+    def __init__(
+        self,
+        dim,
+        causal = False,
+        expansion_factor = 2,
+        kernel_size = 31,
+        dropout = 0.):
+        super().__init__()
+
+        inner_dim = dim * expansion_factor
+        padding = calc_same_padding(kernel_size) if not causal else (kernel_size - 1, 0)
+
+        self.net = nn.Sequential(
+            ScaleNorm(dim),
+            Rearrange('b n c -> b c n'),
+            nn.Conv1d(dim, inner_dim * 2, 1,groups=min(inner_dim,dim)),
+            GLU(dim=1,d_model=inner_dim*2,gated_conv=False),
+            DepthWiseConv1d(inner_dim, inner_dim, kernel_size = kernel_size, padding = padding),
+            nn.BatchNorm1d(inner_dim) if not causal else nn.Identity(),
+            Swish(),
+            nn.Conv1d(inner_dim, dim, 1,groups=min(inner_dim,dim)),
+            Rearrange('b c n -> b n c'),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 class Attention(nn.Module):
     def __init__(
@@ -137,53 +203,6 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         out = self.to_out(out)
         return self.dropout(out)
-
-class FeedForward(nn.Module):
-    def __init__(
-        self,
-        dim,
-        mult = 4,
-        dropout = 0.
-    ):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, dim * mult),
-            Swish(),
-            nn.Dropout(dropout),
-            nn.Linear(dim * mult, dim),
-            nn.Dropout(dropout)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-class ConformerConvModule(nn.Module):
-    def __init__(
-        self,
-        dim,
-        causal = False,
-        expansion_factor = 2,
-        kernel_size = 31,
-        dropout = 0.):
-        super().__init__()
-
-        inner_dim = dim * expansion_factor
-        padding = calc_same_padding(kernel_size) if not causal else (kernel_size - 1, 0)
-
-        self.net = nn.Sequential(
-            Rearrange('b n c -> b c n'),
-            nn.Conv1d(dim, inner_dim * 2, 1),
-            GLU(dim=1),
-            DepthWiseConv1d(inner_dim, inner_dim, kernel_size = kernel_size, padding = padding),
-            nn.BatchNorm1d(inner_dim) if not causal else nn.Identity(),
-            Swish(),
-            nn.Conv1d(inner_dim, dim, 1),
-            Rearrange('b c n -> b n c'),
-            nn.Dropout(dropout)
-        )
-
-    def forward(self, x):
-        return self.net(x)
 
 # Conformer Block
 
