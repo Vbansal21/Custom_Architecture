@@ -598,26 +598,12 @@ class TransformerModel(Module):
                 _get_activation_fn(activation),
                 nn.Linear(nhid,ninp),
                 _get_activation_fn(activation),
-                TransformerModule(nhead, 
-                                        nhid, 
-                                        nlayers, 
-                                        ninp,
-                                        dropout,
-                                        enable_encoder=encoder_decoder,
-                                        deberta_layers=deberta_layers,
-                                        repeated_deberta_layers=repeated_deberta_layers,
-                                        max_len=max_seq_len,
-                                        full_block_repeat=full_block_repeat,
-                                        causal=causal,
-                                        prev_state_len=prev_state_len,
-                                        nystrom=nystrom,
-                                        local_heads=local_heads,
-                                        ),
+                self.transformer_block,
                 _get_activation_fn(activation),
                 nn.Linear(ninp,nhid),
                 _get_activation_fn(activation),
                 nn.Linear(nhid,2),
-                nn.LeakyReLU(0.01, True),
+                nn.LeakyReLU(0.01),
             )
         
         self.alt_mem = None
@@ -1116,7 +1102,7 @@ class TransformerModel(Module):
                     discriminator: bool = False,
                 ) -> Tuple[Tensor,Optional[Tensor],Optional[Tensor]]:
         
-        b,s_ = src.size(0),src.size(1)
+        (b,s_) = src.shape
 
         if not self.discriminator_enabled:
             discriminator = False
@@ -1136,41 +1122,20 @@ class TransformerModel(Module):
 
         if generator or not self.discriminator_enabled:
 
-            src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
-
-            src = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=src.size(0)).to(self.device),src,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
-
-            src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
-            s = src.size(1)
-
-            src = Positional_Encoding(src)
-
-            if self.encoder_decoder:
-                context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
-                context = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=src.size(0)).to(self.device),context,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
-
-                context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
-
-                context = Positional_Encoding(context)
-                
-
-
             self.alt_mem_with_primary_mem = alt_mem_with_primary_key if type(alt_mem_with_primary_key) == bool else self.alt_mem_with_primary_mem
 
             if mem != None and self.mem_exist:
                 if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                    output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+                    src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
                 else:
-                    output = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+                    src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
             elif self.mem_exist:
                 if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                    output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+                    src = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
                 elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
-                    output = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+                    src = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
                 else:
-                    output = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            else:
-                output = src
+                    src = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
             
 
             if self.encoder_decoder:
@@ -1188,25 +1153,43 @@ class TransformerModel(Module):
                         context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
 
 
+            s = src.size(1)
+
+            src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
+
+            src = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=src.size(0)).to(self.device),src,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
+
+            src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
+
+            output = Positional_Encoding(src)
+
+            if self.encoder_decoder:
+                context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
+                context = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=context.size(0)).to(self.device),context,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
+
+                context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
+
+                context = Positional_Encoding(context)
+                
             output = output.contiguous()
             if self.encoder_decoder:
                 context = context.contiguous()
 
             output = ckpt(self.transformer_block,output,context)
 
+            output = ckpt(self.scale_up_fno,output)
+            output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
+            output = output[:,:s]
+
             for i in range(b):
                 if i == 0:
-                    mem = output[i,:output.size(1)-s]
+                    mem = output[i,:output.size(1)-s_]
                 else:
-                    mem += output[i,:output.size(1)-s]
+                    mem += output[i,:output.size(1)-s_]
             mem = mem if type(mem) == torch.tensor else None
             self.alt_mem = mem if assign_to_alt_mem else None
 
-            output = output[:,output.size(1)-s:] if type(mem) != None or self.mem_exist else output
-
-            output = ckpt(self.scale_up_fno,output)
-            output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
-            output = output[:,:s_]
+            output = output[:,output.size(1)-s_:] if type(mem) != None or self.mem_exist else output
 
         if discriminator and not generator:
             output = src
@@ -1216,8 +1199,8 @@ class TransformerModel(Module):
         else:
             output = ckpt(self.ffd2,output)
             output = ckpt(self.decoder,output)
-
-
+            
+        
         if return_mem:
             return output, mem
         else:

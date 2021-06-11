@@ -41,7 +41,7 @@ try:
     tokenizer = torch.load("models/"+str(tokenizer_name))
     vocab_size = tokenizer.vocab_size
 except:
-    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**13,reserved_tokens=[
+    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**17,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
     ],
     eos_index=3,unknown_index=1,padding_index=0)
@@ -61,16 +61,16 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size
-emsize = 1024
+emsize = 256
 nhid = emsize * 4
-nlayers = 1
-deberta_layers = 1
+nlayers = 8
+deberta_layers = 24
 repeated_deberta_layers = 1
-full_block_repeat = False
-nhead = 16
+full_block_repeat = True
+nhead = 8
 dropout = 0.3
 mem_tokens = emsize*2
-bptt = (1024*4+mem_tokens) - mem_tokens
+bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**14
 seq_scale_down = emsize
 causal = False
@@ -348,7 +348,7 @@ lambda_1 = lambda step: (pseudo_lambda(step) if step<(2048/(((bptt/512)*batch_si
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
 
-load_optimizer = False
+load_optimizer = True
 load_scheduler = bool(True and load_optimizer)
 load_step_number = True
 epoch = 0
