@@ -348,8 +348,8 @@ lambda_1 = lambda step: (pseudo_lambda(step) if step<(2048/(((bptt/512)*batch_si
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
 
-load_scheduler = True
-load_optimizer = True
+load_optimizer = False
+load_scheduler = bool(True and load_optimizer)
 load_step_number = True
 epoch = 0
 best_val_loss = float("inf")

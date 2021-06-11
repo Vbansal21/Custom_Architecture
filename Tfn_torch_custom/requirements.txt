@@ -11,3 +11,4 @@ wandb
 mmcv
 pytorch-fast-transformers
 # sudo apt install libopenmpi-dev
+# sudo apt install libaio-dev

@@ -624,9 +624,12 @@ class TransformerModel(Module):
         self.alt_mem_with_primary_mem = False
 
         self.seq_scale_down = seq_scale_down
+        attn_len = ((self.seq_scale_down // 2)*2 + 1)*3
 
         self.scale_down_conv = nn.Sequential(
+            nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=ninp),
             nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=ninp),
+            nn.Conv1d(ninp,ninp,5,padding=2),
         )
         self.scale_down_fno = GRUGating(ninp,FNO1d(nhead,
                                                     nhead,
@@ -640,7 +643,9 @@ class TransformerModel(Module):
         self.padding_for_conv_scale_r = nn.Parameter(torch.randn((ninp,self.seq_scale_down*2)))
 
         self.scale_up_conv = nn.Sequential(
+            nn.Conv1d(ninp,ninp,5,padding=2),
             nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=ninp),
+            nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=ninp),
         )
 
         self.scale_up_fno = GRUGating(ninp,FNO1d(nhead,
