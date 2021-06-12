@@ -41,7 +41,7 @@ if retrieve_tokenizer:
     tokenizer = torch.load("models/"+str(tokenizer_name))
     vocab_size = tokenizer.vocab_size
 else:
-    sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f"
+    sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r"
     sample += " ".join(sample.split(""))
     sample += io.open(train_filepath, encoding="utf8") + io.open(test_filepath, encoding="utf8") + io.open(val_filepath, encoding="utf8")
     tokenizer = SubwordEncoder(sample,target_vocab_size=2**17,reserved_tokens=[

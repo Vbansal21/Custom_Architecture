@@ -725,7 +725,7 @@ class TransformerModel(Module):
             self.discriminator.convert_decoder_only_to_encoder_decoder()
 
     def init_tokenizer(self,
-                        sample:str = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f",
+                        sample:str = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r",
                         append_eos: Optional[bool] = False,
                         target_vocab_size: Optional[int] = 2**17,
                         min_occ: Optional[int] = 1,
