@@ -66,16 +66,22 @@ nhid = emsize * 4
 nlayers = 8
 deberta_layers = 24
 repeated_deberta_layers = 1
-full_block_repeat = True
+full_block_repeat = False
 nhead = 16
 dropout = (math.pi*2/10)
 mem_tokens = emsize*2
 bptt = (1024*16+mem_tokens) - mem_tokens
-max_seq_len = 2**14
 seq_scale_down = emsize
+max_seq_len = max(2**14,2**17 // seq_scale_down)
+fno_layers = 8
+modes = 4
+width = 4
 causal = False
 nystrom = True
 attend_to_self = True
+feature_redraw_interval = 256
+prev_state_len = 8192
+local_heads = 1
 
 discriminator_enabled = False
 progressive_generation = True
@@ -288,7 +294,13 @@ if use_deepspeed:
                                         full_block_repeat=full_block_repeat,
                                         causal=causal,
                                         nystrom=nystrom,
-                                        attend_to_self=attend_to_self
+                                        attend_to_self=attend_to_self,
+                                        fno_layers=fno_layers,
+                                        modes=modes,
+                                        width=width,
+                                        feature_redraw_interval=feature_redraw_interval,
+                                        prev_state_len=prev_state_len,
+                                        local_heads=local_heads,
                                 ).half()
 else:
     model = TransformerModel(ntokens, 
@@ -307,7 +319,13 @@ else:
                                     causal=causal,
                                     device=device,
                                     nystrom=nystrom,
-                                    attend_to_self=attend_to_self
+                                    attend_to_self=attend_to_self,
+                                    fno_layers=fno_layers,
+                                    modes=modes,
+                                    width=width,
+                                    feature_redraw_interval=feature_redraw_interval,
+                                    prev_state_len=prev_state_len,
+                                    local_heads=local_heads,
                             ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
@@ -346,7 +364,7 @@ b = 1000
 c = 0.0
 step = 1
 pseudo_lambda = lambda step: (((a/b * (step*(bptt/512)*batch_size) + 1) / ((step*(bptt/512)*batch_size)**2 + a)) + c)/((step*(bptt/1024)*batch_size/100)**0.1+1)
-lambda_1 = lambda step: (pseudo_lambda(step) if step<(2048/(((bptt/512)*batch_size)**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(4096/(((bptt/512)*batch_size)**(math.pi*2/10))) else pseudo_lambda(step)/625))
+lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(((bptt/512)*batch_size)**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(((bptt/512)*batch_size)**(math.pi*2/10))) else pseudo_lambda(step)/625))
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
@@ -407,6 +425,12 @@ wandb.init(project=project_name,config={
     "causal":causal,
     "nystromer":nystrom,
     "attend_to_self":attend_to_self,
+    "fno_layers":fno_layers,
+    "modes":modes,
+    "width":width,
+    "feature_redraw_intervel":feature_redraw_interval,
+    "prev_state_len":prev_state_len,
+    "local_heads":local_heads,
 }
 )
 
@@ -703,6 +727,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     "input":wandb.Html(inputs),
                     "output":wandb.Html(output),
                     "target":wandb.Html(req_targets),
+                    "avg_inference_time":model.get_avg_inference_time(),
                 }
             )
         else:
@@ -719,6 +744,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     "input":wandb.Html(inputs),
                     "output":wandb.Html(output),
                     "target":wandb.Html(req_targets),
+                    "avg_inference_time":model.get_avg_inference_time()
                 },
                 
             )

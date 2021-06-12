@@ -122,8 +122,8 @@ class FNO1d(nn.Module):
         x = x.transpose(-1,-2)
 
         for i in range(self.num_layers):
-            x_ = ckpt(self.conv_layers[i],x) + ckpt(self.w_layers[i],x)
-            x_ = F.relu(x_)
+            x = ckpt(self.conv_layers[i],x) + ckpt(self.w_layers[i],x)
+            x = F.relu(x)
             
         x = x.transpose(-1,-2)
         x = self.fc1(x)

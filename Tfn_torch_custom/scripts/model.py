@@ -1,5 +1,6 @@
 from json import decoder
 import math
+import time
 #import profile
 import torch
 from torch import tensor
@@ -232,6 +233,8 @@ class TransformerBlock(Module):
                      hopfield=False,
                      hop_dim=None,
                      fno_layers=4,
+                     modes=None,
+                     width=None,
                      fixed_emb=False,
                      causal=False,
                      local_heads=0,
@@ -250,6 +253,9 @@ class TransformerBlock(Module):
 
         self.ffd1 = ET_ffd(dim=d_model)
 
+        modes = nhead if modes == None else modes
+        width = nhead if width == None else width
+
         if pkm_dims==None:
             pkm_dims = d_model//4
         if hop_dim==None:
@@ -266,8 +272,8 @@ class TransformerBlock(Module):
         self.gate = GRUGating(d_model)
         
         self.fno = nn.Sequential(
-                                GRUGating(d_model,FNO1d(nhead,
-                                                    nhead,
+                                GRUGating(d_model,FNO1d(modes,
+                                                    width,
                                                     inp_dim=d_model,
                                                     out_dim=d_model,
                                                     ffd_dim=dim_feedforward,
@@ -277,17 +283,17 @@ class TransformerBlock(Module):
         )
 
         if hopfield:
-            hop_attn = GRUGating(d_model,nn.Sequential(
-                                        nn.Linear(d_model,hop_dim),
-                                        HopfieldLayer(
-                                                    input_size=hop_dim,
-                                                    num_heads=nhead,
-                                                    #pattern_size=2**8,
-                                                    dropout=dropout_hopfield,
-                                                    #quantity=2**8,
-                                                ),
-                                        nn.Linear(hop_dim,d_model)
-                                    ))
+            hop_attn = nn.Sequential(
+                                    nn.Linear(d_model,hop_dim),
+                                    HopfieldLayer(
+                                                input_size=hop_dim,
+                                                num_heads=nhead,
+                                                #pattern_size=2**8,
+                                                dropout=dropout_hopfield,
+                                                quantity=2**8,
+                                            ),
+                                    nn.Linear(hop_dim,d_model)
+                                    )
         else:
             hop_attn = None
 
@@ -402,6 +408,8 @@ class TransformerModule(ModuleList):
                     hop_dim=None,
                     pkm_dims=None,
                     fno_layers=4,
+                    modes=None,
+                    width=None,
                     full_block_repeat=False,
                     causal=True,
                     nystrom=True,
@@ -417,20 +425,20 @@ class TransformerModule(ModuleList):
             hop_dim = d_model//4
 
         if not enable_encoder:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self)
             self.decoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         else:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self)
             self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,causal=causal,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self)
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
-        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=16,pkm_dims=d_model//8)
+        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=fno_layers,modes=modes,width=width,mem_kv=16,pkm_dims=d_model//8)
 
         self.register_buffer(
             name='prev_state',
@@ -517,7 +525,7 @@ class TransformerModel(Module):
                     nlayers: int,
                     padding_idx: int = 0,
                     dropout: float = 0.5,
-                    activation: Literal['gelu','relu'] = 'gelu',
+                    activation: str = 'gelu',
                     mem_token: int = 00,
                     context_mem_token: int = 00,
                     encoder_decoder: bool = False,
@@ -534,10 +542,16 @@ class TransformerModel(Module):
                     nystrom: bool = True,
                     local_heads: int = 1,
                     attend_to_self=True,
+                    fno_layers=4,
+                    modes=None,
+                    width=None,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
+
+        self.time_ = [0,0]
+
         self.encoder_decoder = encoder_decoder
         self.transformer_block = TransformerModule(nhead, 
                                                         nhid, 
@@ -554,6 +568,9 @@ class TransformerModel(Module):
                                                         nystrom=nystrom,
                                                         local_heads=local_heads,
                                                         attend_to_self=attend_to_self,
+                                                        fno_layers=fno_layers,
+                                                        modes=modes,
+                                                        width=width,
                                                         )
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)
@@ -564,7 +581,7 @@ class TransformerModel(Module):
         
         self.decoder = nn.Sequential(
             nn.Linear(ninp,ntoken),
-            #nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2),
             )
 
         self.ffd1 = GRUGating(ninp,ET_ffd(dim=ninp,layers=1,kernal_size=1,mult=4))
@@ -614,32 +631,36 @@ class TransformerModel(Module):
         self.scale_down_conv = nn.Sequential(
             nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=ninp),
             nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=ninp),
-            nn.Conv1d(ninp,ninp,5,padding=2),
+            nn.Conv1d(ninp,ninp,3,padding=1),
         )
-        self.scale_down_fno = GRUGating(ninp,FNO1d(nhead,
-                                                    nhead,
-                                                    inp_dim=ninp,
-                                                    out_dim=ninp,
-                                                    ffd_dim=nhid,
-                                                    num_layers=1
-                                                ))
+
+        modes = nhead if modes == None else modes
+        width = nhead if width == None else width
+
+        self.scale_down_fno = FNO1d(modes,
+                                        width,
+                                        inp_dim=ninp,
+                                        out_dim=ninp,
+                                        ffd_dim=nhid,
+                                        num_layers=fno_layers
+                                    )
 
         self.padding_for_conv_scale_l = nn.Parameter(torch.randn((ninp,(self.seq_scale_down)-1)))
         self.padding_for_conv_scale_r = nn.Parameter(torch.randn((ninp,self.seq_scale_down*2)))
 
         self.scale_up_conv = nn.Sequential(
-            nn.Conv1d(ninp,ninp,5,padding=2),
+            nn.Conv1d(ninp,ninp,3,padding=1),
             nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=ninp),
             nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=ninp),
         )
 
-        self.scale_up_fno = GRUGating(ninp,FNO1d(nhead,
-                                                    nhead,
-                                                    inp_dim=ninp,
-                                                    out_dim=ninp,
-                                                    ffd_dim=nhid,
-                                                    num_layers=1
-                                                ))
+        self.scale_up_fno = FNO1d(modes,
+                                        width,
+                                        inp_dim=ninp,
+                                        out_dim=ninp,
+                                        ffd_dim=nhid,
+                                        num_layers=fno_layers
+                                    )
 
         #self.to(device)
         self.device = device
@@ -649,6 +670,9 @@ class TransformerModel(Module):
         self.proj_updater = ProjectionUpdater(self.transformer_block, feature_redraw_interval)
 
         self.init_weights()
+
+    def get_avg_inference_time(self) -> int:
+        return self.time_[0] / self.time_[1]
 
     def fix_projection_matrices_(self):
         self.proj_updater.feature_redraw_interval = None
@@ -1012,7 +1036,7 @@ class TransformerModel(Module):
                     trainable_output = output
                     trainable_output_targets = output_targets
 
-                loss = loss_criterion(trainable_output.permute(1,2,0).contiguous().cpu(), trainable_output_targets.permute(1,0).contiguous().cpu()).to(self.device)
+                loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous()).to(self.device)
                 loss.backward()
 
                 optimizer.step()
@@ -1100,7 +1124,9 @@ class TransformerModel(Module):
                     generator: bool = True,
                     discriminator: bool = False,
                 ) -> Tuple[Tensor,Optional[Tensor],Optional[Tensor]]:
-        
+
+        start_time = time.time()
+
         (b,s_) = src.shape
 
         if not self.discriminator_enabled:
@@ -1199,7 +1225,9 @@ class TransformerModel(Module):
             output = ckpt(self.ffd2,output)
             output = ckpt(self.decoder,output)
             
-        
+        self.time_[0] += time.time()-start_time
+        self.time_[1] += 1
+
         if return_mem:
             return output, mem
         else:
