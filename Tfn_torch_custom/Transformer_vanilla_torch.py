@@ -548,8 +548,8 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,reccurent
         out,mem,mem_ctxt = eval_model(text_input,mem=reccurent_mem,context_mem=reccurent_mem_ctxt)
     out = torch.argmax(out.reshape(-1, ntokens),dim=-1).to(torch.device('cpu'))
     result = tokenizer.decode(out)
-    print("Your input:\n\t  ",tokenizer.decode(text_input.reshape(-1).to(torch.device('cpu'))))
-    print("Model's Output:\n\t\t\b\b",result)
+    print("Your input:\v  ",tokenizer.decode(text_input.reshape(-1).to(torch.device('cpu'))))
+    print("Model's Output:\v",result)
     print('')
     torch.cuda.empty_cache()
     if return_mem:
