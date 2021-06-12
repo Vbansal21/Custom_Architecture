@@ -13,7 +13,8 @@ import warnings
 from memory_profiler import profile
 
 import copy
-from typing import Tuple, Optional, Any, NoReturn, Union, Literal, List
+import typing
+from typing import Tuple, Optional, Any, NoReturn, Union, List
 
 from torch import Tensor
 from torch.nn.modules.container import ModuleList, Module
@@ -476,17 +477,27 @@ class TransformerModule(ModuleList):
         output = src
         ctxt = context
 
+        prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
+        prev_state = ckpt(self.prev_state_update,prev_state,output/output.size(-1))
+        if ctxt != None:
+            prev_state = ckpt(self.prev_state_update,prev_state,ctxt/ctxt.size(-1))
+
         if self.enable_encoder:
             for enc in self.encoder:
+                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                 ctxt = ckpt(enc,ctxt)
+                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
             for i in range(self.num_layers):
+                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                 output = ckpt(self.decoder_self[i],output)
+                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                 output = ckpt(self.decoder_cross[i],output,ctxt)
+                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
         else:
             for dec in self.decoder:
+                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                 output = ckpt(dec,output)
-
-        prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
+                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
 
         output = ckpt(self.prev_state_attend,output,prev_state)
 
@@ -495,24 +506,37 @@ class TransformerModule(ModuleList):
         if self.full_block_repeat:
             for _ in range(self.repeated_deberta_layers+1):
                 for enc in self.deberta_layers:
+                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                     out = ckpt(enc,out,output)
+                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
             else:
                 if self.deberta_layers!=None:
+                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                     output = out
+                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
         else:
             for enc in self.deberta_layers:
                 for _ in range(self.repeated_deberta_layers+1):
+                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                     out = ckpt(enc,out,output)
+                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
             else:
                 if self.deberta_layers!=None:
+                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                     output = out
+                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
 
         output = ckpt(self.prev_state_attend,output,prev_state)
 
         prev_state = ckpt(self.prev_state_update,prev_state,output)
+        if ctxt != None:
+            prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
         self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
-
-        return output
+        
+        if context != None:
+            return output,ctxt
+        else:
+            return output
 
 class TransformerModel(Module):
 
@@ -609,16 +633,10 @@ class TransformerModel(Module):
 
         self.discriminator_enabled = discriminator
         if discriminator:
-            self.discriminator = nn.Sequential(
-                nn.Linear(ninp,nhid),
-                _get_activation_fn(activation),
-                nn.Linear(nhid,ninp),
-                _get_activation_fn(activation),
-                self.transformer_block,
-                _get_activation_fn(activation),
-                nn.Linear(ninp,nhid),
-                _get_activation_fn(activation),
-                nn.Linear(nhid,2),
+            self.d_ffd = copy.deepcopy(self.ffd1)
+            self.d_decoder = nn.Sequential(
+                ET_ffd(dim=ninp,layers=1,kernal_size=1,mult=4),
+                nn.Linear(ninp,2),
                 nn.LeakyReLU(0.01),
             )
         
@@ -662,17 +680,28 @@ class TransformerModel(Module):
                                         num_layers=fno_layers
                                     )
 
-        #self.to(device)
         self.device = device
 
         self.auto_check_redraw = auto_check_redraw
         self.feature_redraw_interval = feature_redraw_interval
         self.proj_updater = ProjectionUpdater(self.transformer_block, feature_redraw_interval)
 
+        self.tokenizer = None
+        self.vocab = None
+        self.optimizer = None
+        self.optimizer_disc = None
+        self.scheduler = None
+        self.scheduler_lambda = None
+        self.scheduler_disc = None
+        self.scheduler_disc_lambda = None
+
         self.init_weights()
 
     def get_avg_inference_time(self) -> int:
-        return self.time_[0] / self.time_[1]
+        if self.time_[1] != 0:
+            return self.time_[0] / self.time_[1]
+        else:
+            return 0
 
     def fix_projection_matrices_(self):
         self.proj_updater.feature_redraw_interval = None
@@ -695,30 +724,26 @@ class TransformerModel(Module):
         if self.discriminator_enabled:
             self.discriminator.convert_decoder_only_to_encoder_decoder()
 
-    def alt_mem_tokens(self,mem: Tensor,alt_mem_with_primary_mem: Optional[bool] = True) -> NoReturn :
-        self.alt_mem = mem
-        self.alt_mem_with_primary_mem = alt_mem_with_primary_mem
-
     def init_tokenizer(self,
-                        sample:str = "",
+                        sample:str = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f",
                         append_eos: Optional[bool] = False,
-                        target_vocab_size: Optional[int] = 2**16,
+                        target_vocab_size: Optional[int] = 2**17,
                         min_occ: Optional[int] = 1,
-                        max_occ: Optional[int] = 100,
+                        max_occ: Optional[int] = 1000,
                         reserved_tokens: Optional[list] = [
-                                                            '<pad>',
-                                                            '<unk>',
-                                                            '<s>', '</s>',
-                                                            '<copy>',
-                                                            '<mask>',
-                                                            '<segment_seperator>',
-                                                            '<non_text_content>', '</non_text_content>'
-                                                           ],
+                                                            '[pad]','[unk]',
+                                                            '[sos]','[eos]',
+                                                            '[copy]',
+                                                            '[mask]',
+                                                            '[segment_seperator]',
+                                                            '[non_text_content]','[/non_text_content]'
+                                                            ],
                         eos_index: Optional[int] = 3,
                         unk_index: Optional[int] = 1,
                         pad_idx: Optional[int] = 0,
                         return_tokenizer: Optional[bool] = False
                         ) -> Union[NoReturn,torchnlp.encoders.text.text_encoder.TextEncoder] :
+        sample += " ".join(sample.split(""))
         self.tokenizer = SubwordEncoder(sample,
                                         append_eos=append_eos,
                                         target_vocab_size=target_vocab_size,
@@ -728,7 +753,7 @@ class TransformerModel(Module):
                                         eos_index=eos_index,
                                         unknown_index=unk_index,
                                         padding_index=pad_idx)
-        self.vocab = self.tokenizer.vocab_size
+        self.vocab = self.tokenizer.vocab
         if return_tokenizer:
             return self.tokenizer
 
@@ -907,16 +932,16 @@ class TransformerModel(Module):
         return decoded_text
 
     def init_optimizer(self,
-                            opt: Optional[Literal['Torch_optimizer']] = None,
-                            opt_disc: Optional[Literal['Torch_optimizer']] = None,
+                            opt: Optional[torch.optim.Optimizer] = None,
+                            opt_disc: Optional[torch.optim.Optimizer] = None,
                             lr: Union[None,float,dict] = None,
                             lr_disc: Union[None,float,dict] = None,
-                            scheduler: Optional[Literal['Torch_LRscheduler']] = None,
-                            lambdaLR: Optional[Literal['lambda_function']] = None,
-                            scheduler_disc: Optional[Literal['Torch_LRscheduler']] = None,
-                            lambdaLR_disc: Optional[Literal['lambda_function']] = None,
+                            scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+                            lambdaLR: Optional[typing.Callable] = None,
+                            scheduler_disc: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+                            lambdaLR_disc: Optional[typing.Callable] = None,
                             return_opt_schd: bool = False
-                        ) -> Union[NoReturn,Tuple[Literal['Torch_optimizer'],Literal['Torch_LRscheduler']]]:
+                        ) -> Union[NoReturn,Tuple[torch.optim.Optimizer,torch.optim.lr_scheduler._LRScheduler]]:
         if opt != None:
             self.optimizer = opt
             if self.discriminator_enabled:
@@ -944,17 +969,29 @@ class TransformerModel(Module):
             if self.discriminator_enabled:
                 self.scheduler_disc = scheduler_disc
         else:
-            if lambdaLR == None or lambdaLR_disc == None:
+            if (lambdaLR == None or lambdaLR_disc == None) and self.scheduler_lambda == None:
                 a = 5000000
-                b = 500
+                b = 1000
                 c = 0.0
-                if lambdaLR==None:
-                    lambdaLR = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
+                step = 1
+                multiplier = 1
+
+                pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
+                lambdaLR = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
+
                 if lambdaLR_disc==None and self.discriminator_enabled:
-                    lambdaLR_disc = lambda step: (((a/b * step + 1) / (step**2 + a)) + c)/(step**0.1+1)
+                    lambdaLR_disc = copy.deepcopy(lambdaLR)
+            else:
+                lambdaLR = self.scheduler_lambda if type(self.scheduler_lambda)==list else self.scheduler_lambda[-1]
+                if self.scheduler_disc_lambda==None and self.discriminator_enabled:
+                    lambdaLR_disc = copy.deepcopy(lambdaLR)
+                elif self.discriminator_enabled:
+                    lambdaLR_disc = self.scheduler_disc_lambda
             self.scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=self.optimizer,lr_lambda=lambdaLR)
+            self.scheduler_lambda = lambda_LR
             if self.discriminator_enabled:
                 self.scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=self.optimizer_disc,lr_lambda=lambdaLR_disc)
+                self.scheduler_disc_lambda = lambda_LR_disc
         if return_opt_schd:
             if self.discriminator_enabled:
                 return self.optimizer, self.optimizer_disc, self.scheduler, self.scheduler_disc
@@ -975,7 +1012,8 @@ class TransformerModel(Module):
                     grad_clip=4.0,
                     deepspeed_enabled=False,
                     autocast_enabled=False,
-                    trainable_index=None
+                    trainable_index=None,
+                    mem_ctxt=None,
                 ):
 
         self.train()
@@ -1016,7 +1054,7 @@ class TransformerModel(Module):
                 loss_d_real = loss_criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
                 loss_d_real.backward()
 
-                out_gan = self.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True)
+                out_gan = self.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True,context_mem=mem_ctxt)
                 loss_d_fake = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
                 loss_d_fake.backward()
 
@@ -1024,11 +1062,11 @@ class TransformerModel(Module):
                 optimizer_disc.zero_grad()
                 self.zero_grad()
 
-                out_gan = self.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True)
+                out_gan = self.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True,context_mem=mem_ctxt)
                 loss_gen = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
                 loss_gen.backward()
 
-                output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
+                output,single_pass_mem,single_pass_mem_ctxt = self.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
                 if trainable_index != None:
                     trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
                     trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
@@ -1053,7 +1091,7 @@ class TransformerModel(Module):
                 losses['loss'] = loss.item()
             else:
                 self.zero_grad()
-                output,single_pass_mem = self.forward(input_data,mem=mem_tokens)
+                output,single_pass_mem,single_pass_mem_ctxt = self.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
                 torch.cuda.empty_cache()
                 if trainable_index != None:
                     trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
@@ -1071,13 +1109,13 @@ class TransformerModel(Module):
                 outputs['output'] = output
 
                 losses['loss'] = loss.item()
-            return outputs,losses,labels,single_pass_mem
+            return outputs,losses,labels,single_pass_mem,single_pass_mem_ctxt
         
         if deepspeed_enabled or autocast_enabled:
             with autocast():
-                outputs,losses,labels,mem_ = step_optimizer(data,targets)
+                outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
         else:
-            outputs,losses,labels,mem_ = step_optimizer(data,targets)
+            outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
         
         acc_gen = 0.0
         loss_g = 0.0
@@ -1104,7 +1142,7 @@ class TransformerModel(Module):
             total_acc_d = 0
             total_loss_d = 0
 
-        return outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc_gen,(step_start_time-time.time()),optimizer,optimizer_disc,mem_
+        return outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc_gen,(step_start_time-time.time()),optimizer,optimizer_disc,mem_,mem_ctxt_
         
     def get_prev_state(self):
         return self.transformer_block.prev_state
@@ -1118,8 +1156,6 @@ class TransformerModel(Module):
                     context: Optional[Tensor] = None,
                     mem: Optional[Tensor] = None, 
                     context_mem: Optional[Tensor] = None,
-                    alt_mem_with_primary_key: Optional[bool] = None,
-                    assign_to_alt_mem: bool = False,
                     return_mem: bool = True,
                     generator: bool = True,
                     discriminator: bool = False,
@@ -1128,6 +1164,9 @@ class TransformerModel(Module):
         start_time = time.time()
 
         (b,s_) = src.shape
+        
+        if context != None:
+            s_c_ = src.size(1)
 
         if not self.discriminator_enabled:
             discriminator = False
@@ -1147,38 +1186,22 @@ class TransformerModel(Module):
 
         if generator or not self.discriminator_enabled:
 
-            self.alt_mem_with_primary_mem = alt_mem_with_primary_key if type(alt_mem_with_primary_key) == bool else self.alt_mem_with_primary_mem
-
             if mem != None and self.mem_exist:
-                if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                    src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-                else:
-                    src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+                src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
             elif self.mem_exist:
-                if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                    src = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-                elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
-                    src = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-                else:
-                    src = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            
+                src = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
 
             if self.encoder_decoder:
                 if context_mem != None and self.context_mem_exist:
-                    if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                        context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
-                    else:
-                        context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+                    context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
                 elif self.context_mem_exist:
-                    if self.alt_mem_with_primary_mem and self.alt_mem != None:
-                        context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),repeat(self.alt_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
-                    elif not self.alt_mem_with_primary_mem and self.alt_mem != None:
-                        context = torch.cat((repeat(self.alt_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
-                    else:
-                        context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+                    context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
 
 
             s = src.size(1)
+            
+            if context != None:
+                s_c = context.size(1)
 
             src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
 
@@ -1200,19 +1223,30 @@ class TransformerModel(Module):
             if self.encoder_decoder:
                 context = context.contiguous()
 
-            output = ckpt(self.transformer_block,output,context)
+            if context == None:
+                output = ckpt(self.transformer_block,output)
+            else:
+                output,context = ckpt(self.transformer_block,output,context)
 
             output = ckpt(self.scale_up_fno,output)
             output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
             output = output[:,:s]
 
-            for i in range(b):
-                if i == 0:
-                    mem = output[i,:output.size(1)-s_]
-                else:
-                    mem += output[i,:output.size(1)-s_]
             mem = mem if type(mem) == torch.tensor else None
-            self.alt_mem = mem if assign_to_alt_mem else None
+            if mem != None:
+                mem = output[:,:output.size(1)-s_]
+                mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.mem.shape) / b
+            
+            if context != None:
+                context = ckpt(self.scale_up_fno,context)
+                context = ckpt(self.scale_up_conv,context.transpose(-1,-2)).transpose(-1,-2)
+                context = context[:,:s_c]
+
+                context_mem = context_mem if type(context_mem) == torch.tensor else None
+                if context_mem != None:
+                    context_mem = context[:,:context.size(1)-s_c]
+                    context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.context_mem.shape) / b
+
 
             output = output[:,output.size(1)-s_:] if type(mem) != None or self.mem_exist else output
 
@@ -1220,15 +1254,23 @@ class TransformerModel(Module):
             output = src
 
         if discriminator:
-            output = ckpt(self.discriminator,output,context)
-        else:
+            output = ckpt(self.d_ffd,output)
+
+            if context == None:
+                output = ckpt(self.transformer_block,output)
+            else:
+                context = ckpt(self.d_ffd,context)
+                output,context = ckpt(self.transformer_block,output,context)
+
+            output = ckpt(self.d_decoder,output)
+        elif not discriminator or generator or not self.discriminator_enabled:
             output = ckpt(self.ffd2,output)
             output = ckpt(self.decoder,output)
             
-        self.time_[0] += time.time()-start_time
-        self.time_[1] += 1
+            self.time_[0] += time.time()-start_time
+            self.time_[1] += 1
 
         if return_mem:
-            return output, mem
+            return output, mem, context_mem
         else:
             return output

@@ -41,7 +41,10 @@ if retrieve_tokenizer:
     tokenizer = torch.load("models/"+str(tokenizer_name))
     vocab_size = tokenizer.vocab_size
 else:
-    tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**17,reserved_tokens=[
+    sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f"
+    sample += " ".join(sample.split(""))
+    sample += io.open(train_filepath, encoding="utf8") + io.open(test_filepath, encoding="utf8") + io.open(val_filepath, encoding="utf8")
+    tokenizer = SubwordEncoder(sample,target_vocab_size=2**17,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
     ],
     eos_index=3,unknown_index=1,padding_index=0)
@@ -72,16 +75,16 @@ dropout = (math.pi*2/10)
 mem_tokens = emsize*2
 bptt = (1024*16+mem_tokens) - mem_tokens
 seq_scale_down = emsize
-max_seq_len = max(2**14,2**17 // seq_scale_down)
+max_seq_len = max(2**15,2**17 // seq_scale_down)
 fno_layers = 8
-modes = 4
-width = 4
+modes = 8
+width = 8
 causal = False
 nystrom = True
 attend_to_self = True
 feature_redraw_interval = 256
-prev_state_len = 8192
-local_heads = 1
+prev_state_len = mem_tokens
+local_heads = min(1,nhead)
 
 discriminator_enabled = False
 progressive_generation = True
@@ -363,11 +366,21 @@ a = 5000000
 b = 1000
 c = 0.0
 step = 1
-pseudo_lambda = lambda step: (((a/b * (step*(bptt/512)*batch_size) + 1) / ((step*(bptt/512)*batch_size)**2 + a)) + c)/((step*(bptt/1024)*batch_size/100)**0.1+1)
-lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(((bptt/512)*batch_size)**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(((bptt/512)*batch_size)**(math.pi*2/10))) else pseudo_lambda(step)/625))
+multiplier = (bptt/512)*batch_size
+pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
+lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
+
+model.tokenzier = tokenizer
+model.vocab = vocab
+model.optimizer = optimizer
+model.optimizer_disc = optimizer_disc
+model.scheduler = scheduler
+model.scheduler_disc = scheduler_disc
+model.scheduler_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
+model.scheduler_disc_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
 
 load_optimizer = True
 load_scheduler = bool(True and load_optimizer)
@@ -377,6 +390,7 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
+log_interval = 500
 epochs = 15
 
 import matplotlib.pyplot as plt
@@ -393,11 +407,12 @@ model.eval()
 inp = torch.randint(0,ntokens-1,(1,bptt),dtype=torch.long,device=device)
 if use_deepspeed:
     with autocast():
-        out,mem = model(inp,assign_to_alt_mem=False)
+        out,mem,mem_ctxt = model(inp)
 else:
-    out,mem = model(inp,assign_to_alt_mem=False)
+    out,mem,mem_ctxt = model(inp)
 print(torch.argmax((out.reshape(-1,ntokens)),dim=-1))
-del(out,mem,inp)
+print(model.get_avg_inference_time()," seconds")
+del(out,mem,mem_ctxt,inp)
 
 best_model = model
 
@@ -522,15 +537,15 @@ model.to(device)
 
 # TODO: Setup 'curses' module to print colored text for inference output
 #import curses
-def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_mem=True):
+def inference(text,size=128,eval_model = best_model,reccurent_mem=None,reccurent_mem_ctxt=None,return_mem=True):
     model.eval()
     torch.cuda.empty_cache()
     text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device )
     if use_deepspeed:
         with autocast():
-            out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
+            out,mem,mem_ctxt = eval_model(text_input,mem=reccurent_mem,context_mem=reccurent_mem_ctxt)
     else:
-        out,mem = eval_model(text_input,mem=reccurent_mem,assign_to_alt_mem=False)
+        out,mem,mem_ctxt = eval_model(text_input,mem=reccurent_mem,context_mem=reccurent_mem_ctxt)
     out = torch.argmax(out.reshape(-1, ntokens),dim=-1).to(torch.device('cpu'))
     result = tokenizer.decode(out)
     print("Your input:\n\t  ",tokenizer.decode(text_input.reshape(-1).to(torch.device('cpu'))))
@@ -538,7 +553,7 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,return_me
     print('')
     torch.cuda.empty_cache()
     if return_mem:
-        return mem
+        return mem,mem_ctxt
 
 
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
@@ -548,6 +563,7 @@ def evaluate(eval_model, data_source, print_val_loss=False):
     total_loss = 0.
     total_acc = 0.
     single_pass_mem = None
+    single_pass_mem_ctxt = None
     stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
     with torch.no_grad():
         for i in range(0, data_source.size(1), stride_size):
@@ -555,11 +571,11 @@ def evaluate(eval_model, data_source, print_val_loss=False):
             data, targets, trainable_index = get_batch(data_source, i)
             if use_deepspeed:
                 with autocast():
-                    output,single_pass_mem = eval_model(data,mem = single_pass_mem)
+                    output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
                     total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
                     total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
             else:
-                output,single_pass_mem = eval_model(data,mem = single_pass_mem)
+                output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
                 total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
                 total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
     val_loss = total_loss / (data_source.size(1))
@@ -574,12 +590,14 @@ torch.cuda.empty_cache()
 def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,optimizer=optimizer,optimizer_disc=optimizer_disc):
     
     global step
+    global log_interval
     total_loss = 0.
     total_loss_d = 0.
     total_ppl = 0.
     start_time = time.time()
     intermediate_save_time = time.time()
     single_pass_mem = None
+    single_pass_mem_ctxt = None
     acc = 0
     acc_d = 0
     total_acc = 0
@@ -593,18 +611,19 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 continue
         if epoch%2==1:
             single_pass_mem = None
+            single_pass_mem_ctxt = None
         data, targets, trainable_index = get_batch(processed_train_data, i,progressive=progressive_generation) #Indexed Selective training broken
         trainable_index = None
         torch.cuda.empty_cache()
 
-        outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer,trainable_index=trainable_index)
+        outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt)
 
         try:
             ppl = math.exp(losses['loss'])
         except:
             ppl = -1.0
 
-        log_interval = 200
+        log_interval = log_interval
         total_ppl += ppl
         inputs = "\n".join([tokenizer.decode(i.to(torch.device('cpu'))) for i in data])
         output = "\n".join([tokenizer.decode(torch.argmax(i,dim=-1).to(torch.device('cpu'))) for i in outputs['output']])
@@ -617,6 +636,15 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
 
             model.eval()
             best_model.eval()
+
+            model.tokenzier = tokenizer
+            model.vocab = vocab
+            model.optimizer = optimizer
+            model.optimizer_disc = optimizer_disc
+            model.scheduler = scheduler
+            model.scheduler_disc = scheduler_disc
+            model.scheduler_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
+            model.scheduler_disc_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
 
             if discriminator_enabled:
                 torch.save(
@@ -771,6 +799,16 @@ while True:
 
     model.eval()
     best_model.eval()
+
+    model.tokenzier = tokenizer
+    model.vocab = vocab
+    model.optimizer = optimizer
+    model.optimizer_disc = optimizer_disc
+    model.scheduler = scheduler
+    model.scheduler_disc = scheduler_disc
+    model.scheduler_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
+    model.scheduler_disc_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
+
     if discriminator_enabled:
         torch.save(
         {
@@ -833,12 +871,13 @@ print('| End of training | test acc {:3.2f}% | test loss {:5.3f} | test ppl {:10
     test_loss, math.exp(test_loss)))
 print('=' * 110)
 
-_ = inference("Hello World!!! This is inference function on the currently trained model")
-
+inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
+mem = mem_ctxt = None
 while True:
     i = int(input("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:"))
     if i == 0:
         break
     inp = input("input text, 1 string at a time, for inference:")
     mem = None if i==1 else mem
-    mem = inference(inp,reccurent_mem=mem)
+    mem_ctxt = None if i==1 else mem_ctxt
+    mem, mem_ctxt = inference(inp,reccurent_mem=mem,reccurent_mem_ctxt=mem_ctxt)
