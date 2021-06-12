@@ -970,15 +970,25 @@ class TransformerModel(Module):
                 self.scheduler_disc = scheduler_disc
         else:
             if (lambdaLR == None or lambdaLR_disc == None) and self.scheduler_lambda == None:
-                a = 5000000
-                b = 1000
-                c = 0.0
-                step = 1
-                multiplier = 1
 
-                pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
-                lambdaLR = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
+                def lambda_lr(step_):
+                    a = 5000000
+                    b = 1000
+                    c = 0.0
+                    step = 1
+                    multiplier = (bptt/512)*batch_size
 
+                    def sub_func(step):
+                        return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
+
+                    if step_<(1024/(multiplier**(math.pi*2/10))):
+                        return sub_func(step_)
+                    elif step_<(2048/(multiplier**(math.pi*2/10))):
+                        return sub_func(step_) / 25
+                    else:
+                        return sub_func(step_) / 625
+
+                lambdaLR = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
                 if lambdaLR_disc==None and self.discriminator_enabled:
                     lambdaLR_disc = copy.deepcopy(lambdaLR)
             else:

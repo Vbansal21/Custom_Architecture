@@ -362,16 +362,28 @@ if not use_deepspeed:
 else:
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
 
-a = 5000000
-b = 1000
-c = 0.0
 step = 1
-multiplier = (bptt/512)*batch_size
-pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
-lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
+def lambda_lr(step_):
+    a = 5000000
+    b = 1000
+    c = 0.0
+    step = 1
+    multiplier = (bptt/512)*batch_size
 
-scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
-scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1) if discriminator_enabled else None
+    def sub_func(step):
+        return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
+
+    if step_<(1024/(multiplier**(math.pi*2/10))):
+        return sub_func(step_)
+    elif step_<(2048/(multiplier**(math.pi*2/10))):
+        return sub_func(step_) / 25
+    else:
+        return sub_func(step_) / 625
+#    pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
+#    lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
+scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_lr) if discriminator_enabled else None
 
 model.tokenzier = tokenizer
 model.vocab = vocab
@@ -379,8 +391,8 @@ model.optimizer = optimizer
 model.optimizer_disc = optimizer_disc
 model.scheduler = scheduler
 model.scheduler_disc = scheduler_disc
-model.scheduler_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
-model.scheduler_disc_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
+model.scheduler_lambda = lambda_lr
+model.scheduler_disc_lambda = lambda_lr
 
 load_optimizer = True
 load_scheduler = bool(True and load_optimizer)
@@ -394,7 +406,7 @@ log_interval = 500
 epochs = 15
 
 import matplotlib.pyplot as plt
-plt.plot([lambda_1(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
+plt.plot([lambda_lr(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
 plt.show()
 del(plt)
 
@@ -503,9 +515,9 @@ try:
             scheduler_disc.load_state_dict(checkpoint_['scheduler_disc_state_dict'])
 
     else:
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_1)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
         if discriminator_enabled:
-            scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_1)
+            scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_lr)
 
     try:
         resume_batch = checkpoint_['resume_batch']
@@ -631,7 +643,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         del(data,targets,outputs,losses)
         torch.cuda.empty_cache()
 
-        if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
+        if (batch % save_intermediate_intervel == 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
             inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 
             model.eval()
@@ -643,8 +655,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             model.optimizer_disc = optimizer_disc
             model.scheduler = scheduler
             model.scheduler_disc = scheduler_disc
-            model.scheduler_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
-            model.scheduler_disc_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
+            model.scheduler_lambda = lambda_lr
+            model.scheduler_disc_lambda = lambda_lr
 
             if discriminator_enabled:
                 torch.save(
@@ -806,8 +818,8 @@ while True:
     model.optimizer_disc = optimizer_disc
     model.scheduler = scheduler
     model.scheduler_disc = scheduler_disc
-    model.scheduler_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
-    model.scheduler_disc_lambda = [a,b,c,step,multiplier,pseudo_lambda,lambda_1]
+    model.scheduler_lambda = lambda_lr
+    model.scheduler_disc_lambda = lambda_lr
 
     if discriminator_enabled:
         torch.save(
