@@ -26,9 +26,9 @@ elif file == "wikitextv103":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 
-
+retrieve_tokenizer = True
 #TODO: Define a better file parsing mechanism
-try:
+if retrieve_tokenizer:
     files = os.listdir("models/")
     tokenizer_files = []
     for i in files:
@@ -40,7 +40,7 @@ try:
             tokenizer_name = i
     tokenizer = torch.load("models/"+str(tokenizer_name))
     vocab_size = tokenizer.vocab_size
-except:
+else:
     tokenizer = SubwordEncoder(io.open(train_filepath, encoding="utf8"),target_vocab_size=2**17,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
     ],
@@ -67,14 +67,15 @@ nlayers = 8
 deberta_layers = 24
 repeated_deberta_layers = 1
 full_block_repeat = True
-nhead = 8
-dropout = 0.3
+nhead = 16
+dropout = (math.pi*2/10)
 mem_tokens = emsize*2
 bptt = (1024*16+mem_tokens) - mem_tokens
 max_seq_len = 2**14
 seq_scale_down = emsize
 causal = False
 nystrom = True
+attend_to_self = True
 
 discriminator_enabled = False
 progressive_generation = True
@@ -287,6 +288,7 @@ if use_deepspeed:
                                         full_block_repeat=full_block_repeat,
                                         causal=causal,
                                         nystrom=nystrom,
+                                        attend_to_self=attend_to_self
                                 ).half()
 else:
     model = TransformerModel(ntokens, 
@@ -305,6 +307,7 @@ else:
                                     causal=causal,
                                     device=device,
                                     nystrom=nystrom,
+                                    attend_to_self=attend_to_self
                             ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
@@ -351,6 +354,7 @@ scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_l
 load_optimizer = True
 load_scheduler = bool(True and load_optimizer)
 load_step_number = True
+load_tokenizer = True
 epoch = 0
 best_val_loss = float("inf")
 
@@ -402,6 +406,7 @@ wandb.init(project=project_name,config={
     "full_block_repeat":full_block_repeat,
     "causal":causal,
     "nystromer":nystrom,
+    "attend_to_self":attend_to_self,
 }
 )
 
@@ -416,8 +421,9 @@ try:
 
     epoch = checkpoint_['epoch']
     best_val_loss = checkpoint_['best_val_loss']
-    vocab = checkpoint_['vocab']
-    tokenizer = checkpoint_['tokenizer']
+    if load_tokenizer:
+        vocab = checkpoint_['vocab']
+        tokenizer = checkpoint_['tokenizer']
     
     try:
         model.load_state_dict(checkpoint_['model_state_dict'],strict=False)

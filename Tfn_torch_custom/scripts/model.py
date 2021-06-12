@@ -202,12 +202,12 @@ class AbsolutePositionalEmbedding(Module):
             multiplier = 1/(2**0.5)
             n = []
 
-            for i in range(0,s,self.max_seq_len):
-                tmp = torch.arange(i,self.max_seq_len+i, device = x.device)
+            for i in range(s//self.max_seq_len):
+                tmp = torch.arange(self.max_seq_len, device = x.device)
                 n.append(repeat(self.emb(tmp),'n d -> b n d',b=x.size(0)) * multiplier)
                 multiplier *= (2**0.5)
             else:
-                tmp = torch.arange(i+self.max_seq_len,s-1, device = x.device)
+                tmp = torch.arange(s%self.max_seq_len, device = x.device)
                 n.append(repeat(self.emb(tmp),'n d -> b n d',b=x.size(0)) * multiplier)
 
             tmp = torch.cat(n,dim=1)
@@ -236,6 +236,7 @@ class TransformerBlock(Module):
                      causal=False,
                      local_heads=0,
                      nystrom=False,
+                     attend_to_self=True,
                 ):
         super(TransformerBlock, self).__init__()
 
@@ -304,7 +305,7 @@ class TransformerBlock(Module):
                                                     fixed_emb=fixed_emb,
                                                     causal=causal,
                                                     nystrom=nystrom,
-                                                    attend_to_self=True
+                                                    attend_to_self=attend_to_self
                                                 ),
                                 pkm=copy.deepcopy(self.pkm1),
                                 )
@@ -327,7 +328,8 @@ class TransformerBlock(Module):
                                         rotary_pos_emb=True,
                                         fixed_emb=fixed_emb,
                                         causal=causal,
-                                        nystrom=nystrom),
+                                        nystrom=nystrom,
+                                        attend_to_self=attend_to_self),
                 'cross_1':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
@@ -410,7 +412,25 @@ class TransformerBlock(Module):
 class TransformerModule(ModuleList):
 
     #@profile
-    def __init__(self, nhead, nhid, num_layers, d_model,dropout=0.5,enable_encoder=False,deberta_layers=1,repeated_deberta_layers=2,max_len=2**17,prev_state_len=8192,hop_dim=None,pkm_dims=None,fno_layers=4,full_block_repeat=False,causal=True,nystrom=True,local_heads=2):
+    def __init__(self, 
+                    nhead, 
+                    nhid, 
+                    num_layers, 
+                    d_model,
+                    dropout=0.5,
+                    enable_encoder=False,
+                    deberta_layers=1,
+                    repeated_deberta_layers=2,
+                    max_len=2**17,
+                    prev_state_len=8192,
+                    hop_dim=None,
+                    pkm_dims=None,
+                    fno_layers=4,
+                    full_block_repeat=False,
+                    causal=True,
+                    nystrom=True,
+                    local_heads=2,
+                    attend_to_self=True):
         super(TransformerModule, self).__init__()
 
         self.full_block_repeat = full_block_repeat
@@ -421,17 +441,17 @@ class TransformerModule(ModuleList):
             hop_dim = d_model//4
 
         if not enable_encoder:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self)
             self.decoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         else:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self)
             self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,causal=causal,pkm_dims=pkm_dims,local_heads=local_heads)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,causal=causal,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self)
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
         self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=1,mem_kv=16,pkm_dims=d_model//8)
@@ -537,6 +557,7 @@ class TransformerModel(Module):
                     prev_state_len: int = 8192,
                     nystrom: bool = True,
                     local_heads: int = 1,
+                    attend_to_self=True,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
@@ -556,6 +577,7 @@ class TransformerModel(Module):
                                                         prev_state_len=prev_state_len,
                                                         nystrom=nystrom,
                                                         local_heads=local_heads,
+                                                        attend_to_self=attend_to_self,
                                                         )
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)

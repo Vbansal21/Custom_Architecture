@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.cuda.amp import autocast
 from einops import rearrange, repeat, reduce
+from torch import einsum
 
 from functools import partial
 from contextlib import contextmanager
@@ -742,12 +743,12 @@ class AbsolutePositionalEmbedding(nn.Module):
             multiplier = 1/(2**0.5)
             n = []
 
-            for i in range(0,s,self.max_seq_len):
-                tmp = torch.arange(i,self.max_seq_len+i, device = x.device)
+            for i in range(s//self.max_seq_len):
+                tmp = torch.arange(self.max_seq_len, device = x.device)
                 n.append(repeat(self.emb(tmp),'n d -> b n d',b=x.size(0)) * multiplier)
                 multiplier *= (2**0.5)
             else:
-                tmp = torch.arange(i+self.max_seq_len,s-1, device = x.device)
+                tmp = torch.arange(s%self.max_seq_len, device = x.device)
                 n.append(repeat(self.emb(tmp),'n d -> b n d',b=x.size(0)) * multiplier)
 
             tmp = torch.cat(n,dim=1)
@@ -867,11 +868,12 @@ class Attention(nn.Module):
 
         self.attn_to_self = None
         if attend_to_self:
-            self.to_q_self = nn.Linear(1, dim_head)
-            self.to_k_self = nn.Linear(1, dim_head)
-            self.to_v_self = nn.Linear(1, dim_head)
-            self.to_out_self = nn.Linear(dim_head, 1)
-            self.attn_to_self = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+            self_head_dim = 1
+            self.to_q_self = nn.Linear(1, self_head_dim)
+            self.to_k_self = nn.Linear(1, self_head_dim)
+            self.to_v_self = nn.Linear(1, self_head_dim)
+            self.to_out_self = nn.Linear(self_head_dim, 1)
+            self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=dim//8)
 
         self.num_mem_kv = num_mem_kv
         num_prev_state = num_mem_kv if num_prev_state == None else num_prev_state
@@ -910,7 +912,19 @@ class Attention(nn.Module):
 
         tmp_k,tmp_v = k,v
 
+        if self.attn_to_self != None:
+            org_shape = q.shape
+            q = rearrange(q, 'b n d -> b 1 (n d) 1')
+            q_ = self.to_q_self(q)
+            k_ = self.to_k_self(q)
+            v_ = self.to_v_self(q)
+            q = ckpt(self.attn_to_self,q_,k_,v_)
+            q = self.to_out_self(q)
+            q = rearrange(q, 'b 1 x 1 -> b x').reshape(org_shape)
+            del(q_,k_,v_)
+
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+
         (q, lq), (k, lk), (v, lv) = map(lambda t: (t[:, :gh], t[:, gh:]), (q, k, v))
 
         attn_outs = []
@@ -953,15 +967,6 @@ class Attention(nn.Module):
             prev_state = ckpt(self.prev_state_attn,prev_state,out,self.out(out))
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((mem_k.size(1),-1,mem_k.size(-1)))
 
-        if self.attn_to_self != None:
-            org_shape = out.shape
-            out = rearrange(out, 'b h n d -> (b h n) 1 d 1')
-            q = self.to_q_self(out)
-            k = self.to_k_self(out)
-            v = self.to_v_self(out)
-            out = ckpt(self.attn_to_self,q,k,v)
-            out = self.to_out_self(out)
-            out = rearrange(out, 'x 1 d 1 -> x d').reshape(org_shape)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         out =  self.to_out(out)
