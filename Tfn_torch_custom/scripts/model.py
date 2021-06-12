@@ -319,7 +319,8 @@ class TransformerBlock(Module):
                                         rotary_pos_emb=True,
                                         fixed_emb=fixed_emb,
                                         causal=causal,
-                                        nystrom=nystrom,),
+                                        nystrom=nystrom,
+                                        attend_to_self=attend_to_self),
                 'self_2':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
@@ -328,8 +329,7 @@ class TransformerBlock(Module):
                                         rotary_pos_emb=True,
                                         fixed_emb=fixed_emb,
                                         causal=causal,
-                                        nystrom=nystrom,
-                                        attend_to_self=attend_to_self),
+                                        nystrom=nystrom,),
                 'cross_1':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
@@ -356,27 +356,7 @@ class TransformerBlock(Module):
         self.decoder = decoder
 
         if decoder:
-            self.ffd2 = copy.deepcopy(self.ffd1)
-
-            self.pkm2 = copy.deepcopy(self.pkm1)
-        
-            self_attn_context = ET_Encoder_Block(d_model,
-                                num_heads=nhead,
-                                attn=Attention(d_model,
-                                                    heads=nhead,
-                                                    dim_head=d_model//nhead,
-                                                    num_mem_kv=mem_kv,
-                                                    local_heads=local_heads,
-                                                    rotary_pos_emb=True,
-                                                    fixed_emb=fixed_emb,
-                                                    causal=causal,
-                                                    nystrom=nystrom
-                                                ),
-                                pkm=copy.deepcopy(self.pkm2)
-                                )
-
-            self.self_attn_context = GRUGating(d_model,self_attn_context)
-        
+            self.ffd2 = GRUGating(d_model,copy.deepcopy(self.ffd1))
 
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
@@ -394,11 +374,7 @@ class TransformerBlock(Module):
         if self.decoder:
             #context = self.norm2(context)
             #context = Positional_Encoding(context)
-            if self.pkm2 != None:
-                context_ = ckpt(self.ffd2,context) + ckpt(self.pkm2,context)
-            else:
-                context_ = ckpt(self.ffd2,context)
-            context_ = ckpt(self.self_attn_context,context,context_)
+            context = ckpt(self.ffd2,context)
 
         output = ckpt(self.fno,output)
 
