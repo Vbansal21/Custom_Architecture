@@ -811,13 +811,13 @@ class Attention(nn.Module):
         local_heads = 0,
         local_window_size = 256,
         nystromer_landmarks = None,
-        nb_features = None,
+        nb_features = 512,
         feature_redraw_interval = 1024,
         generalized_attention = False,
-        kernel_fn = nn.ReLU(),
+        kernel_fn = nn.GELU(),
         dropout = 0.25,
         no_projection = False,
-        qkv_bias = False,
+        qkv_bias = True,
         attn_out_bias = True,
         max_seq_len = 2**17,
         rotary_pos_emb = False,
@@ -839,7 +839,7 @@ class Attention(nn.Module):
         dim_head = default(dim_head, dim // heads)
         inner_dim = dim_head * heads
         nystromer_landmarks = default(nystromer_landmarks,local_window_size)
-        if nystrom and causal:
+        if nystrom:
             self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head,heads=heads,num_landmarks=nystromer_landmarks)
         else:
             self.fast_attention = FastAttention(dim_head, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
@@ -868,12 +868,15 @@ class Attention(nn.Module):
 
         self.attn_to_self = None
         if attend_to_self:
-            self_head_dim = 1
+            self_head_dim = 2
             self.to_q_self = nn.Linear(1, self_head_dim)
             self.to_k_self = nn.Linear(1, self_head_dim)
             self.to_v_self = nn.Linear(1, self_head_dim)
             self.to_out_self = nn.Linear(self_head_dim, 1)
-            self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=dim//8)
+            if nystrom:
+                self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=dim//8)
+            else:
+                self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
         self.num_mem_kv = num_mem_kv
         num_prev_state = num_mem_kv if num_prev_state == None else num_prev_state
