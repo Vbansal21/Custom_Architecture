@@ -262,7 +262,8 @@ class TransformerBlock(Module):
         if hop_dim==None:
             hop_dim = d_model//4
 
-        pkm_heads = (nhead * pkm_dims) // d_model
+        pkm_heads = max((nhead * pkm_dims) // d_model,1)
+        hop_heads = max((nhead * hop_dim) // d_model,1)
 
         self.pkm1 = nn.Sequential(
             nn.Linear(d_model,pkm_dims),
@@ -288,10 +289,10 @@ class TransformerBlock(Module):
                                     nn.Linear(d_model,hop_dim),
                                     HopfieldLayer(
                                                 input_size=hop_dim,
-                                                num_heads=nhead,
-                                                #pattern_size=2**8,
+                                                num_heads=hop_heads,
+                                                pattern_size=hop_dim,
                                                 dropout=dropout_hopfield,
-                                                quantity=2**8,
+                                                quantity=hop_dim,
                                             ),
                                     nn.Linear(hop_dim,d_model)
                                     )

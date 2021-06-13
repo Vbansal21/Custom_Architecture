@@ -94,7 +94,7 @@ def softmax_kernel(data, *, projection_matrix, is_query, normalize_data=True, ep
 
     return data_dash.type_as(data)
 
-def generalized_kernel(data, *, projection_matrix, kernel_fn = nn.ReLU(), kernel_epsilon = 0.001, normalize_data = True, device = None):
+def generalized_kernel(data, *, projection_matrix, kernel_fn = nn.Sigmoid(), kernel_epsilon = 1e-6, normalize_data = True, device = None):
     b, h, *_ = data.shape
 
     data_normalizer = (data.shape[-1] ** -0.25) if normalize_data else 1.
@@ -209,7 +209,7 @@ def Positional_Encoding(x):
     return x + pe[:]
 
 class FastAttention(nn.Module):
-    def __init__(self, dim_heads, nb_features = None, ortho_scaling = 0, causal = False, generalized_attention = False, kernel_fn = nn.ReLU(), no_projection = False):
+    def __init__(self, dim_heads, nb_features = None, ortho_scaling = 0, causal = False, generalized_attention = True, kernel_fn = nn.Sigmoid(), no_projection = False):
         super().__init__()
         nb_features = default(nb_features, int(dim_heads * math.log(dim_heads)))
 
@@ -813,8 +813,8 @@ class Attention(nn.Module):
         nystromer_landmarks = None,
         nb_features = 512,
         feature_redraw_interval = 1024,
-        generalized_attention = False,
-        kernel_fn = nn.GELU(),
+        generalized_attention = True,
+        kernel_fn = nn.Sigmoid(),
         dropout = 0.25,
         no_projection = False,
         qkv_bias = True,
@@ -873,13 +873,10 @@ class Attention(nn.Module):
             self.to_k_self = nn.Linear(1, self_head_dim)
             self.to_v_self = nn.Linear(1, self_head_dim)
             self.to_out_self = nn.Linear(self_head_dim, 1)
-            if nystrom:
-                self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=dim//8)
-            else:
-                self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+            self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
         self.num_mem_kv = num_mem_kv
-        num_prev_state = num_mem_kv if num_prev_state == None else num_prev_state
+        num_prev_state = default(num_mem_kv,num_prev_state)
         if num_mem_kv > 0:
             self.mem_k = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
             self.mem_v = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
@@ -917,13 +914,13 @@ class Attention(nn.Module):
 
         if self.attn_to_self != None:
             org_shape = q.shape
-            q = rearrange(q, 'b n d -> b 1 (n d) 1')
+            q = rearrange(q, 'b n d -> b n d 1')
             q_ = self.to_q_self(q)
             k_ = self.to_k_self(q)
             v_ = self.to_v_self(q)
             q = ckpt(self.attn_to_self,q_,k_,v_)
             q = self.to_out_self(q)
-            q = rearrange(q, 'b 1 x 1 -> b x').reshape(org_shape)
+            q = rearrange(q, 'b n d 1 -> b n d').reshape(org_shape)
             del(q_,k_,v_)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))

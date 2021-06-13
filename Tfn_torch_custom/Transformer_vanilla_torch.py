@@ -76,15 +76,16 @@ mem_tokens = emsize*2
 bptt = (1024*8+mem_tokens) - mem_tokens
 seq_scale_down = emsize
 max_seq_len = max(2**15,2**17 // seq_scale_down)
-fno_layers = 8
+fno_layers = 4
 modes = 8
 width = 8
 causal = False
 nystrom = False
 attend_to_self = True
-feature_redraw_interval = emsize
+feature_redraw_interval = nhead*2
 prev_state_len = mem_tokens*2
-local_heads = min(1,nhead)
+local_heads = 1
+local_heads = min(local_heads,nhead)
 
 discriminator_enabled = False
 progressive_generation = True
@@ -643,7 +644,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         del(data,targets,outputs,losses)
         torch.cuda.empty_cache()
 
-        if (batch % save_intermediate_intervel == 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
+        if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
             inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 
             model.eval()
