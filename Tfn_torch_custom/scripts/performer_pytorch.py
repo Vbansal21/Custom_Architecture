@@ -412,6 +412,7 @@ class NystromAttention(nn.Module):
         num_landmarks = 256,
         pinv_iterations = 6,
         residual = True,
+        context = False,
         residual_conv_kernel = 33,
         eps = 1e-8,
         dropout = 0.
@@ -435,6 +436,7 @@ class NystromAttention(nn.Module):
         """
 
         self.residual = residual
+        self.context = context
         if residual:
             kernel_size = residual_conv_kernel
             padding = residual_conv_kernel // 2
@@ -443,13 +445,15 @@ class NystromAttention(nn.Module):
     def forward(self, q,k,v, mask = None, return_attn = False):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
 
+        q_shape = q.shape
+
         # pad so that sequence can be evenly divided into m landmarks
 
         remainder = n % m
-        if remainder > 0:
+        if bool(q.size(-2)%m > 0) or bool(k.size(-2)%m > 0):
             padding = m - (n % m)
             #x = F.pad(x, (0, 0, padding, 0), value = 0)
-            q,k,v = map(lambda x: F.pad(x, (0, 0, padding, 0), value = 0), (q, k, v))
+            q,k,v = map(lambda x: F.pad(x, (0, 0, (m - (x.size(-2) % m)), 0), value = 0), (q, k, v))
 
             if exists(mask):
                 mask = F.pad(mask, (padding, 0), value = False)
@@ -471,8 +475,8 @@ class NystromAttention(nn.Module):
 
         l = ceil(n / m)
         landmark_einops_eq = '... (n l) d -> ... n d'
-        q_landmarks = reduce(q, landmark_einops_eq, 'sum', l = l)
-        k_landmarks = reduce(k, landmark_einops_eq, 'sum', l = l)
+        q_landmarks = reduce(q, landmark_einops_eq, 'sum', l = ceil(q.size(-2) / m))
+        k_landmarks = reduce(k, landmark_einops_eq, 'sum', l = ceil(k.size(-2) / m))
 
         # calculate landmark mask, and also get sum of non-masked elements in preparation for masked mean
 
@@ -512,13 +516,14 @@ class NystromAttention(nn.Module):
         # add depth-wise conv residual of values
 
         if self.residual:
-            out += self.res_conv(v)
+            context = True if q.size(-2) != k.size(-2) else self.context
+            out += self.res_conv(v if not context else q)
 
         # merge and combine heads
 
         #out = rearrange(out, 'b h n d -> b n (h d)', h = h)
         #out = self.to_out(out)
-        out = out[:, -n:]
+        out = out[:, :, -n:].reshape(q_shape)
 
         if return_attn:
             attn = attn1 @ attn2_inv @ attn3
