@@ -418,6 +418,7 @@ class TransformerModule(ModuleList):
                     local_heads=2,
                     attend_to_self=True,
                     prev_state_self_num=32,
+                    attend_to_inp=True,
                     ):
         super(TransformerModule, self).__init__()
 
@@ -438,24 +439,28 @@ class TransformerModule(ModuleList):
             block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self)
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         
-        self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len)
+        self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
         block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
-        self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=fno_layers,modes=modes,width=width,mem_kv=16,pkm_dims=d_model//8)
+        self.attend_to_inp = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self) if attend_to_inp else None
 
-        self.attend_to_inp = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self)
+        self.prev_state_exists = False
 
-        self.register_buffer(
-            name='prev_state',
-            tensor=torch.zeros((1,prev_state_len,d_model))
-        )
+        if prev_state_len > 0:
+            self.prev_state_exists = True
+            self.register_buffer(
+                name='prev_state',
+                tensor=torch.zeros((1,prev_state_len,d_model))
+            )
 
-        self.prev_state_update = Attention(d_model,
-                                            heads=nhead,
-                                            dim_head=d_model//nhead,
-                                            num_mem_kv=0,
-                                            rotary_pos_emb=False)
+            self.prev_state_update = Attention(d_model,
+                                                heads=nhead,
+                                                dim_head=d_model//nhead,
+                                                num_mem_kv=0,
+                                                rotary_pos_emb=False)
+
+            self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=fno_layers,modes=modes,width=width,mem_kv=16,pkm_dims=d_model//8)
 
         self.d_model = d_model
         self.num_layers = num_layers
@@ -484,13 +489,14 @@ class TransformerModule(ModuleList):
         output = src
         ctxt = context
 
-        prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
-        prev_state = ckpt(self.prev_state_update,prev_state,output/output.size(-1))
-        if ctxt != None:
-            prev_state = ckpt(self.prev_state_update,prev_state,ctxt/ctxt.size(-1))
+        if self.prev_state_exists:
+            prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
+            prev_state = ckpt(self.prev_state_update,prev_state,output/output.size(-1))
+            if ctxt != None:
+                prev_state = ckpt(self.prev_state_update,prev_state,ctxt/ctxt.size(-1))
 
-        for _ in range(self.prev_state_self_num):
-            prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
+            for _ in range(self.prev_state_self_num):
+                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
             
         if self.enable_encoder:
             for enc in self.encoder:
@@ -502,35 +508,38 @@ class TransformerModule(ModuleList):
             for dec in self.decoder:
                 output = ckpt(dec,output)
 
-        output = ckpt(self.prev_state_attend,output,prev_state)
+        if self.prev_state_exists:
+            output = ckpt(self.prev_state_attend,output,prev_state)
 
-        out = self.absolutepositionalembedding(output) if len(self.deberta_layers)!=0 else output
-
-        if self.full_block_repeat:
-            for _ in range(self.repeated_deberta_layers+1):
-                for enc in self.deberta_layers:
-                    out = ckpt(enc,out,output)
-            else:
-                if self.deberta_layers!=None:
-                    output = out
-        else:
-            for enc in self.deberta_layers:
+        if self.deberta_layers!=None:
+            out = self.absolutepositionalembedding(output)
+            if self.full_block_repeat:
                 for _ in range(self.repeated_deberta_layers+1):
-                    out = ckpt(enc,out,output)
+                    for enc in self.deberta_layers:
+                        out = ckpt(enc,out,output)
+                else:
+                    if self.deberta_layers!=None:
+                        output = out
             else:
-                if self.deberta_layers!=None:
-                    output = out
+                for enc in self.deberta_layers:
+                    for _ in range(self.repeated_deberta_layers+1):
+                        out = ckpt(enc,out,output)
+                else:
+                    if self.deberta_layers!=None:
+                        output = out
 
-        output = ckpt(self.attend_to_inp,output,src)
-        if context != None:
-            output = ckpt(self.attend_to_inp,output,context)
+        if self.attend_to_inp != None:
+            output = ckpt(self.attend_to_inp,output,src)
+            if context != None:
+                output = ckpt(self.attend_to_inp,output,context)
 
-        prev_state = ckpt(self.prev_state_update,prev_state,output)
-        if ctxt != None:
-            prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
+        if self.prev_state_exists:
+            prev_state = ckpt(self.prev_state_update,prev_state,output)
+            if ctxt != None:
+                prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
 
-        self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
-        
+            self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
+            
         if context != None:
             return output,ctxt
         else:
@@ -568,6 +577,7 @@ class TransformerModel(Module):
                     fno_layers=4,
                     modes=None,
                     width=None,
+                    attend_to_inp=True,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
@@ -595,9 +605,10 @@ class TransformerModel(Module):
                                                         modes=modes,
                                                         width=width,
                                                         prev_state_self_num=prev_state_self_num,
+                                                        attend_to_inp=attend_to_inp,
                                                         )
         
-        self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)
+        self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx) if ntoken != None else Identity()
 
         
         self.ninp = ninp
@@ -605,8 +616,8 @@ class TransformerModel(Module):
         
         self.decoder = nn.Sequential(
             nn.Linear(ninp,ntoken),
-            nn.LeakyReLU(0.2),
-            )
+            #nn.Sigmoid(),
+            ) if ntoken != None else Identity()
 
         self.ffd1 = GRUGating(ninp,ET_ffd(dim=ninp,layers=1,kernal_size=1,mult=4))
         self.ffd2 = copy.deepcopy(self.ffd1)
@@ -633,13 +644,40 @@ class TransformerModel(Module):
 
         self.discriminator_enabled = discriminator
         if discriminator:
-            self.d_ffd = copy.deepcopy(self.ffd1)
-            self.d_decoder = nn.Sequential(
+            d_ffd = nn.Sequential(
                 ET_ffd(dim=ninp,layers=1,kernal_size=1,mult=4),
-                nn.Linear(ninp,2),
-                nn.LeakyReLU(0.01),
+                conformer(ninp,causal=True,dropout=0),
+                copy.deepcopy(self.ffd1),
             )
-        
+            d_decoder = nn.Sequential(
+                nn.Linear(ninp,2),
+                #nn.LeakyReLU(0.05),
+            )
+            ### Distinct Layer for discriminator required, else OOM
+            attn = TransformerModule(nhead, 
+                                            nhid, 
+                                            nlayers+deberta_layers, 
+                                            ninp,
+                                            dropout,
+                                            enable_encoder=encoder_decoder,
+                                            deberta_layers=0,
+                                            repeated_deberta_layers=0,
+                                            max_len=max_seq_len,
+                                            full_block_repeat=full_block_repeat,
+                                            causal=causal,
+                                            prev_state_len=0,
+                                            nystrom=nystrom,
+                                            local_heads=local_heads,
+                                            attend_to_self=False,
+                                            fno_layers=fno_layers,
+                                            modes=modes,
+                                            width=width,
+                                            prev_state_self_num=1,
+                                            attend_to_inp=False,
+                                            )
+            self.discriminator = nn.ModuleList([d_ffd,attn,d_decoder])
+        #INTEGRATED DISCRIMINATOR: DEPRECATED
+
         self.alt_mem = None
         self.alt_mem_with_primary_mem = False
 
@@ -1132,10 +1170,10 @@ class TransformerModel(Module):
         loss_d = 0.0
 
         if self.discriminator_enabled:
-            acc = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
+            acc_gen = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
             acc_d = ((torch.argmax(outputs['out_d_real'],dim=-1)) == labels['real_label']).sum().item()/outputs['out_d_real'].size(1)
             acc_d += ((torch.argmax(outputs['out_gan'],dim=-1)) == labels['fake_label']).sum().item()/outputs['out_gan'].size(1)
-            acc_gen = ((torch.argmax(outputs['out_gan'],dim=-1)) == labels['real_label_gen']).sum().item()/outputs['out_gan'].size(1)
+            acc = ((torch.argmax(outputs['out_gan'],dim=-1)) == labels['real_label_gen']).sum().item()/outputs['out_gan'].size(1)
             acc += acc_gen
 
             total_acc += acc/2
@@ -1169,6 +1207,7 @@ class TransformerModel(Module):
                     return_mem: bool = True,
                     generator: bool = True,
                     discriminator: bool = False,
+                    return_logits: bool = False,
                 ) -> Tuple[Tensor,Optional[Tensor],Optional[Tensor]]:
 
         start_time = time.time()
@@ -1194,93 +1233,120 @@ class TransformerModel(Module):
             context = context * math.sqrt(self.ninp)
             context = ckpt(self.ffd3,context)
 
-        if generator or not self.discriminator_enabled:
+        if mem != None and self.mem_exist:
+            src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+        elif self.mem_exist:
+            src = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
 
-            if mem != None and self.mem_exist:
-                src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-            elif self.mem_exist:
-                src = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-
-            if self.encoder_decoder:
-                if context_mem != None and self.context_mem_exist:
-                    context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
-                elif self.context_mem_exist:
-                    context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+        if self.encoder_decoder:
+            if context_mem != None and self.context_mem_exist:
+                context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+            elif self.context_mem_exist:
+                context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
 
 
-            s = src.size(1)
+        s = src.size(1)
+        
+        if context != None:
+            s_c = context.size(1)
+
+        src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
+
+        src = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=src.size(0)).to(self.device),src,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
+
+        src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
+
+        output = Positional_Encoding(src)
+
+        if self.encoder_decoder:
+            context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
+            context = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=context.size(0)).to(self.device),context,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
+
+            context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
+
+            context = Positional_Encoding(context)
             
-            if context != None:
-                s_c = context.size(1)
+        output = output.contiguous()
+        if self.encoder_decoder:
+            context = context.contiguous()
 
-            src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
-
-            src = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=src.size(0)).to(self.device),src,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
-
-            src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
-
-            output = Positional_Encoding(src)
-
-            if self.encoder_decoder:
-                context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
-                context = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=context.size(0)).to(self.device),context,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
-
-                context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
-
-                context = Positional_Encoding(context)
-                
-            output = output.contiguous()
-            if self.encoder_decoder:
-                context = context.contiguous()
+        if generator or not self.discriminator_enabled:
 
             if context == None:
                 output = ckpt(self.transformer_block,output)
             else:
                 output,context = ckpt(self.transformer_block,output,context)
 
+        if discriminator and not generator:
+            output = src
+
+        if discriminator:
+
+            output = ckpt(self.discriminator[0],output)
+
+            if context == None:
+                output = ckpt(self.discriminator[1],output)
+            else:
+                context = ckpt(self.discriminator[0],context)
+                output,context = ckpt(self.discriminator[1],output,context)
+
             output = ckpt(self.scale_up_fno,output)
             output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
             output = output[:,:s]
 
-            mem = mem if type(mem) == torch.tensor else None
-            if mem != None:
+            if type(mem) != None or self.mem_exist:
                 mem = output[:,:output.size(1)-s_]
                 mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.mem.shape) / b
+                output = output[:,output.size(1)-s_:]
             
             if context != None:
                 context = ckpt(self.scale_up_fno,context)
                 context = ckpt(self.scale_up_conv,context.transpose(-1,-2)).transpose(-1,-2)
                 context = context[:,:s_c]
 
-                context_mem = context_mem if type(context_mem) == torch.tensor else None
-                if context_mem != None:
-                    context_mem = context[:,:context.size(1)-s_c]
+                if type(context_mem) != None or self.context_mem_exist:
+                    context_mem = context[:,:context.size(1)-s_c_]
                     context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.context_mem.shape) / b
+                    context = context[:,context.size(1)-s_c_:]
 
 
-            output = output[:,output.size(1)-s_:] if type(mem) != None or self.mem_exist else output
-
-        if discriminator and not generator:
-            output = src
-
-        if discriminator:
-            output = ckpt(self.d_ffd,output)
-
-            if context == None:
-                output = ckpt(self.transformer_block,output)
-            else:
-                context = ckpt(self.d_ffd,context)
-                output,context = ckpt(self.transformer_block,output,context)
-
-            output = ckpt(self.d_decoder,output)
+            out = ckpt(self.discriminator[2],output)
         elif not discriminator or generator or not self.discriminator_enabled:
+                
+            
+            output = ckpt(self.scale_up_fno,output)
+            output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
+            output = output[:,:s]
+
+            if type(mem) != None or self.mem_exist:
+                mem = output[:,:output.size(1)-s_]
+                mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.mem.shape) / b
+                output = output[:,output.size(1)-s_:]
+            
+            if context != None:
+                context = ckpt(self.scale_up_fno,context)
+                context = ckpt(self.scale_up_conv,context.transpose(-1,-2)).transpose(-1,-2)
+                context = context[:,:s_c]
+
+                if type(context_mem) != None or self.context_mem_exist:
+                    context_mem = context[:,:context.size(1)-s_c_]
+                    context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.context_mem.shape) / b
+                    context = context[:,context.size(1)-s_c_:]
+
+            
             output = ckpt(self.ffd2,output)
-            output = ckpt(self.decoder,output)
+            out = ckpt(self.decoder,output)
             
             self.time_[0] += time.time()-start_time
             self.time_[1] += 1
 
-        if return_mem:
-            return output, mem, context_mem
+        if not return_logits:
+            if return_mem:
+                return out, mem, context_mem
+            else:
+                return out
         else:
-            return output
+            if return_mem:
+                return out, mem, context_mem, output
+            else:
+                return out, output

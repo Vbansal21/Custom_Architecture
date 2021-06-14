@@ -63,7 +63,7 @@ def batchify(data, bsz,dim=0):
 batch_size = 1
 eval_batch_size = batch_size
 
-ntokens = tokenizer.vocab_size
+ntokens = tokenizer.vocab_size # None
 emsize = 256
 nhid = emsize * 4
 nlayers = 8
@@ -75,20 +75,21 @@ dropout = (math.pi*2/10)
 mem_tokens = emsize*2
 bptt = (1024*8+mem_tokens) - mem_tokens
 seq_scale_down = emsize
-max_seq_len = max(2**15,2**17 // seq_scale_down)
+max_seq_len = max(2**14,2**17 // seq_scale_down)
 fno_layers = 4
 modes = 8
 width = 8
 causal = False
 nystrom = False
 attend_to_self = True
+attend_to_inp = True
 feature_redraw_interval = nhead*2
 prev_state_len = mem_tokens*2
 prev_state_self_num = 48
-local_heads = 1
+local_heads = 2
 local_heads = min(local_heads,nhead)
 
-discriminator_enabled = False
+discriminator_enabled = False #INTEGRATED DISCRIMINATOR: DEPRECATED
 progressive_generation = True
 use_deepspeed = False
 
@@ -307,6 +308,7 @@ if use_deepspeed:
                                         prev_state_len=prev_state_len,
                                         prev_state_self_num=prev_state_self_num,
                                         local_heads=local_heads,
+                                        attend_to_inp=attend_to_inp,
                                 ).half()
 else:
     model = TransformerModel(ntokens, 
@@ -333,6 +335,7 @@ else:
                                     prev_state_len=prev_state_len,
                                     prev_state_self_num=prev_state_self_num,
                                     local_heads=local_heads,
+                                    attend_to_inp=attend_to_inp,
                             ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
@@ -357,23 +360,41 @@ criterion = nn.CrossEntropyLoss()
 lr = 1
 
 if not use_deepspeed:
-    optimizer = torch.optim.SGD if use_sgd else torch.optim.Adadelta
-    if discriminator_enabled:
-        for p in model.discriminator.parameters():
-            p.requires_grad_(False)
-        optimizer = optimizer(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-        for p in model.parameters():
-            p.requires_grad_(False)
-        for p in model.discriminator.parameters():
-            p.requires_grad_(True)
-        optimizer_disc = optimizer(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-        for p in model.parameters():
-            p.requires_grad_(True)
+    if use_sgd:
+        if discriminator_enabled:
+            for p in model.discriminator.parameters():
+                p.requires_grad_(False)
+            optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+            for p in model.parameters():
+                p.requires_grad_(False)
+            for p in model.discriminator.parameters():
+                p.requires_grad_(True)
+            optimizer_disc = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+            for p in model.parameters():
+                p.requires_grad_(True)
+        else:
+            for p in model.parameters():
+                p.requires_grad_(True)
+            optimizer = torch.optim.SGD(model.parameters(),lr=lr)
+            optimizer_disc = None
     else:
-        for p in model.parameters():
-            p.requires_grad_(True)
-        optimizer = optimizer(model.parameters(),lr=lr)
-        optimizer_disc = None
+        if discriminator_enabled:
+            for p in model.discriminator.parameters():
+                p.requires_grad_(False)
+            optimizer = torch.optim.Adadelta(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+            for p in model.parameters():
+                p.requires_grad_(False)
+            for p in model.discriminator.parameters():
+                p.requires_grad_(True)
+            optimizer_disc = torch.optim.Adadelta(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+            for p in model.parameters():
+                p.requires_grad_(True)
+        else:
+            for p in model.parameters():
+                p.requires_grad_(True)
+            optimizer = torch.optim.Adadelta(model.parameters(),lr=lr)
+            optimizer_disc = None
+
 else:
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
 
@@ -462,6 +483,8 @@ wandb.init(project=project_name,config={
     "feature_redraw_intervel":feature_redraw_interval,
     "prev_state_len":prev_state_len,
     "local_heads":local_heads,
+    "attend_to_inp":attend_to_inp,
+    "prev_state_self_num":prev_state_self_num,
 }
 )
 
@@ -634,6 +657,9 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
 
         outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt)
 
+        tmp_acc = total_acc
+        tmp_loss = total_loss
+
         try:
             ppl = math.exp(losses['loss'])
         except:
@@ -759,9 +785,11 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             wandb.log(
                 {
                     "Loss Generator":loss_g,
+                    "Total Loss Generator":tmp_loss,
                     "Loss Discriminator":loss_d,
                     "step":step,
                     "Accuracy Generator(%)":acc*100/2,
+                    "Total Accuracy Generator(%)":tmp_acc*100/2,
                     "Accuracy Discriminator(%)":acc_d*100/2,
                     "epoch":epoch,
                     "batch":batch,

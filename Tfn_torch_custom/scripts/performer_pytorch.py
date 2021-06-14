@@ -874,7 +874,7 @@ class Attention(nn.Module):
         self.attn_to_self = None
         if attend_to_self:
             self_head_dim = 1
-            self.features = 7
+            self.features = 3
             scale = 2
             self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,self.features,groups=inner_dim)
             self.to_q_self = nn.Linear(1, self_head_dim)
