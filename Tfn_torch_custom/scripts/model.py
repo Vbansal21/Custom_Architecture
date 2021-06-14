@@ -416,7 +416,9 @@ class TransformerModule(ModuleList):
                     causal=True,
                     nystrom=True,
                     local_heads=2,
-                    attend_to_self=True):
+                    attend_to_self=True,
+                    prev_state_self_num=32,
+                    ):
         super(TransformerModule, self).__init__()
 
         self.full_block_repeat = full_block_repeat
@@ -455,8 +457,10 @@ class TransformerModule(ModuleList):
                                             num_mem_kv=0,
                                             rotary_pos_emb=False)
 
-        d_model = d_model
+        self.d_model = d_model
         self.num_layers = num_layers
+        self.num_deberta_layers = deberta_layers
+        self.prev_state_self_num = prev_state_self_num
         
     def pretrained_layer_multiplier(self,num=1,deb_num=1):
         self.num_layers *= num
@@ -485,22 +489,18 @@ class TransformerModule(ModuleList):
         if ctxt != None:
             prev_state = ckpt(self.prev_state_update,prev_state,ctxt/ctxt.size(-1))
 
+        for _ in range(self.prev_state_self_num):
+            prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
+            
         if self.enable_encoder:
             for enc in self.encoder:
-                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                 ctxt = ckpt(enc,ctxt)
-                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
             for i in range(self.num_layers):
-                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                 output = ckpt(self.decoder_self[i],output)
-                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                 output = ckpt(self.decoder_cross[i],output,ctxt)
-                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
         else:
             for dec in self.decoder:
-                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                 output = ckpt(dec,output)
-                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
 
         output = ckpt(self.prev_state_attend,output,prev_state)
 
@@ -509,27 +509,17 @@ class TransformerModule(ModuleList):
         if self.full_block_repeat:
             for _ in range(self.repeated_deberta_layers+1):
                 for enc in self.deberta_layers:
-                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                     out = ckpt(enc,out,output)
-                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
             else:
                 if self.deberta_layers!=None:
-                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                     output = out
-                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
         else:
             for enc in self.deberta_layers:
                 for _ in range(self.repeated_deberta_layers+1):
-                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                     out = ckpt(enc,out,output)
-                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
             else:
                 if self.deberta_layers!=None:
-                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
                     output = out
-                    prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
-
-        output = ckpt(self.prev_state_attend,output,prev_state)
 
         output = ckpt(self.attend_to_inp,output,src)
         if context != None:
@@ -538,7 +528,7 @@ class TransformerModule(ModuleList):
         prev_state = ckpt(self.prev_state_update,prev_state,output)
         if ctxt != None:
             prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
-            
+
         self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
         
         if context != None:
@@ -571,6 +561,7 @@ class TransformerModel(Module):
                     full_block_repeat: bool = False,
                     causal: bool = True,
                     prev_state_len: int = 8192,
+                    prev_state_self_num=32,
                     nystrom: bool = True,
                     local_heads: int = 1,
                     attend_to_self=True,
@@ -603,6 +594,7 @@ class TransformerModel(Module):
                                                         fno_layers=fno_layers,
                                                         modes=modes,
                                                         width=width,
+                                                        prev_state_self_num=prev_state_self_num,
                                                         )
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx)

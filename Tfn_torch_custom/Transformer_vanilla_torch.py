@@ -84,6 +84,7 @@ nystrom = False
 attend_to_self = True
 feature_redraw_interval = nhead*2
 prev_state_len = mem_tokens*2
+prev_state_self_num = 48
 local_heads = 1
 local_heads = min(local_heads,nhead)
 
@@ -304,6 +305,7 @@ if use_deepspeed:
                                         width=width,
                                         feature_redraw_interval=feature_redraw_interval,
                                         prev_state_len=prev_state_len,
+                                        prev_state_self_num=prev_state_self_num,
                                         local_heads=local_heads,
                                 ).half()
 else:
@@ -329,6 +331,7 @@ else:
                                     width=width,
                                     feature_redraw_interval=feature_redraw_interval,
                                     prev_state_len=prev_state_len,
+                                    prev_state_self_num=prev_state_self_num,
                                     local_heads=local_heads,
                             ).to(device)
 
