@@ -874,10 +874,13 @@ class Attention(nn.Module):
         self.attn_to_self = None
         if attend_to_self:
             self_head_dim = 2
+            self.features = 3 #PERFORMANCE-IMPACT := VERY-HIGH
+            self.feat_prep = nn.Conv1d(inner_dim,inner_dim*self.features,self.features,groups=inner_dim)
             self.to_q_self = nn.Linear(1, self_head_dim)
             self.to_k_self = nn.Linear(1, self_head_dim)
             self.to_v_self = nn.Linear(1, self_head_dim)
             self.to_out_self = nn.Linear(self_head_dim, 1)
+            self.project_down = nn.Linear(inner_dim*self.features, inner_dim)
             self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
         self.num_mem_kv = num_mem_kv
@@ -919,14 +922,17 @@ class Attention(nn.Module):
 
         if self.attn_to_self != None:
             org_shape = q.shape
-            q = rearrange(q, 'b n d -> b n d 1')
-            q_ = self.to_q_self(q)
-            k_ = self.to_k_self(q)
-            v_ = self.to_v_self(q)
-            q = ckpt(self.attn_to_self,q_,k_,v_)
-            q = self.to_out_self(q)
-            q = rearrange(q, 'b n d 1 -> b n d').reshape(org_shape)
-            del(q_,k_,v_)
+            self_q = torch.cat((q[:,-self.features//2:],q,q[:,:self.features//2]),dim=-2)
+            self_q = ckpt(self.feat_prep,self_q.transpose(-1,-2)).transpose(-1,-2)
+            self_q = rearrange(self_q, 'b n d -> b n 1 d 1')
+            q_ = self.to_q_self(self_q)
+            k_ = self.to_k_self(self_q)
+            v_ = self.to_v_self(self_q)
+            self_q = ckpt(self.attn_to_self,q_,k_,v_)
+            self_q = self.to_out_self(self_q)
+            self_q = rearrange(self_q, 'b n 1 d 1 -> b n d').reshape(org_shape)
+            q = ckpt(self.project_down,self_q)
+            del(q_,k_,v_,self_q)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
