@@ -442,6 +442,8 @@ class TransformerModule(ModuleList):
         
         self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=fno_layers,modes=modes,width=width,mem_kv=16,pkm_dims=d_model//8)
 
+        self.attend_to_inp = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self)
+
         self.register_buffer(
             name='prev_state',
             tensor=torch.zeros((1,prev_state_len,d_model))
@@ -529,9 +531,14 @@ class TransformerModule(ModuleList):
 
         output = ckpt(self.prev_state_attend,output,prev_state)
 
+        output = ckpt(self.attend_to_inp,output,src)
+        if context != None:
+            output = ckpt(self.attend_to_inp,output,context)
+
         prev_state = ckpt(self.prev_state_update,prev_state,output)
         if ctxt != None:
             prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
+            
         self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
         
         if context != None:

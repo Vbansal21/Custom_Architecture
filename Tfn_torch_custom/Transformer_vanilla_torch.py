@@ -68,7 +68,7 @@ emsize = 256
 nhid = emsize * 4
 nlayers = 8
 deberta_layers = 24
-repeated_deberta_layers = 1
+repeated_deberta_layers = 0
 full_block_repeat = False
 nhead = 16
 dropout = (math.pi*2/10)
@@ -335,6 +335,17 @@ else:
 print("Model Parameters: ",len(model),"\n")
 torch.cuda.empty_cache()
 
+model.eval()
+inp = torch.randint(0,ntokens-1,(1,bptt),dtype=torch.long,device=device)
+if use_deepspeed:
+    with autocast():
+        out,mem,mem_ctxt = model(inp)
+else:
+    out,mem,mem_ctxt = model(inp)
+print(torch.argmax((out.reshape(-1,ntokens)),dim=-1))
+print(model.get_avg_inference_time()," seconds")
+del(out,mem,mem_ctxt,inp)
+
 #print(sum(p.numel() for p in model.parameters()))
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
@@ -415,17 +426,6 @@ train_eval_event = [date_time]
 
 if use_deepspeed:
     model,optimizer,_,scheduler = deepspeed.initialize(model=model,optimizer=optimizer,lr_scheduler=scheduler, config_params=deepspeed_args)
-
-model.eval()
-inp = torch.randint(0,ntokens-1,(1,bptt),dtype=torch.long,device=device)
-if use_deepspeed:
-    with autocast():
-        out,mem,mem_ctxt = model(inp)
-else:
-    out,mem,mem_ctxt = model(inp)
-print(torch.argmax((out.reshape(-1,ntokens)),dim=-1))
-print(model.get_avg_inference_time()," seconds")
-del(out,mem,mem_ctxt,inp)
 
 best_model = model
 
