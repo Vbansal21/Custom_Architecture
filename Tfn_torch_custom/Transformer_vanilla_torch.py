@@ -76,6 +76,7 @@ mem_tokens = emsize*2
 bptt = (1024*8+mem_tokens) - mem_tokens
 seq_scale_down = emsize
 max_seq_len = max(2**14,2**17 // seq_scale_down)
+mlp_layers = nhead
 fno_layers = 4
 modes = 8
 width = 8
@@ -310,6 +311,7 @@ if use_deepspeed:
                                 prev_state_self_num=prev_state_self_num,
                                 local_heads=local_heads,
                                 attend_to_inp=attend_to_inp,
+                                mlp_layers=mlp_layers,
                         ).half()
 else:
     model = TransformerModel(
@@ -338,6 +340,7 @@ else:
                             prev_state_self_num=prev_state_self_num,
                             local_heads=local_heads,
                             attend_to_inp=attend_to_inp,
+                            mlp_layers=mlp_layers,
                     ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
@@ -487,6 +490,7 @@ wandb.init(project=project_name,config={
     "local_heads":local_heads,
     "attend_to_inp":attend_to_inp,
     "prev_state_self_num":prev_state_self_num,
+    "mlp_layers":mlp_layers,
 }
 )
 
