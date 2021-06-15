@@ -221,7 +221,7 @@ except Exception as e:
     torch.save(processed_test_data,"models/data_"+str(vocab_size)+"/"+file+"_test.tar")
     torch.save(processed_val_data,"models/data_"+str(vocab_size)+"/"+file+"_val.tar")
 
-from scripts.model import TransformerModel
+from scripts.model import TransformerModel, Trainer
 torch.cuda.empty_cache()
 
 deepspeed_args = {
@@ -285,58 +285,60 @@ if use_deepspeed:
 
     with deepspeed.zero.Init(mem_efficient_linear=True,remote_device='nvme',config=deepspeed_args,enabled=True):
         #model = PerformerLM(num_tokens=ntokens,max_seq_len=2**17,dim=emsize,depth=nlayers,heads=nhead,causal=True,use_rezero=True,cross_attend=True)
-        model = TransformerModel(ntokens, 
-                                        emsize, 
-                                        nhead, 
-                                        nhid, 
-                                        nlayers, 
-                                        dropout=dropout,
-                                        deberta_layers=deberta_layers,
-                                        repeated_deberta_layers=repeated_deberta_layers,
-                                        mem_token=mem_tokens,
-                                        discriminator=discriminator_enabled,
-                                        seq_scale_down=seq_scale_down,
-                                        max_seq_len=max_seq_len,
-                                        full_block_repeat=full_block_repeat,
-                                        causal=causal,
-                                        nystrom=nystrom,
-                                        attend_to_self=attend_to_self,
-                                        fno_layers=fno_layers,
-                                        modes=modes,
-                                        width=width,
-                                        feature_redraw_interval=feature_redraw_interval,
-                                        prev_state_len=prev_state_len,
-                                        prev_state_self_num=prev_state_self_num,
-                                        local_heads=local_heads,
-                                        attend_to_inp=attend_to_inp,
-                                ).half()
+        model = TransformerModel( 
+                                ninp=emsize, 
+                                nhead=nhead, 
+                                nhid=nhid, 
+                                nlayers=nlayers,
+                                ntoken=ntokens,
+                                dropout=dropout,
+                                deberta_layers=deberta_layers,
+                                repeated_deberta_layers=repeated_deberta_layers,
+                                mem_token=mem_tokens,
+                                discriminator=discriminator_enabled,
+                                seq_scale_down=seq_scale_down,
+                                max_seq_len=max_seq_len,
+                                full_block_repeat=full_block_repeat,
+                                causal=causal,
+                                nystrom=nystrom,
+                                attend_to_self=attend_to_self,
+                                fno_layers=fno_layers,
+                                modes=modes,
+                                width=width,
+                                feature_redraw_interval=feature_redraw_interval,
+                                prev_state_len=prev_state_len,
+                                prev_state_self_num=prev_state_self_num,
+                                local_heads=local_heads,
+                                attend_to_inp=attend_to_inp,
+                        ).half()
 else:
-    model = TransformerModel(ntokens, 
-                                    emsize, 
-                                    nhead, 
-                                    nhid, 
-                                    nlayers, 
-                                    dropout=dropout,
-                                    mem_token=mem_tokens,
-                                    deberta_layers=deberta_layers,
-                                    repeated_deberta_layers=repeated_deberta_layers,
-                                    max_seq_len=max_seq_len,
-                                    discriminator=discriminator_enabled,
-                                    seq_scale_down=seq_scale_down,
-                                    full_block_repeat=full_block_repeat,
-                                    causal=causal,
-                                    device=device,
-                                    nystrom=nystrom,
-                                    attend_to_self=attend_to_self,
-                                    fno_layers=fno_layers,
-                                    modes=modes,
-                                    width=width,
-                                    feature_redraw_interval=feature_redraw_interval,
-                                    prev_state_len=prev_state_len,
-                                    prev_state_self_num=prev_state_self_num,
-                                    local_heads=local_heads,
-                                    attend_to_inp=attend_to_inp,
-                            ).to(device)
+    model = TransformerModel(
+                            ninp=emsize, 
+                            nhead=nhead, 
+                            nhid=nhid, 
+                            nlayers=nlayers, 
+                            ntoken=ntokens, 
+                            dropout=dropout,
+                            mem_token=mem_tokens,
+                            deberta_layers=deberta_layers,
+                            repeated_deberta_layers=repeated_deberta_layers,
+                            max_seq_len=max_seq_len,
+                            discriminator=discriminator_enabled,
+                            seq_scale_down=seq_scale_down,
+                            full_block_repeat=full_block_repeat,
+                            causal=causal,
+                            device=device,
+                            nystrom=nystrom,
+                            attend_to_self=attend_to_self,
+                            fno_layers=fno_layers,
+                            modes=modes,
+                            width=width,
+                            feature_redraw_interval=feature_redraw_interval,
+                            prev_state_len=prev_state_len,
+                            prev_state_self_num=prev_state_self_num,
+                            local_heads=local_heads,
+                            attend_to_inp=attend_to_inp,
+                    ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
 torch.cuda.empty_cache()
@@ -424,11 +426,11 @@ scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_l
 model.tokenzier = tokenizer
 model.vocab = vocab
 model.optimizer = optimizer
-model.optimizer_disc = optimizer_disc
+#model.optimizer_disc = optimizer_disc
 model.scheduler = scheduler
-model.scheduler_disc = scheduler_disc
+#model.scheduler_disc = scheduler_disc
 model.scheduler_lambda = lambda_lr
-model.scheduler_disc_lambda = lambda_lr
+#model.scheduler_disc_lambda = lambda_lr
 
 load_optimizer = True
 load_scheduler = bool(True and load_optimizer)
@@ -655,7 +657,13 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         trainable_index = None
         torch.cuda.empty_cache()
 
-        outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc,_,optimizer,_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,total_acc,total_acc_d,total_loss,total_loss_d,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt)
+        if not discriminator:
+            outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt)
+        else:
+            pass
+
+        total_loss += loss
+        total_acc += acc
 
         tmp_acc = total_acc
         tmp_loss = total_loss
@@ -682,11 +690,11 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             model.tokenzier = tokenizer
             model.vocab = vocab
             model.optimizer = optimizer
-            model.optimizer_disc = optimizer_disc
+            #model.optimizer_disc = optimizer_disc
             model.scheduler = scheduler
-            model.scheduler_disc = scheduler_disc
+            #model.scheduler_disc = scheduler_disc
             model.scheduler_lambda = lambda_lr
-            model.scheduler_disc_lambda = lambda_lr
+            #model.scheduler_disc_lambda = lambda_lr
 
             if discriminator_enabled:
                 torch.save(
@@ -805,7 +813,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         else:
             wandb.log(
                 {
-                    "Loss Generator":loss_g,
+                    "Loss Generator":loss,
                     "step":step,
                     "Accuracy Generator(%)":acc*100/2,
                     "epoch":epoch,
@@ -847,11 +855,11 @@ while True:
     model.tokenzier = tokenizer
     model.vocab = vocab
     model.optimizer = optimizer
-    model.optimizer_disc = optimizer_disc
+    #model.optimizer_disc = optimizer_disc
     model.scheduler = scheduler
-    model.scheduler_disc = scheduler_disc
+    #model.scheduler_disc = scheduler_disc
     model.scheduler_lambda = lambda_lr
-    model.scheduler_disc_lambda = lambda_lr
+    #model.scheduler_disc_lambda = lambda_lr
 
     if discriminator_enabled:
         torch.save(

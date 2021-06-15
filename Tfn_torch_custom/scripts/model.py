@@ -241,6 +241,7 @@ class TransformerBlock(Module):
                      local_heads=0,
                      nystrom=False,
                      attend_to_self=True,
+                     mlp_layers=1,
                 ):
         super(TransformerBlock, self).__init__()
 
@@ -343,11 +344,13 @@ class TransformerBlock(Module):
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
                                         hop_attn=copy.deepcopy(hop_attn),
-                                        rotary_pos_emb=False),
+                                        rotary_pos_emb=False,
+                                        nystrom=nystrom,),
                 'cross_2':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
+                                        nystrom=nystrom,
                                         rotary_pos_emb=False)
             }
 
@@ -359,7 +362,7 @@ class TransformerBlock(Module):
         
         self.attn = GRUGating(d_model,attn_block)
 
-        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=1,seq_len=2**16,window=d_model*2))
+        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,seq_len=2**16,window=d_model*2))
 
         self.decoder = decoder
 
@@ -419,6 +422,7 @@ class TransformerModule(ModuleList):
                     attend_to_self=True,
                     prev_state_self_num=32,
                     attend_to_inp=True,
+                    mlp_layers=1,
                     ):
         super(TransformerModule, self).__init__()
 
@@ -430,20 +434,20 @@ class TransformerModule(ModuleList):
             hop_dim = d_model//4
 
         if not enable_encoder:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
             self.decoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         else:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
             self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
             self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self)
+            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
-        self.attend_to_inp = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self) if attend_to_inp else None
+        self.attend_to_inp = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers) if attend_to_inp else None
 
         self.prev_state_exists = False
 
@@ -460,7 +464,7 @@ class TransformerModule(ModuleList):
                                                 num_mem_kv=0,
                                                 rotary_pos_emb=False)
 
-            self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,fno_layers=fno_layers,modes=modes,width=width,mem_kv=16,pkm_dims=d_model//8)
+            self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,nystrom=nystrom,fno_layers=fno_layers,modes=modes,width=width,mem_kv=16,pkm_dims=d_model//8,mlp_layers=mlp_layers)
 
         self.d_model = d_model
         self.num_layers = num_layers
@@ -549,16 +553,16 @@ class TransformerModel(Module):
 
     @profile
     def __init__(self, 
-                    ntoken: int, 
                     ninp: int, 
                     nhead: int, 
                     nhid: int, 
                     nlayers: int,
+                    ntoken: Optional[int] = None, 
                     padding_idx: int = 0,
                     dropout: float = 0.5,
                     activation: str = 'gelu',
                     mem_token: int = 00,
-                    context_mem_token: int = 00,
+                    context_mem_token: Optional[int] = None,
                     encoder_decoder: bool = False,
                     deberta_layers: int = 1,
                     repeated_deberta_layers: int = 2,
@@ -578,6 +582,7 @@ class TransformerModel(Module):
                     modes=None,
                     width=None,
                     attend_to_inp=True,
+                    mlp_layers=1,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
@@ -606,6 +611,7 @@ class TransformerModel(Module):
                                                         width=width,
                                                         prev_state_self_num=prev_state_self_num,
                                                         attend_to_inp=attend_to_inp,
+                                                        mlp_layers=mlp_layers,
                                                         )
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx) if ntoken != None else Identity()
@@ -618,6 +624,11 @@ class TransformerModel(Module):
             nn.Linear(ninp,ntoken),
             #nn.Sigmoid(),
             ) if ntoken != None else Identity()
+
+        self.decoder = nn.Sequential(
+                nn.Linear(ninp,2),
+                #nn.LeakyReLU(0.05),
+            ) if discriminator else self.decoder
 
         self.ffd1 = GRUGating(ninp,ET_ffd(dim=ninp,layers=1,kernal_size=1,mult=4))
         self.ffd2 = copy.deepcopy(self.ffd1)
@@ -634,6 +645,7 @@ class TransformerModel(Module):
         if encoder_decoder:
             self.ffd3 = copy.deepcopy(self.ffd1)
 
+            context_mem_token = mem_token if context_mem_token == None else context_mem_token
             self.context_mem_exist = True if context_mem_token else False
             if self.mem_exist:
                 if type(context_mem_token)==int:
@@ -641,42 +653,6 @@ class TransformerModel(Module):
                 elif type(context_mem_token) == Tensor:
                     assert context_mem_token.size(-1)==ninp
                     self.context_mem = nn.Parameter(context_mem_token)
-
-        self.discriminator_enabled = discriminator
-        if discriminator:
-            d_ffd = nn.Sequential(
-                ET_ffd(dim=ninp,layers=1,kernal_size=1,mult=4),
-                conformer(ninp,causal=True,dropout=0),
-                copy.deepcopy(self.ffd1),
-            )
-            d_decoder = nn.Sequential(
-                nn.Linear(ninp,2),
-                #nn.LeakyReLU(0.05),
-            )
-            ### Distinct Layer for discriminator required, else OOM
-            attn = TransformerModule(nhead, 
-                                            nhid, 
-                                            nlayers+deberta_layers, 
-                                            ninp,
-                                            dropout,
-                                            enable_encoder=encoder_decoder,
-                                            deberta_layers=0,
-                                            repeated_deberta_layers=0,
-                                            max_len=max_seq_len,
-                                            full_block_repeat=full_block_repeat,
-                                            causal=causal,
-                                            prev_state_len=0,
-                                            nystrom=nystrom,
-                                            local_heads=local_heads,
-                                            attend_to_self=False,
-                                            fno_layers=fno_layers,
-                                            modes=modes,
-                                            width=width,
-                                            prev_state_self_num=1,
-                                            attend_to_inp=False,
-                                            )
-            self.discriminator = nn.ModuleList([d_ffd,attn,d_decoder])
-        #INTEGRATED DISCRIMINATOR: DEPRECATED
 
         self.alt_mem = None
         self.alt_mem_with_primary_mem = False
@@ -727,11 +703,8 @@ class TransformerModel(Module):
         self.tokenizer = None
         self.vocab = None
         self.optimizer = None
-        self.optimizer_disc = None
         self.scheduler = None
         self.scheduler_lambda = None
-        self.scheduler_disc = None
-        self.scheduler_disc_lambda = None
 
         self.init_weights()
 
@@ -971,41 +944,18 @@ class TransformerModel(Module):
 
     def init_optimizer(self,
                             opt: Optional[torch.optim.Optimizer] = None,
-                            opt_disc: Optional[torch.optim.Optimizer] = None,
                             lr: Union[None,float,dict] = None,
-                            lr_disc: Union[None,float,dict] = None,
                             scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
                             lambdaLR: Optional[typing.Callable] = None,
-                            scheduler_disc: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
-                            lambdaLR_disc: Optional[typing.Callable] = None,
                             return_opt_schd: bool = False
                         ) -> Union[NoReturn,Tuple[torch.optim.Optimizer,torch.optim.lr_scheduler._LRScheduler]]:
         if opt != None:
             self.optimizer = opt
-            if self.discriminator_enabled:
-                self.optimizer_disc = opt_disc
         else:
-            assert lr!=None
-            if not self.discriminator_enabled:
-                self.optimizer = torch.optim.SGD(self.parameters(), lr=lr)
-            else:
-                for p in self.discriminator.parameters():
-                    p.requires_grad_(False)
-                self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=lr)
-                for p in self.parameters():
-                    p.requires_grad_(False)
-                for p in self.discriminator.parameters():
-                    p.requires_grad_(True)
-                if lr_disc == None:
-                    lr_disc = lr
-                self.optimizer_disc = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=lr_disc)
-                for p in self.parameters():
-                    p.requires_grad_(True)
-
+            lr = 1 if lr==None else lr
+            self.optimizer = torch.optim.SGD(self.parameters(), lr=lr)
         if scheduler != None:
             self.scheduler = scheduler
-            if self.discriminator_enabled:
-                self.scheduler_disc = scheduler_disc
         else:
             if (lambdaLR == None or lambdaLR_disc == None) and self.scheduler_lambda == None:
 
@@ -1027,36 +977,21 @@ class TransformerModel(Module):
                         return sub_func(step_) / 625
 
                 lambdaLR = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
-                if lambdaLR_disc==None and self.discriminator_enabled:
-                    lambdaLR_disc = copy.deepcopy(lambdaLR)
             else:
                 lambdaLR = self.scheduler_lambda if type(self.scheduler_lambda)==list else self.scheduler_lambda[-1]
-                if self.scheduler_disc_lambda==None and self.discriminator_enabled:
-                    lambdaLR_disc = copy.deepcopy(lambdaLR)
-                elif self.discriminator_enabled:
-                    lambdaLR_disc = self.scheduler_disc_lambda
+
             self.scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=self.optimizer,lr_lambda=lambdaLR)
             self.scheduler_lambda = lambda_LR
-            if self.discriminator_enabled:
-                self.scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=self.optimizer_disc,lr_lambda=lambdaLR_disc)
-                self.scheduler_disc_lambda = lambda_LR_disc
+
         if return_opt_schd:
-            if self.discriminator_enabled:
-                return self.optimizer, self.optimizer_disc, self.scheduler, self.scheduler_disc
-            else:
-                return self.optimizer,self.scheduler
+            return self.optimizer,self.scheduler
 
     def training_step(self,
                     data,
                     targets,
                     loss_criterion,
-                    total_acc=0.,
-                    total_acc_d=0.,
-                    total_loss=0.,
-                    total_loss_d=0.,
                     mem_tokens=None,
                     opt=None,
-                    opt_disc=None,
                     grad_clip=4.0,
                     deepspeed_enabled=False,
                     autocast_enabled=False,
@@ -1066,20 +1001,12 @@ class TransformerModel(Module):
 
         self.train()
         step_start_time = time.time()
-        #torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+        torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
 
         if opt == None:
             optimizer = self.optimizer
         else:
             optimizer = opt
-
-        if self.discriminator_enabled:
-            if opt_disc == None:
-                optimizer_disc = self.optimizer_disc
-            else:
-                optimizer_disc = opt_disc
-        else:
-            optimizer_disc = None
 
         torch.cuda.empty_cache()
 
@@ -1087,76 +1014,25 @@ class TransformerModel(Module):
             outputs = {}
             losses = {}
             labels = {}
-            if self.discriminator_enabled:
-                self.zero_grad()
-                    
-                real_label = torch.full(output_targets.size(),0,dtype=torch.long,device=device)
-                real_label_gen = torch.full(input_data.size(),0,dtype=torch.long,device=device)
-                fake_label = torch.full(input_data.size(),1,dtype=torch.long,device=device)
-
-                labels['real_label'] = real_label
-                labels['real_label_gen'] = real_label_gen
-                labels['fake_label'] = fake_label
-
-                out_d_real = self.forward(output_targets.detach(),return_mem=False,discriminator=True,generator=False)
-                loss_d_real = loss_criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
-                loss_d_real.backward()
-
-                out_gan = self.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True,context_mem=mem_ctxt)
-                loss_d_fake = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
-                loss_d_fake.backward()
-
-                optimizer_disc.step()
-                optimizer_disc.zero_grad()
-                self.zero_grad()
-
-                out_gan = self.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True,context_mem=mem_ctxt)
-                loss_gen = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
-                loss_gen.backward()
-
-                output,single_pass_mem,single_pass_mem_ctxt = self.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
-                if trainable_index != None:
-                    trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
-                    trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
-                else:
-                    trainable_output = output
-                    trainable_output_targets = output_targets
-
-                loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous()).to(self.device)
-                loss.backward()
-
-                optimizer.step()
-                optimizer.zero_grad()
-                self.zero_grad()
-
-                outputs['out_d_real'] = out_d_real
-                outputs['out_gan'] = out_gan
-                outputs['output'] = output
-
-                losses['loss_d_real'] = loss_d_real.item()
-                losses['loss_d_fake'] = loss_d_fake.item()
-                losses['loss_gen'] = loss_gen.item()
-                losses['loss'] = loss.item()
+            self.zero_grad()
+            output,single_pass_mem,single_pass_mem_ctxt = self.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
+            torch.cuda.empty_cache()
+            if trainable_index != None:
+                trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
+                trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
             else:
-                self.zero_grad()
-                output,single_pass_mem,single_pass_mem_ctxt = self.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
-                torch.cuda.empty_cache()
-                if trainable_index != None:
-                    trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
-                    trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
-                else:
-                    trainable_output = output
-                    trainable_output_targets = output_targets
-                    
-                loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
-                loss.backward()
-                torch.cuda.empty_cache()
+                trainable_output = output
+                trainable_output_targets = output_targets
+                
+            loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
+            loss.backward()
+            torch.cuda.empty_cache()
 
-                optimizer.step()
-                optimizer.zero_grad()
-                outputs['output'] = output
+            optimizer.step()
+            optimizer.zero_grad()
+            outputs['output'] = output
 
-                losses['loss'] = loss.item()
+            losses['loss'] = loss.item()
             return outputs,losses,labels,single_pass_mem,single_pass_mem_ctxt
         
         if deepspeed_enabled or autocast_enabled:
@@ -1164,33 +1040,11 @@ class TransformerModel(Module):
                 outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
         else:
             outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
-        
-        acc_gen = 0.0
-        loss_g = 0.0
-        loss_d = 0.0
 
-        if self.discriminator_enabled:
-            acc_gen = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
-            acc_d = ((torch.argmax(outputs['out_d_real'],dim=-1)) == labels['real_label']).sum().item()/outputs['out_d_real'].size(1)
-            acc_d += ((torch.argmax(outputs['out_gan'],dim=-1)) == labels['fake_label']).sum().item()/outputs['out_gan'].size(1)
-            acc = ((torch.argmax(outputs['out_gan'],dim=-1)) == labels['real_label_gen']).sum().item()/outputs['out_gan'].size(1)
-            acc += acc_gen
+        acc = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
+        loss = losses['loss']
 
-            total_acc += acc/2
-            total_acc_d += acc_d/2
-            loss_g = (losses['loss'] + losses['loss_gen'])/2
-            total_loss += loss_g
-            loss_d = (losses['loss_d_fake'] + losses['loss_d_real'])/2
-            total_loss_d += loss_d
-        else:
-            acc_gen = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
-            total_acc += acc_gen
-            total_loss += losses['loss']
-            loss_g = losses['loss']
-            total_acc_d = 0
-            total_loss_d = 0
-
-        return outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc_gen,(step_start_time-time.time()),optimizer,optimizer_disc,mem_,mem_ctxt_
+        return outputs,losses,loss,acc_gaccen,(step_start_time-time.time()),mem_,mem_ctxt_
         
     def get_prev_state(self):
         return self.transformer_block.prev_state
@@ -1205,9 +1059,8 @@ class TransformerModel(Module):
                     mem: Optional[Tensor] = None, 
                     context_mem: Optional[Tensor] = None,
                     return_mem: bool = True,
-                    generator: bool = True,
-                    discriminator: bool = False,
                     return_logits: bool = False,
+                    seq_scale_down: bool = True,
                 ) -> Tuple[Tensor,Optional[Tensor],Optional[Tensor]]:
 
         start_time = time.time()
@@ -1216,10 +1069,6 @@ class TransformerModel(Module):
         
         if context != None:
             s_c_ = src.size(1)
-
-        if not self.discriminator_enabled:
-            discriminator = False
-            generator = True
 
         if self.auto_check_redraw:
             self.proj_updater.redraw_projections()
@@ -1250,95 +1099,54 @@ class TransformerModel(Module):
         if context != None:
             s_c = context.size(1)
 
-        src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
+        if seq_scale_down:
+            src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
+            src = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=src.size(0)).to(self.device),src,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
+            src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
+            output = Positional_Encoding(src)
 
-        src = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=src.size(0)).to(self.device),src,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
-
-        src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
-
-        output = Positional_Encoding(src)
-
-        if self.encoder_decoder:
-            context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
-            context = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=context.size(0)).to(self.device),context,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
-
-            context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
-
-            context = Positional_Encoding(context)
+            if self.encoder_decoder:
+                context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
+                context = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=context.size(0)).to(self.device),context,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
+                context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
+                context = Positional_Encoding(context)
             
         output = output.contiguous()
         if self.encoder_decoder:
             context = context.contiguous()
 
-        if generator or not self.discriminator_enabled:
+        if context == None:
+            output = ckpt(self.transformer_block,output)
+        else:
+            output,context = ckpt(self.transformer_block,output,context)
 
-            if context == None:
-                output = ckpt(self.transformer_block,output)
-            else:
-                output,context = ckpt(self.transformer_block,output,context)
-
-        if discriminator and not generator:
-            output = src
-
-        if discriminator:
-
-            output = ckpt(self.discriminator[0],output)
-
-            if context == None:
-                output = ckpt(self.discriminator[1],output)
-            else:
-                context = ckpt(self.discriminator[0],context)
-                output,context = ckpt(self.discriminator[1],output,context)
-
+        if seq_scale_down:
             output = ckpt(self.scale_up_fno,output)
             output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
             output = output[:,:s]
 
-            if type(mem) != None or self.mem_exist:
-                mem = output[:,:output.size(1)-s_]
-                mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.mem.shape) / b
-                output = output[:,output.size(1)-s_:]
-            
             if context != None:
                 context = ckpt(self.scale_up_fno,context)
                 context = ckpt(self.scale_up_conv,context.transpose(-1,-2)).transpose(-1,-2)
                 context = context[:,:s_c]
-
-                if type(context_mem) != None or self.context_mem_exist:
-                    context_mem = context[:,:context.size(1)-s_c_]
-                    context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.context_mem.shape) / b
-                    context = context[:,context.size(1)-s_c_:]
-
-
-            out = ckpt(self.discriminator[2],output)
-        elif not discriminator or generator or not self.discriminator_enabled:
                 
-            
-            output = ckpt(self.scale_up_fno,output)
-            output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
-            output = output[:,:s]
+        if type(mem) != None or self.mem_exist:
+            mem = output[:,:output.size(1)-s_]
+            mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.mem.shape) / b
+            output = output[:,output.size(1)-s_:]
 
-            if type(mem) != None or self.mem_exist:
-                mem = output[:,:output.size(1)-s_]
-                mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.mem.shape) / b
-                output = output[:,output.size(1)-s_:]
-            
-            if context != None:
-                context = ckpt(self.scale_up_fno,context)
-                context = ckpt(self.scale_up_conv,context.transpose(-1,-2)).transpose(-1,-2)
-                context = context[:,:s_c]
-
-                if type(context_mem) != None or self.context_mem_exist:
-                    context_mem = context[:,:context.size(1)-s_c_]
-                    context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.context_mem.shape) / b
-                    context = context[:,context.size(1)-s_c_:]
-
-            
-            output = ckpt(self.ffd2,output)
-            out = ckpt(self.decoder,output)
-            
-            self.time_[0] += time.time()-start_time
-            self.time_[1] += 1
+        if context != None:
+            if type(context_mem) != None or self.context_mem_exist:
+                context_mem = context[:,:context.size(1)-s_c_]
+                context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.context_mem.shape) / b
+                context = context[:,context.size(1)-s_c_:]
+        
+        
+        output = ckpt(self.ffd2,output)
+        out = ckpt(self.decoder,output)
+        
+        self.time_[0] += time.time()-start_time
+        self.time_[1] += 1
 
         if not return_logits:
             if return_mem:
@@ -1347,6 +1155,163 @@ class TransformerModel(Module):
                 return out
         else:
             if return_mem:
-                return out, mem, context_mem, output
+                return [out, output], mem, context_mem
             else:
-                return out, output
+                return [out, output]
+
+
+
+def Trainer(model,
+                data,
+                targets,
+                loss_criterion,
+                discriminator=None,
+                total_acc=0.,
+                total_acc_d=0.,
+                total_loss=0.,
+                total_loss_d=0.,
+                mem_tokens=None,
+                opt=None,
+                opt_disc=None,
+                grad_clip=4.0,
+                deepspeed_enabled=False,
+                autocast_enabled=False,
+                trainable_index=None,
+                mem_ctxt=None,
+            ):
+
+    model.train()
+    step_start_time = time.time()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), grad_clip)
+
+    if opt == None:
+        optimizer = model.optimizer
+    else:
+        optimizer = opt
+
+    if discriminator!=None:
+        if opt_disc == None:model.embedding_encoder(output_targets)
+            optimizer_disc = discriminator.optimizer
+        else:
+            optimizer_disc = opt_disc
+    else:
+        optimizer_disc = None
+
+    torch.cuda.empty_cache()
+
+    def step_optimizer(input_data=data,output_targets=targets):
+        outputs = {}
+        losses = {}
+        labels = {}
+        if discriminator!=None:
+            model.zero_grad()
+            discriminator.zero_grad()
+                
+            real_label = torch.full(output_targets.size(),0,dtype=torch.long,device=device)
+            real_label_gen = torch.full(input_data.size(),0,dtype=torch.long,device=device)
+            fake_label = torch.full(input_data.size(),1,dtype=torch.long,device=device)
+
+            labels['real_label'] = real_label
+            labels['real_label_gen'] = real_label_gen
+            labels['fake_label'] = fake_label
+
+            #out_d_real = model.forward(output_targets.detach(),return_mem=False,discriminator=True,generator=False)
+            out_d_real = discriminator(model.embedding_encoder(output_targets),return_mem=False)
+            loss_d_real = loss_criterion(rearrange(out_d_real,'b n c -> n c b'), rearrange(real_label,'b n -> n b'))
+            loss_d_real.backward()
+
+            #out_gan = model.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True,context_mem=mem_ctxt)
+            out_d_real = discriminator(model(input_data,return_logits=True,return_mem=False)[1],mem=mem_tokens,context_mem=mem_ctxt,return_mem=False)
+            loss_d_fake = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(fake_label,'b n -> n b'))
+            loss_d_fake.backward()
+
+            optimizer_disc.step()
+            optimizer_disc.zero_grad()
+            model.zero_grad()
+            discriminator.zero_grad()
+
+            #out_gan = model.forward(input_data.detach(),mem=mem_tokens,return_mem=False,discriminator=True,context_mem=mem_ctxt)
+            out_gan = discriminator(model(input_data,return_logits=True,return_mem=False)[1],mem=mem_tokens,context_mem=mem_ctxt,return_mem=False)
+            loss_gen = loss_criterion(rearrange(out_gan,'b n c -> n c b'), rearrange(real_label_gen,'b n -> n b'))
+            loss_gen.backward()
+
+            output,single_pass_mem,single_pass_mem_ctxt = model.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
+            if trainable_index != None:
+                trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
+                trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
+            else:
+                trainable_output = output
+                trainable_output_targets = output_targets
+
+            loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous()).to(model.device)
+            loss.backward()
+
+            optimizer.step()
+            optimizer.zero_grad()
+            model.zero_grad()
+            discriminator.zero_grad()
+
+            outputs['out_d_real'] = out_d_real
+            outputs['out_gan'] = out_gan
+            outputs['output'] = output
+
+            losses['loss_d_real'] = loss_d_real.item()
+            losses['loss_d_fake'] = loss_d_fake.item()
+            losses['loss_gen'] = loss_gen.item()
+            losses['loss'] = loss.item()
+        else:
+            model.zero_grad()
+            output,single_pass_mem,single_pass_mem_ctxt = model.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
+            torch.cuda.empty_cache()
+            if trainable_index != None:
+                trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
+                trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
+            else:
+                trainable_output = output
+                trainable_output_targets = output_targets
+                
+            loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
+            loss.backward()
+            torch.cuda.empty_cache()
+
+            optimizer.step()
+            optimizer.zero_grad()
+            outputs['output'] = output
+
+            losses['loss'] = loss.item()
+        return outputs,losses,labels,single_pass_mem,single_pass_mem_ctxt
+    
+    if deepspeed_enabled or autocast_enabled:
+        with autocast():
+            outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
+    else:
+        outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
+    
+    acc_gen = 0.0
+    loss_g = 0.0
+    loss_d = 0.0
+
+    if model.discriminator_enabled:
+        acc_gen = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
+        acc_d = ((torch.argmax(outputs['out_d_real'],dim=-1)) == labels['real_label']).sum().item()/outputs['out_d_real'].size(1)
+        acc_d += ((torch.argmax(outputs['out_gan'],dim=-1)) == labels['fake_label']).sum().item()/outputs['out_gan'].size(1)
+        acc = ((torch.argmax(outputs['out_gan'],dim=-1)) == labels['real_label_gen']).sum().item()/outputs['out_gan'].size(1)
+        acc += acc_gen
+
+        total_acc += acc/2
+        total_acc_d += acc_d/2
+        loss_g = (losses['loss'] + losses['loss_gen'])/2
+        total_loss += loss_g
+        loss_d = (losses['loss_d_fake'] + losses['loss_d_real'])/2
+        total_loss_d += loss_d
+    else:
+        acc_gen = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
+        total_acc += acc_gen
+        total_loss += losses['loss']
+        loss_g = losses['loss']
+        total_acc_d = 0
+        total_loss_d = 0
+
+    return outputs,losses,total_acc,total_acc_d,total_loss,total_loss_d,loss_g,loss_d,acc_gen,(step_start_time-time.time()),optimizer,optimizer_disc,mem_,mem_ctxt_
+    

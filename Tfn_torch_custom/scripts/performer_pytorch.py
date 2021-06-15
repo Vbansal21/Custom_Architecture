@@ -923,6 +923,9 @@ class Attention(nn.Module):
 
         if self.attn_to_self != None:
             self_q = torch.cat((q[:,-(self.features//2):],q,q[:,:self.features//2]),dim=-2)
+            if self_q.size(-2) < self.features:
+                padding = torch.zeros((self_q.size(0),self.features-self_q.size(1),self_q.size(-1)),dtype=self_q.dtype,device=self_q.device)
+                self_q = torch.cat((padding,self_q),dim=-2)
             self_q = ckpt(self.feat_prep,self_q.transpose(-1,-2)).transpose(-1,-2)
             org_shape = self_q.shape
             self_q = rearrange(self_q, 'b n d -> b n d 1')
