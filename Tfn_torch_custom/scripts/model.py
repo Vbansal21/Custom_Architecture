@@ -26,7 +26,7 @@ from mogrifier import Mogrifier
 from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block, GLU
 from .product_key_memory import PKM
 from .hopfield_modules import HopfieldLayer
-from .performer_pytorch import Attention,ProjectionUpdater
+from .performer_pytorch import Attention,ProjectionUpdater,find_modules
 from .conformer import ConformerConvModule as conformer
 
 from .fourier_1d import FNO1d
@@ -706,6 +706,9 @@ class TransformerModel(Module):
         self.scheduler = None
         self.scheduler_lambda = None
 
+        self.prev_states = []
+        self.max_prev_states = 16384
+
         self.init_weights()
 
     def get_avg_inference_time(self) -> int:
@@ -1046,11 +1049,24 @@ class TransformerModel(Module):
 
         return outputs,losses,loss,acc_gaccen,(step_start_time-time.time()),mem_,mem_ctxt_
         
-    def get_prev_state(self):
-        return self.transformer_block.prev_state
+    def get_prev_state(self) -> list[Tensor]:
+        prev_states = {0:self.transformer_block.prev_state}
+        modules = find_modules(self.transformer_block,Attention)
+        for i,attn in enumerate(modules):
+            prev_states[i+1] = attn.prev_state
+        return prev_states
 
-    def set_prev_state(self,prev_state:Tensor):
-        self.transformer_block.prev_state = prev_state
+    def set_prev_state(self,prev_state:list[Tensor]):
+        self.transformer_block.prev_state = prev_state[0]
+        modules = find_modules(self.transformer_block,Attention)
+        for i,attn in enumerate(modules):
+            attn.prev_state = prev_states[i+1]
+
+    def toggle_vanilla_attn_mechanism(self,main_attn=False,self_attn=False):
+        modules = find_modules(self.transformer_block,Attention)
+        for attn in modules:
+            attn.self_attend_vanilla_attn = self_attn
+            attn.vanilla_attn = main_attn
 
     #@autocast()
     def forward(self,
@@ -1064,6 +1080,11 @@ class TransformerModel(Module):
                 ) -> Tuple[Tensor,Optional[Tensor],Optional[Tensor]]:
 
         start_time = time.time()
+
+        self.prev_states.append(self.get_prev_state())
+        if len(self.prev_states) > self.max_prev_states:
+            tmp = self.prev_states.pop(0)
+            del(tmp)
 
         (b,s_) = src.shape
         
@@ -1103,16 +1124,17 @@ class TransformerModel(Module):
             src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
             src = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=src.size(0)).to(self.device),src,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
             src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
-            output = Positional_Encoding(src)
 
             if self.encoder_decoder:
                 context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
                 context = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=context.size(0)).to(self.device),context,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
                 context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
-                context = Positional_Encoding(context)
-            
+                
+
+        output = Positional_Encoding(src)    
         output = output.contiguous()
         if self.encoder_decoder:
+            context = Positional_Encoding(context)
             context = context.contiguous()
 
         if context == None:

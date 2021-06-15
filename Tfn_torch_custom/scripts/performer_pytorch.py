@@ -806,6 +806,12 @@ class RotaryEmbedding(nn.Module):
         emb = torch.cat((freqs, freqs), dim=-1)
         return emb[None, :, :]
 
+def vanilla_attention(q,k,v):
+    dots = einsum('b h i d, b h j d -> b h i j', q, k) * (q.size(-1)**(-0.5))
+    attn = F.softmax(dots,dim=-1)
+    out = einsum('b h i j, b h j d -> b h i d', attn, v)
+    return out
+    
 class Attention(nn.Module):
     def __init__(
         self,
@@ -886,6 +892,7 @@ class Attention(nn.Module):
 
         self.num_mem_kv = num_mem_kv
         num_prev_state = default(num_mem_kv,num_prev_state)
+        
         if num_mem_kv > 0:
             self.mem_k = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
             self.mem_v = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
@@ -904,6 +911,11 @@ class Attention(nn.Module):
             self.zero_0 = nn.Parameter(torch.ones(dim_head))
             self.zero_1 = nn.Parameter(torch.zeros(dim_head))
             self.norm = ScaleNorm(dim_head)
+        else:
+            self.prev_state = None
+
+        self.self_attend_vanilla_attn = False
+        self.vanilla_attn = False
 
     def forward(self, x, context = None, pos_emb = None, mask = None, context_mask = None, **kwargs):
         b, n, d, h, gh = *x.shape, self.heads, self.global_heads
@@ -932,7 +944,7 @@ class Attention(nn.Module):
             q_ = self.to_q_self(self_q)
             k_ = self.to_k_self(self_q)
             v_ = self.to_v_self(self_q)
-            self_q = ckpt(self.attn_to_self,q_,k_,v_)
+            self_q = ckpt(self.attn_to_self,q_,k_,v_) if not self.self_attend_vanilla_attn else ckpt(vanilla_attention,q_,k_,v_)
             self_q = self.to_out_self(self_q)
             self_q = rearrange(self_q, 'b n d 1 -> b n d').reshape(org_shape)
             q = ckpt(self.project_down,self_q)
@@ -952,7 +964,7 @@ class Attention(nn.Module):
             if exists(pos_emb) and not cross_attend:
                 q, k = apply_rotary_pos_emb(q, k, pos_emb)
 
-            out = ckpt(self.fast_attention,q, k, v)
+            out = ckpt(self.fast_attention,q, k, v) if not self.vanilla_attn else ckpt(vanilla_attention,q,k,v)
             attn_outs.append(out)
 
         if not empty(lq):
@@ -975,11 +987,12 @@ class Attention(nn.Module):
             mem_v = torch.cat((mem_v,prev_state),dim=-2).requires_grad_(True)
             mem_k = self.mem_lin_k(mem_k)
             mem_v = self.mem_lin_v(mem_v) 
-            out_ = ckpt(self.mem_attn,out,mem_k,mem_v)
+            out_ = ckpt(self.mem_attn,out,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,,out,mem_k,mem_v)
             out_ = ckpt(self.out_2,out_)
             out = self.norm((out*self.zero_1) + (out_*self.zero_0))
 
-            prev_state = ckpt(self.prev_state_attn,prev_state,out,self.out(out))
+            tmp = self.out(out)
+            prev_state = ckpt(self.prev_state_attn,prev_state,tmp,tmp) if not self.vanilla_attn else ckpt(vanilla_attention,prev_state,tmp,tmp)
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((mem_k.size(1),-1,mem_k.size(-1)))
 
 

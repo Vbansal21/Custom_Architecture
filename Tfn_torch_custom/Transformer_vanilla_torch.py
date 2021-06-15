@@ -90,7 +90,7 @@ prev_state_self_num = 48
 local_heads = 2
 local_heads = min(local_heads,nhead)
 
-discriminator_enabled = False #INTEGRATED DISCRIMINATOR: DEPRECATED
+discriminator = False #INTEGRATED DISCRIMINATOR: DEPRECATED
 progressive_generation = True
 use_deepspeed = False
 
@@ -296,7 +296,7 @@ if use_deepspeed:
                                 deberta_layers=deberta_layers,
                                 repeated_deberta_layers=repeated_deberta_layers,
                                 mem_token=mem_tokens,
-                                discriminator=discriminator_enabled,
+                                discriminator=discriminator,
                                 seq_scale_down=seq_scale_down,
                                 max_seq_len=max_seq_len,
                                 full_block_repeat=full_block_repeat,
@@ -325,7 +325,7 @@ else:
                             deberta_layers=deberta_layers,
                             repeated_deberta_layers=repeated_deberta_layers,
                             max_seq_len=max_seq_len,
-                            discriminator=discriminator_enabled,
+                            discriminator=discriminator,
                             seq_scale_down=seq_scale_down,
                             full_block_repeat=full_block_repeat,
                             causal=causal,
