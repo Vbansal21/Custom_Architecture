@@ -880,7 +880,7 @@ class Attention(nn.Module):
         self.attn_to_self = None
         if attend_to_self:
             self_head_dim = 1
-            self.features = 3
+            self.features = 5
             scale = 2
             self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,self.features,groups=inner_dim)
             self.to_q_self = nn.Linear(1, self_head_dim)
@@ -987,7 +987,7 @@ class Attention(nn.Module):
             mem_v = torch.cat((mem_v,prev_state),dim=-2).requires_grad_(True)
             mem_k = self.mem_lin_k(mem_k)
             mem_v = self.mem_lin_v(mem_v) 
-            out_ = ckpt(self.mem_attn,out,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,,out,mem_k,mem_v)
+            out_ = ckpt(self.mem_attn,out,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,out,mem_k,mem_v)
             out_ = ckpt(self.out_2,out_)
             out = self.norm((out*self.zero_1) + (out_*self.zero_0))
 

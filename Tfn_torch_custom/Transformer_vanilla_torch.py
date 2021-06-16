@@ -71,12 +71,12 @@ deberta_layers = 24
 repeated_deberta_layers = 0
 full_block_repeat = False
 nhead = 16
-dropout = (math.pi*2/10)
+dropout = (math.pi/10)
 mem_tokens = emsize*2
-bptt = (1024*8+mem_tokens) - mem_tokens
+bptt = (1024*16+mem_tokens) - mem_tokens
 seq_scale_down = emsize
 max_seq_len = max(2**14,2**17 // seq_scale_down)
-mlp_layers = nhead
+mlp_layers = 1
 fno_layers = 4
 modes = 8
 width = 8
@@ -296,7 +296,7 @@ if use_deepspeed:
                                 deberta_layers=deberta_layers,
                                 repeated_deberta_layers=repeated_deberta_layers,
                                 mem_token=mem_tokens,
-                                discriminator=discriminator,
+                                #discriminator=discriminator,
                                 seq_scale_down=seq_scale_down,
                                 max_seq_len=max_seq_len,
                                 full_block_repeat=full_block_repeat,
@@ -325,7 +325,7 @@ else:
                             deberta_layers=deberta_layers,
                             repeated_deberta_layers=repeated_deberta_layers,
                             max_seq_len=max_seq_len,
-                            discriminator=discriminator,
+                            #discriminator=discriminator,
                             seq_scale_down=seq_scale_down,
                             full_block_repeat=full_block_repeat,
                             causal=causal,
@@ -348,6 +348,7 @@ torch.cuda.empty_cache()
 
 model.eval()
 inp = torch.randint(0,ntokens-1,(1,bptt),dtype=torch.long,device=device)
+model.toggle_vanilla_attn_mechanism(True,True)
 if use_deepspeed:
     with autocast():
         out,mem,mem_ctxt = model(inp)
@@ -362,41 +363,21 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1
+lr = 0.3
 
 if not use_deepspeed:
     if use_sgd:
-        if discriminator_enabled:
-            for p in model.discriminator.parameters():
-                p.requires_grad_(False)
-            optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-            for p in model.parameters():
-                p.requires_grad_(False)
-            for p in model.discriminator.parameters():
-                p.requires_grad_(True)
-            optimizer_disc = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-            for p in model.parameters():
-                p.requires_grad_(True)
+        if discriminator:
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+            optimizer_disc = torch.optim.SGD(discriminator_model.parameters(), lr=lr)
         else:
-            for p in model.parameters():
-                p.requires_grad_(True)
             optimizer = torch.optim.SGD(model.parameters(),lr=lr)
             optimizer_disc = None
     else:
-        if discriminator_enabled:
-            for p in model.discriminator.parameters():
-                p.requires_grad_(False)
-            optimizer = torch.optim.Adadelta(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-            for p in model.parameters():
-                p.requires_grad_(False)
-            for p in model.discriminator.parameters():
-                p.requires_grad_(True)
-            optimizer_disc = torch.optim.Adadelta(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-            for p in model.parameters():
-                p.requires_grad_(True)
+        if discriminator:
+            optimizer = torch.optim.Adadelta(model.parameters(), lr=lr)
+            optimizer_disc = torch.optim.Adadelta(discriminator_model.parameters(), lr=lr)
         else:
-            for p in model.parameters():
-                p.requires_grad_(True)
             optimizer = torch.optim.Adadelta(model.parameters(),lr=lr)
             optimizer_disc = None
 
@@ -424,7 +405,7 @@ def lambda_lr(step_):
 #    lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
-scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_lr) if discriminator_enabled else None
+scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_lr) if discriminator else None
 
 model.tokenzier = tokenizer
 model.vocab = vocab
@@ -474,7 +455,7 @@ wandb.init(project=project_name,config={
     "Sequence_length":bptt,
     "max_seq_len":max_seq_len,
     "seq_scale_down":seq_scale_down,
-    "discriminator_enabled":discriminator_enabled,
+    "discriminator":discriminator,
     "Number of Parameters":len(model),
     "Progressive generation training":progressive_generation,
     "use_sgd":use_sgd,
@@ -519,10 +500,10 @@ try:
             
     if load_optimizer:
         optimizer.load_state_dict(checkpoint_['optimizer_state_dict'])
-        if discriminator_enabled:
+        if discriminator:
             optimizer_disc.load_state_dict(checkpoint_['optimizer_disc_state_dict'])
     else:
-        if discriminator_enabled:
+        if discriminator:
             for p in model.discriminator.parameters():
                 p.requires_grad_(False)
             optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
@@ -544,12 +525,12 @@ try:
 
     if load_scheduler:
         scheduler.load_state_dict(checkpoint_['scheduler_state_dict'])
-        if discriminator_enabled:
+        if discriminator:
             scheduler_disc.load_state_dict(checkpoint_['scheduler_disc_state_dict'])
 
     else:
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
-        if discriminator_enabled:
+        if discriminator:
             scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_lr)
 
     try:
@@ -578,7 +559,7 @@ if best_model==None:
 model.to(device)
 
 #inp = torch.zeros([1,bptt],dtype=torch.long).to(device)
-#print(summary(model, inp,None,None,None,None,False,False,True,discriminator_enabled))
+#print(summary(model, inp,None,None,None,None,False,False,True,discriminator))
 
 # TODO: Setup 'curses' module to print colored text for inference output
 #import curses
@@ -654,7 +635,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         if resume_batch != None:
             if batch < resume_batch:
                 continue
-        if epoch%2==1:
+        if ((batch + epoch)%2==1):
             single_pass_mem = None
             single_pass_mem_ctxt = None
         data, targets, trainable_index = get_batch(processed_train_data, i,progressive=progressive_generation) #Indexed Selective training broken
@@ -700,7 +681,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             model.scheduler_lambda = lambda_lr
             #model.scheduler_disc_lambda = lambda_lr
 
-            if discriminator_enabled:
+            if discriminator:
                 torch.save(
                 {
                     'epoch': epoch,
@@ -762,7 +743,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         if step_scheduler != None:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
                 scheduler.step(step)
-                if discriminator_enabled:
+                if discriminator:
                     scheduler_disc.step(step)
                 step += 1
         if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
@@ -771,7 +752,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             total_ppl /= log_interval
             _,__ = evaluate(model,processed_val_data,True)
             elapsed = time.time() - start_time
-            if discriminator_enabled:
+            if discriminator:
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '
                     'lr_g {:04.5f} | lr_d {:04.5f} | ms/batch {:08.3f} | acc_g {:3.2f}% | '
                     'loss_g {:5.3f} | acc_d {:3.2f}% | loss_d {:5.3f} | ppl {:10.3f}'.format(
@@ -793,7 +774,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             total_ppl = 0.
             start_time = time.time()
         
-        if discriminator_enabled:
+        if discriminator:
             wandb.log(
                 {
                     "Loss Generator":loss_g,
@@ -865,7 +846,7 @@ while True:
     model.scheduler_lambda = lambda_lr
     #model.scheduler_disc_lambda = lambda_lr
 
-    if discriminator_enabled:
+    if discriminator:
         torch.save(
         {
             'epoch': epoch,

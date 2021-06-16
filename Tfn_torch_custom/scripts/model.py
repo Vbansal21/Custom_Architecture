@@ -707,7 +707,7 @@ class TransformerModel(Module):
         self.scheduler_lambda = None
 
         self.prev_states = []
-        self.max_prev_states = 16384
+        self.max_prev_states = 1
 
         self.init_weights()
 
@@ -1028,7 +1028,7 @@ class TransformerModel(Module):
                 trainable_output_targets = output_targets
                 
             loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
-            loss.backward()
+            loss.backward(retain_graph=True)
             torch.cuda.empty_cache()
 
             optimizer.step()
@@ -1047,16 +1047,23 @@ class TransformerModel(Module):
         acc = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
         loss = losses['loss']
 
-        return outputs,losses,loss,acc_gaccen,(step_start_time-time.time()),mem_,mem_ctxt_
+        if mem_ != None:
+            pass
+            mem_ = mem_.clone().detach()
+        if mem_ctxt_ != None:
+            pass
+            mem_ctxt_ = mem_ctxt_.clone().detach()
+
+        return outputs,losses,loss,acc,(step_start_time-time.time()),mem_,mem_ctxt_
         
-    def get_prev_state(self) -> list[Tensor]:
+    def get_prev_state(self) -> List[Tensor]:
         prev_states = {0:self.transformer_block.prev_state}
         modules = find_modules(self.transformer_block,Attention)
         for i,attn in enumerate(modules):
             prev_states[i+1] = attn.prev_state
         return prev_states
 
-    def set_prev_state(self,prev_state:list[Tensor]):
+    def set_prev_state(self,prev_state:List[Tensor]):
         self.transformer_block.prev_state = prev_state[0]
         modules = find_modules(self.transformer_block,Attention)
         for i,attn in enumerate(modules):
@@ -1213,7 +1220,7 @@ def Trainer(model,
         optimizer = opt
 
     if discriminator!=None:
-        if opt_disc == None:model.embedding_encoder(output_targets)
+        if opt_disc == None:
             optimizer_disc = discriminator.optimizer
         else:
             optimizer_disc = opt_disc
