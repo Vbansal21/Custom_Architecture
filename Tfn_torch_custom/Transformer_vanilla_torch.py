@@ -64,13 +64,13 @@ batch_size = 1
 eval_batch_size = batch_size
 
 ntokens = tokenizer.vocab_size # None
-emsize = 256
+emsize = 512
 nhid = emsize * 4
-nlayers = 8
-deberta_layers = 24
+nlayers = 2
+deberta_layers = 6
 repeated_deberta_layers = 0
 full_block_repeat = False
-nhead = 16
+nhead = 8
 dropout = (math.pi/10)
 mem_tokens = emsize*2
 bptt = (1024*16+mem_tokens) - mem_tokens
@@ -87,7 +87,7 @@ attend_to_inp = True
 feature_redraw_interval = nhead*2
 prev_state_len = mem_tokens*2
 prev_state_self_num = 64
-local_heads = 2
+local_heads = 1
 local_heads = min(local_heads,nhead)
 
 discriminator = False #INTEGRATED DISCRIMINATOR: DEPRECATED
@@ -347,7 +347,7 @@ print("Model Parameters: ",len(model),"\n")
 torch.cuda.empty_cache()
 
 model.eval()
-inp = torch.randint(0,ntokens-1,(1,bptt),dtype=torch.long,device=device)
+inp = torch.randint(0,ntokens-1,(batch_size,bptt),dtype=torch.long,device=device)
 #model.toggle_vanilla_attn_mechanism(True,True)
 if use_deepspeed:
     with autocast():
@@ -363,7 +363,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 2 * 0.1
+lr = 1
 
 if not use_deepspeed:
     if use_sgd:
