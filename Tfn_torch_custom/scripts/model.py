@@ -272,18 +272,16 @@ class TransformerBlock(Module):
             nn.Linear(pkm_dims,d_model),
             ) if pkm_dims!=0 else None
 
-        self.gate = GRUGating(d_model)
+        self.gate = GRUGating(d_model,conformer(d_model,causal=True,dropout=dropout),norm=False)
         
-        self.fno = nn.Sequential(
-                                GRUGating(d_model,FNO1d(modes,
-                                                    width,
-                                                    inp_dim=d_model,
-                                                    out_dim=d_model,
-                                                    ffd_dim=dim_feedforward,
-                                                    num_layers=fno_layers
-                                                )),
-                                GRUGating(d_model,conformer(d_model,causal=True,dropout=dropout))
-        )
+        self.fno = GRUGating(d_model,FNO1d(modes,
+                                                width,
+                                                inp_dim=d_model,
+                                                out_dim=d_model,
+                                                ffd_dim=dim_feedforward,
+                                                num_layers=fno_layers
+                                            ))
+        
 
         if hopfield:
             hop_attn = nn.Sequential(
@@ -387,13 +385,15 @@ class TransformerBlock(Module):
             #context = Positional_Encoding(context)
             context = ckpt(self.ffd2,context)
 
-        output = ckpt(self.fno,output)
-
         output = ckpt(self.attn,output,output,context)
         output = self.dropout2(output)
+
+        output = ckpt(self.fno,output)
         output = ckpt(self.mlp,output)
+
         output = self.dropout3(output)
-        output = self.norm((output*self.zero_0)+(src*self.zero_1))
+        output = self.norm((src*self.zero_0),(output*self.zero_1))
+
         return output
 
 class TransformerModule(ModuleList):
@@ -1100,7 +1100,7 @@ class TransformerModel(Module):
         start_time = time.time()
 
         self.prev_states.append(self.get_prev_state())
-        if len(self.prev_states) > self.max_prev_states:
+        while len(self.prev_states) > self.max_prev_states:
             tmp = self.prev_states.pop(0)
             del(tmp)
 
