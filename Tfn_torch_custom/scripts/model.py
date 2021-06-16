@@ -245,7 +245,7 @@ class TransformerBlock(Module):
                 ):
         super(TransformerBlock, self).__init__()
 
-        self.norm = ScaleNorm(d_model)
+        self.norm = GRUGating(d_model)
         self.zero_0 = nn.Parameter(torch.ones(d_model))
         self.zero_1 = nn.Parameter(torch.ones(d_model))
         
@@ -462,9 +462,15 @@ class TransformerModule(ModuleList):
                                                 heads=nhead,
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
-                                                rotary_pos_emb=False)
+                                                rotary_pos_emb=False,
+                                                nystrom=nystrom)
 
-            self.prev_state_attend = TransformerBlock(d_model, nhead, d_model, dropout,decoder=True,nystrom=nystrom,fno_layers=fno_layers,modes=modes,width=width,mem_kv=16,pkm_dims=d_model//8,mlp_layers=mlp_layers)
+            self.prev_state_attend = Attention(d_model,
+                                                heads=nhead,
+                                                dim_head=d_model//nhead,
+                                                num_mem_kv=0,
+                                                rotary_pos_emb=False,
+                                                nystrom=nystrom)
 
         self.d_model = d_model
         self.num_layers = num_layers
@@ -995,7 +1001,7 @@ class TransformerModel(Module):
                     loss_criterion,
                     mem_tokens=None,
                     opt=None,
-                    grad_clip=4.0,
+                    grad_clip=0.5,
                     deepspeed_enabled=False,
                     autocast_enabled=False,
                     trainable_index=None,
