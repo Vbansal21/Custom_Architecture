@@ -131,7 +131,7 @@ class nBRC(nn.Module):
         return c * h + (1 - c) * torch.tanh(l(self.U, x) + a * h)
 
 class GRUGating(nn.Module):
-    def __init__(self, dim, fn=None, mogrify = True, norm = True, post_norm = False):
+    def __init__(self, dim, fn=None, mogrify = True, norm = True, post_norm = True):
         super().__init__()
         self.dim = dim
         self.fn = fn
