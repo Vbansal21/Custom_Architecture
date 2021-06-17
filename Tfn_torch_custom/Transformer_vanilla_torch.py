@@ -67,12 +67,12 @@ ntokens = tokenizer.vocab_size # None
 emsize = 512
 nhid = emsize * 4
 nlayers = 2
-deberta_layers = 6
+deberta_layers = 2
 repeated_deberta_layers = 0
 full_block_repeat = False
 nhead = 8
 dropout = (math.pi/10)
-mem_tokens = emsize*6
+mem_tokens = emsize*4
 bptt = (1024*16+mem_tokens) - mem_tokens
 seq_scale_down = emsize
 max_seq_len = max(2**14,2**17 // seq_scale_down)
@@ -85,7 +85,7 @@ nystrom = False
 attend_to_self = True
 attend_to_inp = True
 feature_redraw_interval = nhead*2
-prev_state_len = emsize*6
+prev_state_len = emsize*4
 prev_state_self_num = 64
 local_heads = 1
 local_heads = min(local_heads,nhead)
@@ -400,7 +400,7 @@ def lambda_lr(step_):
     elif step_<(2048/(multiplier**(math.pi*2/10))):
         return sub_func(step_) / (25 * (lr**0.5))
     else:
-        return sub_func(step_) / (625 * lr)
+        return sub_func(step_) / (125 * lr)
 #    pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 #    lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
 

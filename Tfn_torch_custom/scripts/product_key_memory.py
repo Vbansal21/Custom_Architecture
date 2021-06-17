@@ -65,12 +65,14 @@ class ScaleNorm(nn.Module):
         return x / norm.clamp(min = self.eps) * self.g
 
 class PKM(nn.Module):
-    def __init__(self, dim, heads = 4, num_keys = 128, topk = 32, dim_head = 256, input_dropout = 0.3, query_dropout = 0.3, value_dropout = 0.3):
+    def __init__(self, dim, heads = 4, num_keys = 128, topk = 32, dim_head = None, input_dropout = 0., query_dropout = 0., value_dropout = 0.):
         super().__init__()
         assert (dim % heads == 0), 'dimension must be divisible by number of heads'
         self.topk = topk
         self.heads = heads
         self.num_keys = num_keys
+
+        dim_head = dim//heads
 
         dim_query = dim_head * heads
         self.to_queries = nn.Linear(dim, dim_query, bias = False)

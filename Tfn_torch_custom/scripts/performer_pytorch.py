@@ -6,6 +6,7 @@ from torch import nn
 from torch.cuda.amp import autocast
 from einops import rearrange, repeat, reduce
 from torch import einsum
+import torch.nn.init as init
 
 from functools import partial
 from contextlib import contextmanager
@@ -727,6 +728,203 @@ class FeedForward(nn.Module):
         return x
 
 # positional embeddings
+class LearnableSinusoidEncoding(nn.Module):
+    """Layer converts scalar input to Sinusoid Encoding with learnt scaling."""
+
+    def __init__(self, dim, max_timescale_init=10000):
+        """Initialize layer.
+        Args:
+            dim: Dimensionality of the sinusoid encoding, should be dividable
+                by 2.
+            max_timescale_init: Maximum time scale used during initialization.
+        """
+        super().__init__()
+        assert dim % 2 == 0
+        inv_freq = 1. / (
+            max_timescale_init ** (torch.arange(0, dim, 2).float() / dim))
+        self.inv_freq = nn.Parameter(inv_freq, requires_grad=True)
+
+    def forward(self, x):
+        sinusoid_inp = torch.matmul(
+            x[..., None], self.inv_freq[None, :])
+        # Stack + reshape instead of concat, this way we get features of the
+        # form [sin(w_1 * x), cos(w_1 * x), sin(w_2 * x), cos(w_2 * x)] instead
+        # of [sin(w_1 * x), sin(w_2 *x), cos(w_1 * x), cos(w_2 * x)].
+        emb = torch.stack((sinusoid_inp.sin(), sinusoid_inp.cos()), dim=-1)
+        return emb.view(*emb.shape[:-2], -1)
+
+
+class ConstrainedLinear(nn.Module):
+    """A linear layer with constraints for positional dimensions.
+    This linear layer behaves the same as a regular linear layer for dimensions
+    of the input associated with content of input elements, yet applies
+    a constrained linear operation on the dimensions associated with positional
+    embeddings.
+    access to is purely relative.
+    """
+
+    def __init__(self, in_features, out_features, pos_scales, heads,
+                 content_rel_attn=False,
+                 bias=True):
+        """Initialize ConstrainedLinear layer.
+        Args:
+            dim_in: Dimensionality of the input elements.
+            dim_out: Dimensionality of the output (excluding the dimensions
+                corresponding to the positional encoding).
+            n_pos_scales: Number of sin/cos pairs with same lengthscale
+                in the positional encoding.
+            heads: Number of heads.
+            bias: Include a bias.
+        """
+        super().__init__()
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.pos_scales = pos_scales
+        self.heads = heads
+        self.content_rel_attn = content_rel_attn
+        # Number of features per head
+        positional_features_head = 2*pos_scales
+        #self.content_linear = nn.Linear(in_features, out_features)
+        if self.content_rel_attn:
+            self.content_to_rel_matrix = nn.Linear(in_features, 2*heads*pos_scales)
+
+        self.alpha = nn.Parameter(
+            torch.Tensor(pos_scales*heads))
+        self.beta = nn.Parameter(
+            torch.Tensor(pos_scales*heads))
+        self.register_buffer(
+            'offdiag_matrix', torch.Tensor([[0., 1.], [-1., 0.]]))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        init.normal_(self.alpha)
+        init.normal_(self.beta)
+
+    def _build_positional_projection_matrix(self):
+        """Build projection matrices for positional encodings.
+        Returns:
+            Tensor with shape [heads, pos_scales, 2, 2].
+        """
+        matrix = rearrange(
+            torch.stack(
+                [self.alpha, self.beta, -self.beta, self.alpha], dim=-1),
+            '(h s) (b1 b2) -> h s b1 b2',
+            h=self.heads,
+            s=self.pos_scales,
+            b1=2, b2=2
+        )
+        return matrix
+
+    def _build_conditional_projection_matrix(self, input):
+        """Build projection matrices for pos encodings conditional on content.
+        Args:
+            input: Tensor of shape batch_size, n, dim
+        Returns:
+            Tensor with shape [batch_size, heads, sequence, scales, 2, 2]
+        """
+
+        parameters = rearrange(
+            self.content_to_rel_matrix(input),
+            'b n (h s d) -> b h n s d', d=2, h=self.heads, s=self.pos_scales)
+        alpha, beta = torch.split(parameters, 1, dim=-1)
+        matrix = torch.cat([alpha, beta, -beta, alpha], dim=-1)
+        return matrix.view(*matrix.shape[:-1], 2, 2)
+
+    def forward(self, input: torch.Tensor, pos_encodings: torch.Tensor):
+        bs = input.shape[0]
+        """
+        content_based = rearrange(
+            self.content_linear(input),
+            'b n (h d) -> b h n d',
+            h=self.heads
+        )
+        """
+        content_based = input
+        position_based = rearrange(
+            pos_encodings, 'b n (s d) -> b 1 s n d', s=self.pos_scales, d=2)
+        # Format batch_size, heads, scales, instances, 2
+        position_based = position_based.matmul(
+            self._build_positional_projection_matrix())
+        position_based = rearrange(
+            position_based, 'b h s n d -> b h n (s d)')
+
+        if not self.content_rel_attn:
+            return torch.cat(
+                [content_based, position_based.expand(bs, -1, -1, -1)],
+                axis=-1)
+        else:
+            content_based_rel = rearrange(
+                pos_encodings,
+                'b n (s d) -> b 1 n s 1 d',
+                s=self.pos_scales,
+                d=2
+            )
+            projection = self._build_conditional_projection_matrix(rearrange(input, 'b h n d -> b n (h d)'))
+            content_based_rel = content_based_rel.matmul(
+                projection)
+            content_based_rel = rearrange(
+                content_based_rel, 'b h n s 1 d -> b h n (s d)')
+            return torch.cat(
+                [
+                    content_based,
+                    content_based_rel,
+                    position_based.expand(bs, -1, -1, -1)
+                ],
+                axis=-1
+            )
+
+
+class IdentityLinear(nn.Module):
+    """A linear layer with identity for positional dimensions.
+    This linear layer behaves the same as a regular linear layer for dimensions
+    of the input associated with content of input elements, yet returns the
+    unmodified positional embeddings.
+    This constraint ensures that the position information the network has
+    access to is purely relative.
+    """
+
+    def __init__(self, in_features, out_features, pos_scales, heads,
+                 content_rel_attn=False, bias=True):
+        """Initialize IdentityLinear layer.
+        Args:
+            dim_in: Dimensionality of the input elements.
+            dim_out: Dimensionality of the output (excluding the dimensions
+                corresponding to the positional encoding).
+            n_pos_lengthscales: Number of sin/cos pairs with same lengthscale
+                in the positional encoding.
+            heads: Number of heads.
+            content_rel_attn: Compute relative positional attention conditional
+                on content
+            bias: Include a bias.
+        """
+        super().__init__()
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.pos_scales = pos_scales
+        self.heads = heads
+        self.content_rel_attn = content_rel_attn
+        # Number of features per head
+        positional_features_head = 2*pos_scales
+        #self.content_linear = nn.Linear(in_features, out_features)
+
+    def forward(self, input: torch.Tensor, pos_encodings: torch.Tensor):
+        bs = input.shape[0]
+        """
+        content_based = rearrange(
+            self.content_linear(input),
+            'b n (h d) -> b h n d',
+            h=self.heads
+        )
+        """
+        content_based = input
+        pos_encodings = pos_encodings.unsqueeze(1).expand(
+            bs, self.heads, -1, -1)
+        if self.content_rel_attn:
+            pos_encodings = pos_encodings.repeat(1, 1, 1, 2)
+        return torch.cat([content_based, pos_encodings], axis=-1)
+
 
 class AbsolutePositionalEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len):
@@ -831,6 +1029,8 @@ class Attention(nn.Module):
         qkv_bias = True,
         attn_out_bias = True,
         max_seq_len = 2**17,
+        pos_scales = None,
+        content_rel_attn = True,
         rotary_pos_emb = False,
         fixed_emb = False,
         axial_position_emb = False,
@@ -849,14 +1049,19 @@ class Attention(nn.Module):
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
         inner_dim = dim_head * heads
-        nystromer_landmarks = default(nystromer_landmarks,local_window_size)
-        if nystrom:
-            self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head,heads=heads,num_landmarks=nystromer_landmarks)
-        else:
-            self.fast_attention = FastAttention(dim_head, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+        pos_scales = int(default(pos_scales,math.log(dim)))
+        #dim_head += 2*pos_scales
+        additional_heads = 2*pos_scales if not content_rel_attn else 4*pos_scales
 
         self.heads = heads
         self.global_heads = heads - local_heads
+
+        nystromer_landmarks = default(nystromer_landmarks,local_window_size)
+        if nystrom:
+            self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head + additional_heads,heads=global_heads,num_landmarks=nystromer_landmarks)
+        else:
+            self.fast_attention = FastAttention(dim_head + additional_heads, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+
         self.local_attn = LocalAttention(window_size = local_window_size, causal = causal, autopad = True, dropout = dropout, look_forward = int(not causal), rel_pos_emb_config = (dim_head, local_heads)) if local_heads > 0 else None
 
         self.fixed_emb = fixed_emb
@@ -871,27 +1076,41 @@ class Attention(nn.Module):
             self.pos_emb = None
             self.layer_pos_emb = None
 
-        self.to_q = default(nn.Linear(dim, inner_dim, bias = qkv_bias),to_q)
-        self.to_k = default(nn.Linear(dim, inner_dim, bias = qkv_bias),to_k)
-        self.to_v = default(nn.Linear(dim, inner_dim, bias = qkv_bias),to_v)
-        self.to_out = default(nn.Linear(inner_dim, dim, bias = attn_out_bias),to_out)
+        self.to_q = default(to_q,nn.Linear(dim, inner_dim, bias = qkv_bias))
+        self.to_k = default(to_k,nn.Linear(dim, inner_dim, bias = qkv_bias))
+        self.to_v = default(to_v,nn.Linear(dim, inner_dim, bias = qkv_bias))
+        self.to_out = default(to_out,nn.Linear(inner_dim, dim, bias = attn_out_bias))
         self.dropout = nn.Dropout(dropout)
+
+
+        self.q_rel_pos_emb = ConstrainedLinear(
+            self.global_heads*dim_head,
+            self.global_heads*dim_head,
+            pos_scales,
+            self.global_heads,
+            content_rel_attn=content_rel_attn
+        )
+        self.k_rel_pos_emb = IdentityLinear(
+            self.global_heads*dim_head,
+            self.global_heads*dim_head,
+            pos_scales,
+            self.global_heads,
+            content_rel_attn=content_rel_attn
+        )
+        self.rel_pos_emb_q = LearnableSinusoidEncoding(pos_scales*2)
+        self.rel_pos_emb_k = LearnableSinusoidEncoding(pos_scales*2)
 
         self.attn_to_self = None
         if attend_to_self:
             self_head_dim = 1
-            self.features = 5
+            self.features = 7
             scale = 2
             self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,self.features,groups=inner_dim)
-            self.to_q_self = nn.Linear(1, self_head_dim)
-            self.to_k_self = nn.Linear(1, self_head_dim)
-            self.to_v_self = nn.Linear(1, self_head_dim)
-            self.to_out_self = nn.Linear(self_head_dim, 1)
             self.project_down = nn.Linear(inner_dim*scale, inner_dim)
             self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
         self.num_mem_kv = num_mem_kv
-        num_prev_state = default(num_mem_kv,num_prev_state)
+        num_prev_state = default(num_prev_state,num_mem_kv)
         
         if num_mem_kv > 0:
             self.mem_k = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
@@ -905,12 +1124,29 @@ class Attention(nn.Module):
             self.mem_lin_v = nn.Linear(dim_head,dim_head)
             self.out = nn.Linear(dim_head,dim_head)
             
-            self.mem_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+            self.mem_attn = FastAttention(dim_head + additional_heads, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
             self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
             self.out_2 = nn.Linear(dim_head,dim_head)
             self.zero_0 = nn.Parameter(torch.ones(dim_head))
             self.zero_1 = nn.Parameter(torch.zeros(dim_head))
             self.norm = ScaleNorm(dim_head)
+
+            self.q_rel_pos_emb_mem = ConstrainedLinear(
+                self.heads*dim_head,
+                self.heads*dim_head,
+                pos_scales,
+                self.heads,
+                content_rel_attn=content_rel_attn
+            )
+            self.k_rel_pos_emb_mem = IdentityLinear(
+                self.heads*dim_head,
+                self.heads*dim_head,
+                pos_scales,
+                self.heads,
+                content_rel_attn=content_rel_attn
+            )
+            self.rel_pos_emb_q_mem = LearnableSinusoidEncoding(pos_scales*2)
+            self.rel_pos_emb_k_mem = LearnableSinusoidEncoding(pos_scales*2)
         else:
             self.prev_state = None
 
@@ -922,14 +1158,14 @@ class Attention(nn.Module):
         
         cross_attend = exists(context)
 
-        if exists(self.pos_emb):
-            x = x + self.pos_emb(x)
-        pos_emb = (self.layer_pos_emb(x) if pos_emb==None else pos_emb) if exists(self.layer_pos_emb) else None
-
         context = default(context, x)
         context_mask = default(context_mask, mask) if not cross_attend else context_mask
 
         q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
+
+        if exists(self.pos_emb):
+            x = x + self.pos_emb(x)
+        pos_emb = (self.layer_pos_emb(x) if pos_emb==None else pos_emb) if exists(self.layer_pos_emb) else None
 
         tmp_k,tmp_v = k,v
 
@@ -941,16 +1177,15 @@ class Attention(nn.Module):
             self_q = ckpt(self.feat_prep,self_q.transpose(-1,-2)).transpose(-1,-2)
             org_shape = self_q.shape
             self_q = rearrange(self_q, 'b n d -> b n d 1')
-            q_ = self.to_q_self(self_q)
-            k_ = self.to_k_self(self_q)
-            v_ = self.to_v_self(self_q)
-            self_q = ckpt(self.attn_to_self,q_,k_,v_) if not self.self_attend_vanilla_attn else ckpt(vanilla_attention,q_,k_,v_)
-            self_q = self.to_out_self(self_q)
+            self_q = ckpt(self.attn_to_self,self_q,self_q,self_q) if not self.self_attend_vanilla_attn else ckpt(vanilla_attention,self_q,self_q,self_q)
             self_q = rearrange(self_q, 'b n d 1 -> b n d').reshape(org_shape)
             q = ckpt(self.project_down,self_q)
-            del(q_,k_,v_,self_q)
+            del(self_q)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+
+        if exists(pos_emb) and not cross_attend:
+            q, k = apply_rotary_pos_emb(q, k, pos_emb)
 
         (q, lq), (k, lk), (v, lv) = map(lambda t: (t[:, :gh], t[:, gh:]), (q, k, v))
 
@@ -961,8 +1196,11 @@ class Attention(nn.Module):
                 global_mask = context_mask[:, None, :, None]
                 v.masked_fill_(~global_mask, 0.)
 
-            if exists(pos_emb) and not cross_attend:
-                q, k = apply_rotary_pos_emb(q, k, pos_emb)
+            pos_q = rearrange(self.rel_pos_emb_q(torch.arange(q.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
+            pos_k = rearrange(self.rel_pos_emb_k(torch.arange(k.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
+            
+            q = ckpt(self.q_rel_pos_emb,q,pos_q)
+            k = ckpt(self.k_rel_pos_emb,k,pos_k)
 
             out = ckpt(self.fast_attention,q, k, v) if not self.vanilla_attn else ckpt(vanilla_attention,q,k,v)
             attn_outs.append(out)
@@ -987,13 +1225,20 @@ class Attention(nn.Module):
             mem_v = torch.cat((mem_v,prev_state),dim=-2).requires_grad_(True)
             mem_k = self.mem_lin_k(mem_k)
             mem_v = self.mem_lin_v(mem_v) 
-            out_ = ckpt(self.mem_attn,out,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,out,mem_k,mem_v)
+
+            mem_pos_q = rearrange(self.rel_pos_emb_q_mem(torch.arange(out.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
+            mem_pos_k = rearrange(self.rel_pos_emb_k_mem(torch.arange(mem_k.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
+            
+            out_ = ckpt(self.q_rel_pos_emb_mem,out,mem_pos_q)
+            mem_k = ckpt(self.k_rel_pos_emb_mem,mem_k,mem_pos_k)
+
+            out_ = ckpt(self.mem_attn,out_,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,out_,mem_k,mem_v)
             out_ = ckpt(self.out_2,out_)
             out = self.norm((out*self.zero_1) + (out_*self.zero_0))
 
             tmp = self.out(out)
             prev_state = ckpt(self.prev_state_attn,prev_state,tmp,tmp) if not self.vanilla_attn else ckpt(vanilla_attention,prev_state,tmp,tmp)
-            self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((mem_k.size(1),-1,mem_k.size(-1)))
+            self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((mem_v.size(1),-1,mem_v.size(-1)))
 
 
         out = rearrange(out, 'b h n d -> b n (h d)')

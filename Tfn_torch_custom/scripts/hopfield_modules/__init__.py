@@ -652,7 +652,7 @@ class HopfieldLayer(nn.Module):
                  num_heads: int = 1,
                  scaling: Optional[Union[float, Tensor]] = None,
                  update_steps_max: Optional[Union[int, Tensor]] = 0,
-                 update_steps_eps: Union[float, Tensor] = 1e-4,
+                 update_steps_eps: Union[float, Tensor] = 1e-7,
                  lookup_weights_as_separated: bool = False,
                  lookup_targets_as_trainable: bool = True,
 
