@@ -1,3 +1,4 @@
+import math
 import io, os
 import random,wandb
 from torch import nn
@@ -6,6 +7,7 @@ from einops import rearrange
 import math, time, torch #,copy
 #from performer_torch import PerformerLM
 #from pytorch_model_summary import summary
+from inputimeout import inputimeout as inpt
 from torchnlp.encoders.text import SubwordEncoder
 from torchtext.utils import download_from_url, extract_archive
 #from typing import Tuple, Optional, Any, NoReturn, Union, Literal
@@ -26,6 +28,19 @@ elif file == "wikitextv103":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 
+def initialize_tokenizer(target_vacab = 2**15):
+    sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r\v "
+    sample += " ".join([i for i in sample])
+    sample += "".join([i for i in io.open(train_filepath, encoding="utf8")]) + "".join([i for i in io.open(test_filepath, encoding="utf8")]) + "".join([i for i in io.open(valid_filepath, encoding="utf8")])
+    #TODO: add file parser for multiple files in a given directory: f = open("file.txt,py","rt")
+    tokenizer = SubwordEncoder(sample,target_vocab_size=target_vacab,reserved_tokens=[
+    '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
+    ],
+    eos_index=3,unknown_index=1,padding_index=0)
+    vocab_size = tokenizer.vocab_size
+    torch.save(tokenizer,"models/tokenizer_"+str(vocab_size)+".tar")
+    return tokenizer,vocab_size
+
 retrieve_tokenizer = True
 #TODO: Define a better file parsing mechanism
 if retrieve_tokenizer:
@@ -38,18 +53,25 @@ if retrieve_tokenizer:
     for i in tokenizer_files:
         if int(i[10:-4]) < int(tokenizer_name[10:-4]):
             tokenizer_name = i
+    print([[i,j] for i,j in enumerate(tokenizer_files)])
+    try:
+        inp = int(inpt(prompt="index of file to be used(starting from 0):",timeout=15))   
+    except:
+        inp = None
+    if inp != None: 
+        if inp < len(tokenizer_files):
+            tokenizer_name = tokenizer_files[inp]
     tokenizer = torch.load("models/"+str(tokenizer_name))
     vocab_size = tokenizer.vocab_size
 else:
-    sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r"
-    sample += " ".join(sample.split(""))
-    sample += io.open(train_filepath, encoding="utf8") + io.open(test_filepath, encoding="utf8") + io.open(val_filepath, encoding="utf8")
-    tokenizer = SubwordEncoder(sample,target_vocab_size=2**17,reserved_tokens=[
-    '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
-    ],
-    eos_index=3,unknown_index=1,padding_index=0)
-    vocab_size = tokenizer.vocab_size
-    torch.save(tokenizer,"models/tokenizer_"+str(vocab_size)+".tar")
+    try:
+        inp = int(inpt(prompt="target vocabulary size (default=2**15):",timeout=15))   
+        if type(inp) != int:
+            inp = 2**15
+            print("invalid input")
+    except:
+        inp = 2**15
+    tokenizer, vocab_size = initialize_tokenizer(inp)
 vocab = tokenizer.vocab
 
 def batchify(data, bsz,dim=0):
@@ -62,19 +84,20 @@ def batchify(data, bsz,dim=0):
 
 batch_size = 1
 eval_batch_size = batch_size
+mini_batch_size = 16
 
 ntokens = tokenizer.vocab_size # None
 emsize = 512
 nhid = emsize * 4
-nlayers = 2
-deberta_layers = 2
+nlayers = 1
+deberta_layers = 4
 repeated_deberta_layers = 0
 full_block_repeat = False
 nhead = 8
 dropout = (math.pi/10)
 mem_tokens = emsize*4
-bptt = (1024*16+mem_tokens) - mem_tokens
-seq_scale_down = emsize
+bptt = (1024*4) #- mem_tokens
+seq_scale_down = max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len = max(2**14,2**17 // seq_scale_down)
 mlp_layers = 1
 fno_layers = 4
@@ -643,7 +666,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         torch.cuda.empty_cache()
 
         if not discriminator:
-            outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt)
+            outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
         else:
             pass
 
@@ -740,13 +763,13 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             """
             intermediate_save_time = time.time()
             model.train()
-        if step_scheduler != None:
+        if step_scheduler != None and batch%mini_batch_size == 0:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
                 scheduler.step(step)
                 if discriminator:
                     scheduler_disc.step(step)
                 step += 1
-        if batch % log_interval == 0 and batch > 0 and batch != resume_batch:
+        if (batch % log_interval == 0 and batch != resume_batch):
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
             total_ppl /= log_interval
@@ -773,46 +796,47 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             total_acc_d = 0.
             total_ppl = 0.
             start_time = time.time()
-        
-        if discriminator:
-            wandb.log(
-                {
-                    "Loss Generator":loss_g,
-                    "Total Loss Generator":tmp_loss,
-                    "Loss Discriminator":loss_d,
-                    "step":step,
-                    "Accuracy Generator(%)":acc*100/2,
-                    "Total Accuracy Generator(%)":tmp_acc*100/2,
-                    "Accuracy Discriminator(%)":acc_d*100/2,
-                    "epoch":epoch,
-                    "batch":batch,
-                    "Perplexity of Generator":ppl,
-                    'Learning_Rate':scheduler.get_last_lr()[0],
-                    'Time per Step':(time.time() - step_time),
-                    "input":wandb.Html(inputs),
-                    "output":wandb.Html(output),
-                    "target":wandb.Html(req_targets),
-                    "avg_inference_time":model.get_avg_inference_time(),
-                }
-            )
-        else:
-            wandb.log(
-                {
-                    "Loss Generator":loss,
-                    "step":step,
-                    "Accuracy Generator(%)":acc*100/2,
-                    "epoch":epoch,
-                    "batch":batch,
-                    "Perplexity of Generator":ppl,
-                    'Learning_Rate':scheduler.get_last_lr()[0],
-                    'Time per Step':(time.time() - step_time),
-                    "input":wandb.Html(inputs),
-                    "output":wandb.Html(output),
-                    "target":wandb.Html(req_targets),
-                    "avg_inference_time":model.get_avg_inference_time()
-                },
-                
-            )
+        total_time_per_step += (time.time() - step_time)
+        if batch%mini_batch_size == 0:
+            if discriminator:
+                wandb.log(
+                    {
+                        "Loss Generator":loss_g,
+                        "Total Loss Generator":tmp_loss,
+                        "Loss Discriminator":loss_d,
+                        "step":step,
+                        "Accuracy Generator(%)":acc*100/2,
+                        "Total Accuracy Generator(%)":tmp_acc*100/2,
+                        "Accuracy Discriminator(%)":acc_d*100/2,
+                        "epoch":epoch,
+                        "batch":batch,
+                        "Perplexity of Generator":ppl,
+                        'Learning_Rate':scheduler.get_last_lr()[0],
+                        'Time per Step':total_time_per_step/mini_batch_size,
+                        "input":wandb.Html(inputs),
+                        "output":wandb.Html(output),
+                        "target":wandb.Html(req_targets),
+                        "avg_inference_time":model.get_avg_inference_time(),
+                    }
+                )
+            else:
+                wandb.log(
+                    {
+                        "Loss Generator":loss,
+                        "step":step,
+                        "Accuracy Generator(%)":acc*100/2,
+                        "epoch":epoch,
+                        "batch":batch,
+                        "Perplexity of Generator":ppl,
+                        'Learning_Rate':scheduler.get_last_lr()[0],
+                        'Time per Step':total_time_per_step/mini_batch_size,
+                        "input":wandb.Html(inputs),
+                        "output":wandb.Html(output),
+                        "target":wandb.Html(req_targets),
+                        "avg_inference_time":model.get_avg_inference_time()
+                    },
+                    
+                )
 
 while True:
     if epoch >= epochs:

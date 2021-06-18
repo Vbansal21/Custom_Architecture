@@ -416,7 +416,8 @@ class NystromAttention(nn.Module):
         context = False,
         residual_conv_kernel = 33,
         eps = 1e-8,
-        dropout = 0.
+        dropout = 0.,
+        transpose_heads_n_dims = False,
     ):
         super().__init__()
         self.eps = eps
@@ -438,10 +439,14 @@ class NystromAttention(nn.Module):
 
         self.residual = residual
         self.context = context
+        self.transpose_heads_n_dims = transpose_heads_n_dims
         if residual:
             kernel_size = residual_conv_kernel
             padding = residual_conv_kernel // 2
-            self.res_conv = nn.Conv2d(heads, heads, (kernel_size, 1), padding = (padding, 0), groups = heads, bias = False)
+            if not self.transpose_heads_n_dims:
+                self.res_conv = nn.Conv2d(heads, heads, (kernel_size, 1), padding = (padding, 0), groups = heads, bias = False)
+            else:
+                self.res_conv = nn.Conv2d(dim_head, dim_head, (kernel_size, 1), padding = (padding, 0), groups = dim_head, bias = False)
 
     def forward(self, q,k,v, mask = None, return_attn = False):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
@@ -518,7 +523,10 @@ class NystromAttention(nn.Module):
 
         if self.residual:
             context = True if q.size(-2) != k.size(-2) else self.context
-            out += self.res_conv(v if not context else q)
+            if not self.transpose_heads_n_dims:
+                out = out + self.res_conv(v if not context else q)
+            else:
+                out = out + self.res_conv(v.transpose(-3,-1) if not context else q.transpose(-3,-1)).transpose(-3,-1)
 
         # merge and combine heads
 
@@ -1107,7 +1115,15 @@ class Attention(nn.Module):
             scale = 2
             self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,self.features,groups=inner_dim)
             self.project_down = nn.Linear(inner_dim*scale, inner_dim)
-            self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+
+            self_nystrom = True
+
+            if self_nystrom:
+                self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=2**(int(math.log(2,math.log(2,inner_dim*scale)))) , transpose_heads_n_dims=True)
+            else:
+                self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+
+            #self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
         self.num_mem_kv = num_mem_kv
         num_prev_state = default(num_prev_state,num_mem_kv)

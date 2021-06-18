@@ -1056,6 +1056,8 @@ class TransformerModel(Module):
                     autocast_enabled=False,
                     trainable_index=None,
                     mem_ctxt=None,
+                    mini_batch_size=None,
+                    batch=None,
                 ):
 
         self.train()
@@ -1073,7 +1075,6 @@ class TransformerModel(Module):
             outputs = {}
             losses = {}
             labels = {}
-            self.zero_grad()
             output,single_pass_mem,single_pass_mem_ctxt = self.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
             torch.cuda.empty_cache()
             if trainable_index != None:
@@ -1086,9 +1087,10 @@ class TransformerModel(Module):
             loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
             loss.backward(retain_graph=True)
             torch.cuda.empty_cache()
-
-            optimizer.step()
-            optimizer.zero_grad()
+            if mini_batch_size != None and batch != None:
+                if batch%mini_batch_size == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
             outputs['output'] = output
 
             losses['loss'] = loss.item()
