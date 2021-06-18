@@ -643,6 +643,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     total_loss = 0.
     total_loss_d = 0.
     total_ppl = 0.
+    total_time_per_step = 0.
     start_time = time.time()
     intermediate_save_time = time.time()
     single_pass_mem = None
