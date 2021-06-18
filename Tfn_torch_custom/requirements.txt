@@ -10,5 +10,6 @@ memory-profiler
 wandb 
 mmcv
 pytorch-fast-transformers
+inputimeout
 # sudo apt install libopenmpi-dev
 # sudo apt install libaio-dev

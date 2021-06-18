@@ -5,6 +5,7 @@ from torch import nn
 from torch import Tensor
 from einops import rearrange
 import math, time, torch #,copy
+from typing import List
 #from performer_torch import PerformerLM
 #from pytorch_model_summary import summary
 from inputimeout import inputimeout as inpt
@@ -28,11 +29,48 @@ elif file == "wikitextv103":
     url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
 test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
 
+files = []
+string_of_files = ""
+
+try:
+    retrieve_tokenizer = inpt(prompt="retrieve tokenizer?(default: True):",timeout=15)
+    if len(retrieve_tokenizer) < 1:
+        retrieve_tokenizer = True
+except:
+    retrieve_tokenizer = True
+
+def list_of_all_files(path:str="./") -> str:
+    try:
+        super_dirs = os.listdir(path)
+    except:
+        return [path[:-1]]
+    dirs = [path+i+"/" for i in super_dirs]
+    files = []
+    if len(dirs) > 0:
+        for i in dirs:
+            files += list_of_all_files(i)
+    return files
+
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".tar",".zip",".pt",".pth",".onnx"]) -> str:
+    for i in files_not_to_be_included:
+        if i in file_name_with_path:
+            return ""
+    f = open(file_name_with_path)
+    return str(f)
+
 def initialize_tokenizer(target_vacab = 2**15):
+    global files, string_of_files
     sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r\v "
     sample += " ".join([i for i in sample])
-    sample += "".join([i for i in io.open(train_filepath, encoding="utf8")]) + "".join([i for i in io.open(test_filepath, encoding="utf8")]) + "".join([i for i in io.open(valid_filepath, encoding="utf8")])
-    #TODO: add file parser for multiple files in a given directory: f = open("file.txt,py","rt")
+    tmp = "".join([i for i in io.open(train_filepath, encoding="utf8")]) + "".join([i for i in io.open(test_filepath, encoding="utf8")]) + "".join([i for i in io.open(valid_filepath, encoding="utf8")])
+    sample += " ".join([i for i in tmp]) + tmp
+    path = "../"
+    files += list_of_all_files(path)
+    for i in files:
+        string_of_files += file_to_str(i)
+    sample += " ".join([i for i in string_of_files])
+    sample = "".join(list(set([i for i in sample])))
+    print("parsed all files")
     tokenizer = SubwordEncoder(sample,target_vocab_size=target_vacab,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
     ],
@@ -41,8 +79,6 @@ def initialize_tokenizer(target_vacab = 2**15):
     torch.save(tokenizer,"models/tokenizer_"+str(vocab_size)+".tar")
     return tokenizer,vocab_size
 
-retrieve_tokenizer = True
-#TODO: Define a better file parsing mechanism
 if retrieve_tokenizer:
     files = os.listdir("models/")
     tokenizer_files = []
@@ -84,19 +120,19 @@ def batchify(data, bsz,dim=0):
 
 batch_size = 1
 eval_batch_size = batch_size
-mini_batch_size = 16
+mini_batch_size = 1
 
 ntokens = tokenizer.vocab_size # None
-emsize = 512
+emsize = 256
 nhid = emsize * 4
-nlayers = 1
-deberta_layers = 4
+nlayers = 4
+deberta_layers = 12
 repeated_deberta_layers = 0
 full_block_repeat = False
 nhead = 8
 dropout = (math.pi/10)
 mem_tokens = emsize*4
-bptt = (1024*4) #- mem_tokens
+bptt = (1024*16) #- mem_tokens
 seq_scale_down = max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len = max(2**14,2**17 // seq_scale_down)
 mlp_layers = 1
@@ -205,13 +241,13 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
     rnd = 0 if not shuffle else random.randint(0,100)/10
     if progressive:
         seq_len = min(bptt, source.size(1) - j) -1 -1
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=30.1,mask_together_nos=10,mask_continuous_pos=70,shuffle_percentage=rnd,shuffle_together_nos=5)
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=30,mask_together_nos=10,mask_continuous_pos=170,shuffle_percentage=rnd,shuffle_together_nos=seq_scale_down)
         data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
         targets = torch.cat((targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
     else:
         seq_len = min(bptt, source.size(1) - j) -1 -1 -1
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=30.1,mask_together_nos=10,mask_continuous_pos=70,shuffle_percentage=rnd,shuffle_together_nos=5)
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=30,mask_together_nos=10,mask_continuous_pos=170,shuffle_percentage=rnd,shuffle_together_nos=seq_scale_down)
         data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
         targets = torch.cat((torch.full((targets.size(0),1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
@@ -228,9 +264,16 @@ try:
     processed_val_data = batchify(processed_val_data,eval_batch_size,-1)
 except Exception as e:
     print(e)
-    train_data = data_process(io.open(train_filepath, encoding="utf8").read())
-    val_data = data_process(io.open(valid_filepath, encoding="utf8").read())
-    test_data = data_process(io.open(test_filepath, encoding="utf8").read())
+    train_portion = int(len(string_of_files) * 0.6)
+    test_portion = int(len(string_of_files) * 0.2)
+
+    train_sample = "".join([i for i in io.open(train_filepath, encoding="utf8")]) + string_of_files[:train_portion]
+    test_sample = "".join([i for i in io.open(test_filepath, encoding="utf8")]) + string_of_files[train_portion:train_portion+test_portion]
+    val_sample = "".join([i for i in io.open(valid_filepath, encoding="utf8")]) + string_of_files[train_portion+test_portion:]
+    
+    train_data = data_process(train_sample)
+    val_data = data_process(val_sample)
+    test_data = data_process(test_sample)
 
     processed_train_data = batchify(train_data, batch_size)
     processed_val_data = batchify(val_data, eval_batch_size)

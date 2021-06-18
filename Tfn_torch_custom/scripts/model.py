@@ -131,7 +131,7 @@ class nBRC(nn.Module):
         return c * h + (1 - c) * torch.tanh(l(self.U, x) + a * h)
 
 class GRUGating(nn.Module):
-    def __init__(self, dim, fn=None, mogrify = True, norm = True, post_norm = True):
+    def __init__(self, dim, fn=None, mogrify = False, norm = True, post_norm = True):
         super().__init__()
         self.dim = dim
         self.fn = fn
@@ -154,7 +154,7 @@ class GRUGating(nn.Module):
             if self.post_norm:
                 y_ = ckpt(self.fn,y,*args)
 
-                y = self.norm(y_+y) if self.norm != None else y_
+                y = self.norm(y_) if self.norm != None else y_
             else:
                 y = ckpt(self.fn,self.norm(y),*args)
         else:
@@ -292,7 +292,7 @@ class TransformerBlock(Module):
         
 
         if hopfield:
-            hop_attn = nn.Sequential(
+            hop_attn = GRUGating(d_model,nn.Sequential(
                                     nn.Linear(d_model,hop_dim),
                                     HopfieldLayer(
                                                 input_size=hop_dim,
@@ -302,7 +302,7 @@ class TransformerBlock(Module):
                                                 quantity=hop_dim,
                                             ),
                                     nn.Linear(hop_dim,d_model)
-                                    )
+                                    ))
         else:
             hop_attn = None
 
