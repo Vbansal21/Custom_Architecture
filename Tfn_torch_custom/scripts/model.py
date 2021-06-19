@@ -14,7 +14,7 @@ from memory_profiler import profile
 
 import copy
 import typing
-from typing import Tuple, Optional, Any, NoReturn, Union, List
+from typing import Tuple, Optional, Any, NoReturn, Union, List, Dict
 
 from torch import Tensor
 from torch.nn.modules.container import ModuleList, Module
@@ -237,6 +237,7 @@ class TransformerBlock(Module):
                      pkm_dims=None,
                      pkm_keys=64,
                      decoder=False,
+                     encoder_n_decoder=False,
                      hopfield=False,
                      hop_dim=None,
                      fno_layers=4,
@@ -345,7 +346,7 @@ class TransformerBlock(Module):
                                                                             attend_to_self=attend_to_self
                                                                         ),
                                                         pkm=copy.deepcopy(self.feed_forward),
-                                                        ))
+                                                        )) if encoder_n_decoder else Identity()
 
             self.self_ctxt_enc = GRUGating(
                                             d_model,
@@ -364,7 +365,7 @@ class TransformerBlock(Module):
                                                                             attend_to_self=attend_to_self
                                                                         ),
                                                         pkm=copy.deepcopy(self.feed_forward),
-                                                        ))
+                                                        )) if encoder_n_decoder else Identity()
 
             attn = {
                 'self_1':Attention(d_model,
@@ -489,7 +490,7 @@ class TransformerModule(ModuleList):
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,encoder_n_decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
         self.attend_to_inp = Attention(d_model,
@@ -1135,16 +1136,30 @@ class TransformerModel(Module):
 
     #@autocast()
     def forward(self,
-                    src:Tensor,
+                    src:Union[Tensor,Dict[Tensor]],
                     context: Optional[Tensor] = None,
-                    mem: Optional[Tensor] = None, 
+                    mem: Union[Tensor,None,Dict[Tensor]] = None, 
                     context_mem: Optional[Tensor] = None,
                     return_mem: bool = True,
                     return_logits: bool = False,
                     seq_scale_down: bool = True,
-                ) -> Tuple[Tensor,Optional[Tensor],Optional[Tensor]]:
+                ) -> Union[Tensor,Tuple[Tensor,Optional[Tensor],Optional[Tensor]]]:
 
         start_time = time.time()
+
+        if type(src)==dict:
+            try:
+                context = src["context"]
+            except:
+                pass
+            src = src["src"]
+        
+        if type(mem)==dict:
+            try:
+                context_mem = mem["context_mem"]
+            except:
+                pass
+            mem = mem["mem"]
 
         self.prev_states.append(self.get_prev_state())
         while len(self.prev_states) > self.max_prev_states:
