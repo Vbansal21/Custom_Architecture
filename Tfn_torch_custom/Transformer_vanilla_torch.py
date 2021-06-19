@@ -33,8 +33,8 @@ files = []
 string_of_files = ""
 
 try:
-    retrieve_tokenizer = inpt(prompt="retrieve tokenizer?(default: True):",timeout=15)
-    if len(retrieve_tokenizer) < 1:
+    retrieve_tokenizer = eval(inpt(prompt="retrieve tokenizer?(default: True):",timeout=15))
+    if type(retrieve_tokenizer) != int or type(retrieve_tokenizer) != bool:
         retrieve_tokenizer = True
 except:
     retrieve_tokenizer = True
@@ -123,16 +123,16 @@ eval_batch_size = batch_size
 mini_batch_size = 1
 
 ntokens = tokenizer.vocab_size # None
-emsize = 256
+emsize = 512
 nhid = emsize * 4
-nlayers = 4
-deberta_layers = 12
+nlayers = 1
+deberta_layers = 4
 repeated_deberta_layers = 0
 full_block_repeat = False
 nhead = 8
 dropout = (math.pi/10)
 mem_tokens = emsize*4
-bptt = (1024*16) #- mem_tokens
+bptt = (1024*8) #- mem_tokens
 seq_scale_down = max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len = max(2**14,2**17 // seq_scale_down)
 mlp_layers = 1
@@ -240,14 +240,14 @@ def random_mask_shuffle_encoder(
 def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
     rnd = 0 if not shuffle else random.randint(0,100)/10
     if progressive:
-        seq_len = min(bptt, source.size(1) - j) -1 -1
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=30,mask_together_nos=10,mask_continuous_pos=170,shuffle_percentage=rnd,shuffle_together_nos=seq_scale_down)
-        data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        seq_len = min(bptt, source.size(1) - j) -3
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=30,mask_together_nos=1,mask_continuous_pos=170,shuffle_percentage=rnd,shuffle_together_nos=seq_scale_down)
+        data = torch.cat((torch.full((data.size(0),2),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
-        targets = torch.cat((targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        targets = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
     else:
-        seq_len = min(bptt, source.size(1) - j) -1 -1 -1
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=30,mask_together_nos=10,mask_continuous_pos=170,shuffle_percentage=rnd,shuffle_together_nos=seq_scale_down)
+        seq_len = min(bptt, source.size(1) - j) -3
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=30,mask_together_nos=1,mask_continuous_pos=170,shuffle_percentage=rnd,shuffle_together_nos=seq_scale_down)
         data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
         targets = torch.cat((torch.full((targets.size(0),1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
@@ -656,7 +656,7 @@ def evaluate(eval_model, data_source, print_val_loss=False):
     total_acc = 0.
     single_pass_mem = None
     single_pass_mem_ctxt = None
-    stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
+    stride_size = bptt-3 if progressive_generation else bptt -3
     with torch.no_grad():
         for i in range(0, data_source.size(1), stride_size):
             torch.cuda.empty_cache()
@@ -695,7 +695,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     acc_d = 0
     total_acc = 0
     total_acc_d = 0
-    stride_size = bptt-1-1 if progressive_generation else bptt -1 -1 -1
+    stride_size = bptt-3 if progressive_generation else bptt -3
     for batch, i in enumerate(range(0, processed_train_data.size(1), stride_size)):
         model.train()
         step_time = time.time()

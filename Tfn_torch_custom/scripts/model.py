@@ -1168,14 +1168,16 @@ class TransformerModel(Module):
             context = context * math.sqrt(self.ninp)
             context = ckpt(self.ffd3,context)
 
-        if mem != None and self.mem_exist:
-            src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+        if mem != None:
+            if (mem.size(-1) == src.size(-1) and len(mem.shape) == 2): 
+                src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
         elif self.mem_exist:
             src = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
 
         if self.encoder_decoder:
-            if context_mem != None and self.context_mem_exist:
-                context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+            if context_mem != None:
+                if (context_mem.size(-1) == context.size(-1) and len(context_mem.shape) == 2): 
+                    context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
             elif self.context_mem_exist:
                 context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
 
