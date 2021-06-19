@@ -338,7 +338,7 @@ class TransformerBlock(Module):
                                                                             dim_head=d_model//nhead,
                                                                             num_mem_kv=mem_kv,
                                                                             local_heads=local_heads,
-                                                                            hop_attn=hop_attn,
+                                                                            hop_attn=copy.deepcopy(hop_attn),
                                                                             rotary_pos_emb=rotary_pos_emb,
                                                                             fixed_emb=fixed_emb,
                                                                             causal=causal,
@@ -357,7 +357,7 @@ class TransformerBlock(Module):
                                                                             dim_head=d_model//nhead,
                                                                             num_mem_kv=mem_kv,
                                                                             local_heads=local_heads,
-                                                                            hop_attn=hop_attn,
+                                                                            hop_attn=copy.deepcopy(hop_attn),
                                                                             rotary_pos_emb=rotary_pos_emb,
                                                                             fixed_emb=fixed_emb,
                                                                             causal=causal,
@@ -382,24 +382,29 @@ class TransformerBlock(Module):
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
+                                        hop_attn=copy.deepcopy(hop_attn),
                                         local_heads=local_heads,
                                         rotary_pos_emb=rotary_pos_emb,
                                         fixed_emb=fixed_emb,
                                         causal=causal,
-                                        nystrom=nystrom,),
+                                        nystrom=nystrom,
+                                        attend_to_self=attend_to_self),
                 'cross_1':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
                                         hop_attn=copy.deepcopy(hop_attn),
                                         rotary_pos_emb=False,
-                                        nystrom=nystrom,),
+                                        nystrom=nystrom,
+                                        attend_to_self=attend_to_self),
                 'cross_2':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
+                                        hop_attn=copy.deepcopy(hop_attn),
                                         nystrom=nystrom,
-                                        rotary_pos_emb=False)
+                                        rotary_pos_emb=False,
+                                        attend_to_self=attend_to_self)
             }
 
             attn_block = ET_Decoder_Block(d_model,
@@ -462,8 +467,8 @@ class TransformerModule(ModuleList):
                     modes=None,
                     width=None,
                     full_block_repeat=False,
-                    causal=True,
-                    nystrom=True,
+                    causal=False,
+                    nystrom=False,
                     local_heads=2,
                     attend_to_self=True,
                     prev_state_self_num=32,
@@ -573,7 +578,7 @@ class TransformerModule(ModuleList):
             output = ckpt(self.prev_state_attend,output,prev_state)
 
         if self.deberta_layers!=None:
-            out = self.absolutepositionalembedding(output)
+            out = Positional_Encoding(self.absolutepositionalembedding(output))
             if self.full_block_repeat:
                 for _ in range(self.repeated_deberta_layers+1):
                     for enc in self.deberta_layers:
@@ -1136,9 +1141,9 @@ class TransformerModel(Module):
 
     #@autocast()
     def forward(self,
-                    src:Union[Tensor,Dict[Tensor]],
+                    src:Union[Tensor,Dict[str,Tensor]],
                     context: Optional[Tensor] = None,
-                    mem: Union[Tensor,None,Dict[Tensor]] = None, 
+                    mem: Union[Tensor,None,Dict[str,Tensor]] = None, 
                     context_mem: Optional[Tensor] = None,
                     return_mem: bool = True,
                     return_logits: bool = False,

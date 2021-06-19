@@ -1028,7 +1028,7 @@ class Attention(nn.Module):
         local_heads = 0,
         local_window_size = 256,
         nystromer_landmarks = None,
-        nb_features = 512,
+        nb_features = 1024,
         feature_redraw_interval = 1024,
         generalized_attention = True,
         kernel_fn = nn.Sigmoid(),

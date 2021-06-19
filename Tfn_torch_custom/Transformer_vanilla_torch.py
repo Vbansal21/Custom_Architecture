@@ -126,7 +126,7 @@ ntokens = tokenizer.vocab_size # None
 emsize = 512
 nhid = emsize * 4
 nlayers = 1
-deberta_layers = 4
+deberta_layers = 3
 repeated_deberta_layers = 0
 full_block_repeat = False
 nhead = 8
@@ -143,10 +143,10 @@ causal = False
 nystrom = False
 attend_to_self = True
 attend_to_inp = True
-feature_redraw_interval = nhead*2
+feature_redraw_interval = nhead**2
 prev_state_len = emsize*4
-prev_state_self_num = 64
-local_heads = 1
+prev_state_self_num = 128
+local_heads = 2
 local_heads = min(local_heads,nhead)
 
 discriminator = False #INTEGRATED DISCRIMINATOR: DEPRECATED
@@ -238,19 +238,24 @@ def random_mask_shuffle_encoder(
     return out,index_to_be_trained_on
 
 def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
-    rnd = 0 if not shuffle else random.randint(0,100)/10
+    rnd_shuffle = 0 if not shuffle else random.randint(0,100000000)/1000000
+    rnd_mask = random.randint(0,7000000000)/100000000
+    rnd_mask_together = random.randint(0,seq_scale_down**2)
+    rnd_1 = random.randint(0,24)
+    rnd_2 = random.randint(0,12)
+    rnd_3 = random.randint(0,12)
     if progressive:
         seq_len = min(bptt, source.size(1) - j) -3
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=30,mask_together_nos=1,mask_continuous_pos=170,shuffle_percentage=rnd,shuffle_together_nos=seq_scale_down)
-        data = torch.cat((torch.full((data.size(0),2),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
+        data = torch.cat((torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),rnd_2+1-min(1,rnd_1)),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
-        targets = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        targets = torch.cat((torch.full((data.size(0),max(rnd_1-1,0)),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device)),dim=1).contiguous()
     else:
         seq_len = min(bptt, source.size(1) - j) -3
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=30,mask_together_nos=1,mask_continuous_pos=170,shuffle_percentage=rnd,shuffle_together_nos=seq_scale_down)
-        data = torch.cat((torch.full((data.size(0),1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),1),5,dtype=torch.long,device=device),torch.full((data.size(0),1),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
+        data = torch.cat((torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),rnd_2),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
-        targets = torch.cat((torch.full((targets.size(0),1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),2),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        targets = torch.cat((torch.full((targets.size(0),rnd_1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device)),dim=1).contiguous()
     torch.cuda.empty_cache()
     return data,targets,index_to_be_trained_on
 
@@ -490,8 +495,8 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-log_interval = 500
-epochs = 15
+log_interval = feature_redraw_interval
+epochs = 4
 
 import matplotlib.pyplot as plt
 plt.plot([lambda_lr(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
