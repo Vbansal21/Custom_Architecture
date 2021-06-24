@@ -55,17 +55,20 @@ def list_of_all_files(path:str="./") -> str:
             files += list_of_all_files(i)
     return files
 
-def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
     for i in files_not_to_be_included:
         if ((i in file_name_with_path) and (not "tokenizer" in file_name_with_path)):
             return ""
     try:
-        file_text = textract.process(file_name_with_path, encoding="utf-8").decode()
+        file_text = "".join([i for i in textract.process(file_name_with_path, encoding="utf-8").decode()])
         print("textract",file_name_with_path)
     except:
-        f = open(file_name_with_path)
-        print("python native file opener",file_name_with_path)
-        file_text = str(f)
+        try:
+            f = "".join([i for i in io.open(file_name_with_path, encoding="utf8")])
+            print("python native file opener",file_name_with_path)
+            file_text = str(f)
+        except:
+            return ""
     return file_text
 
 def initialize_tokenizer(target_vacab = 2**15):
