@@ -14,7 +14,7 @@ from memory_profiler import profile
 
 import copy
 import typing
-from typing import Tuple, Optional, Any, NoReturn, Union, List, Dict
+from typing import Tuple, Optional, Any, NoReturn, Union, List, Dict, Iterable
 
 from torch import Tensor
 from torch.nn.modules.container import ModuleList, Module
@@ -70,7 +70,7 @@ def Positional_Encoding(x: Tensor) -> Tensor :
     pe[:, 0::2] = torch.sin(position * div_term)
     pe[:, 1::2] = torch.cos(position * div_term)
     pe = pe.unsqueeze(0).to(x.device)
-    return x + pe[:]
+    return x + pe
 
 class RMSNorm(Module):
     def __init__(self, dim, eps = 1e-8):
@@ -131,13 +131,13 @@ class nBRC(nn.Module):
         return c * h + (1 - c) * torch.tanh(l(self.U, x) + a * h)
 
 class GRUGating(nn.Module):
-    def __init__(self, dim, fn=None, mogrify = False, norm = True, post_norm = True):
+    def __init__(self, dim, fn=None, mogrify = True, norm = True, post_norm = False):
         super().__init__()
         self.dim = dim
         self.fn = fn
         self.post_norm = post_norm
         if norm:
-            self.norm = ScaleNorm(dim)
+            self.norm = RMSNorm(dim)
         else:
             self.norm = None
         self.gru = nBRC(dim, dim)
@@ -156,7 +156,8 @@ class GRUGating(nn.Module):
 
                 y = self.norm(y_) if self.norm != None else y_
             else:
-                y = ckpt(self.fn,self.norm(y),*args)
+                inp = self.norm(y) if self.norm != None else y
+                y = ckpt(self.fn,inp,*args)
         else:
             y = self.norm(y) if self.norm!=None else y
 
@@ -172,7 +173,7 @@ class GRUGating(nn.Module):
 
 class ET_ffd(Module):
 
-    def __init__(self,dim,activation="silu",layers=1,kernal_size=1,mult=4,fn=None):
+    def __init__(self,dim,activation="silu",layers=1,kernal_size=7,mult=4,fn=None,sequential=False):
         super(ET_ffd,self).__init__()
         self.l_1 = nn.Sequential(
             nn.Conv1d(dim,dim*mult,kernal_size,1,padding=kernal_size//2,groups=dim),
@@ -180,14 +181,19 @@ class ET_ffd(Module):
         )
         self.l_2 = GEGLU(dim*mult,dim,layers)
 
-        self.fn = fn if isinstance(fn,nn.ModuleList) else ((nn.ModuleList(fn) if isinstance(fn,tuple) or isinstance(fn,list) else nn.ModuleList([fn])) if fn !=None else None)
+        self.fn = fn if isinstance(fn,nn.ModuleList) else ((nn.ModuleList(fn) if isinstance(fn,Iterable) else nn.ModuleList([i for i in fn if i != None])) if fn !=None else None)
+        self.seq = sequential
 
     def forward(self,x,*args):
         out = ckpt(self.l_1,x.transpose(1,2)).transpose(1,2).contiguous()
         out = ckpt(self.l_2,out)
         if self.fn != None:
             for fn in self.fn:
-                out = out + ckpt(fn,x)
+                if self.seq:
+                    inp = out
+                else:
+                    inp = x
+                out = out + ckpt(fn,inp)
         return out
 
 class AbsolutePositionalEmbedding(Module):
@@ -233,7 +239,7 @@ class TransformerBlock(Module):
                      dim_feedforward=512, 
                      dropout=0.1, 
                      activation="relu",
-                     mem_kv=64*8,
+                     mem_kv=64*16,
                      pkm_dims=None,
                      pkm_keys=64,
                      decoder=False,
@@ -252,18 +258,14 @@ class TransformerBlock(Module):
                      mlp_layers=1,
                 ):
         super(TransformerBlock, self).__init__()
-
-        self.norm = GRUGating(d_model)
-        self.zero_0 = nn.Parameter(torch.ones(d_model))
-        self.zero_1 = nn.Parameter(torch.ones(d_model))
         
         self.dropout1 = Dropout(dropout)
         self.dropout2 = Dropout(dropout)
 
         if pkm_dims==None:
-            pkm_dims = d_model//4
+            pkm_dims = d_model//1
         if hop_dim==None:
-            hop_dim = d_model//4
+            hop_dim = d_model//1
 
         pkm_heads = max((nhead * pkm_dims) // d_model,1)
         hop_heads = max((nhead * hop_dim) // d_model,1)
@@ -279,31 +281,32 @@ class TransformerBlock(Module):
 
         conformer = ConformerConvModule(d_model,causal=True,dropout=dropout)
 
-        ffd1 = nn.Sequential(ET_ffd(dim=d_model,fn=[pkm1,conformer]),Dropout(dropout))
+        fno = FNO1d(modes,
+                        width,
+                        inp_dim=d_model,
+                        out_dim=d_model,
+                        ffd_dim=dim_feedforward,
+                        num_layers=fno_layers
+                    )
+
+        ffd1 = nn.Sequential(ET_ffd(dim=d_model,fn=[pkm1,conformer,fno]),Dropout(dropout))
 
         self.feed_forward = GRUGating(d_model,ffd1)
-        
-        self.fno = GRUGating(d_model,FNO1d(modes,
-                                                width,
-                                                inp_dim=d_model,
-                                                out_dim=d_model,
-                                                ffd_dim=dim_feedforward,
-                                                num_layers=fno_layers
-                                            ))
-        
+
+        self.to_out = copy.deepcopy(self.feed_forward)
 
         if hopfield:
-            hop_attn = GRUGating(d_model,nn.Sequential(
+            hop_attn = nn.Sequential(
                                     nn.Linear(d_model,hop_dim),
                                     HopfieldLayer(
                                                 input_size=hop_dim,
                                                 num_heads=hop_heads,
-                                                pattern_size=hop_dim,
+                                                pattern_size=2**8,
                                                 dropout=dropout,
-                                                quantity=hop_dim,
+                                                quantity=2**8,
                                             ),
                                     nn.Linear(hop_dim,d_model)
-                                    ))
+                                    )
         else:
             hop_attn = None
 
@@ -323,7 +326,7 @@ class TransformerBlock(Module):
                                                     nystrom=nystrom,
                                                     attend_to_self=attend_to_self
                                                 ),
-                                pkm=copy.deepcopy(self.feed_forward),
+                                ffd=copy.deepcopy(self.feed_forward),
                                 )
         else:
                 
@@ -343,10 +346,10 @@ class TransformerBlock(Module):
                                                                             fixed_emb=fixed_emb,
                                                                             causal=causal,
                                                                             nystrom=nystrom,
-                                                                            attend_to_self=attend_to_self
+                                                                            attend_to_self=False
                                                                         ),
-                                                        pkm=copy.deepcopy(self.feed_forward),
-                                                        )) if encoder_n_decoder else Identity()
+                                                        ffd=copy.deepcopy(self.feed_forward),
+                                                        ),norm=False) if encoder_n_decoder else Identity()
 
             self.self_ctxt_enc = GRUGating(
                                             d_model,
@@ -362,10 +365,10 @@ class TransformerBlock(Module):
                                                                             fixed_emb=fixed_emb,
                                                                             causal=causal,
                                                                             nystrom=nystrom,
-                                                                            attend_to_self=attend_to_self
+                                                                            attend_to_self=False
                                                                         ),
-                                                        pkm=copy.deepcopy(self.feed_forward),
-                                                        )) if encoder_n_decoder else Identity()
+                                                        ffd=copy.deepcopy(self.feed_forward),
+                                                        ),norm=False) if encoder_n_decoder else Identity()
 
             attn = {
                 'self_1':Attention(d_model,
@@ -388,7 +391,7 @@ class TransformerBlock(Module):
                                         fixed_emb=fixed_emb,
                                         causal=causal,
                                         nystrom=nystrom,
-                                        attend_to_self=attend_to_self),
+                                        attend_to_self=False),
                 'cross_1':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
@@ -396,7 +399,7 @@ class TransformerBlock(Module):
                                         hop_attn=copy.deepcopy(hop_attn),
                                         rotary_pos_emb=False,
                                         nystrom=nystrom,
-                                        attend_to_self=attend_to_self),
+                                        attend_to_self=False),
                 'cross_2':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
@@ -404,18 +407,18 @@ class TransformerBlock(Module):
                                         hop_attn=copy.deepcopy(hop_attn),
                                         nystrom=nystrom,
                                         rotary_pos_emb=False,
-                                        attend_to_self=attend_to_self)
+                                        attend_to_self=False)
             }
 
             attn_block = ET_Decoder_Block(d_model,
                                 num_heads=nhead,
                                 attn=attn,
-                                pkm=copy.deepcopy(self.feed_forward)
+                                ffd=copy.deepcopy(self.feed_forward)
                                 )
         
-        self.attn = GRUGating(d_model,attn_block)
+        self.attn = GRUGating(d_model,attn_block,norm=False)
 
-        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,seq_len=2**16,window=d_model*2))
+        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,seq_len=2**16,window=d_model,attn_dim=d_model//2,prob_survival=1-dropout),norm=False)
 
         self.decoder = decoder
 
@@ -439,11 +442,10 @@ class TransformerBlock(Module):
         output = ckpt(self.attn,output,output,context)
         output = self.dropout1(output)
 
-        output = ckpt(self.fno,output)
         output = ckpt(self.mlp,output)
 
         output = self.dropout2(output)
-        output = self.norm((src*self.zero_0),(output*self.zero_1))
+        output = self.to_out(src,output)
 
         return output
 
@@ -480,9 +482,6 @@ class TransformerModule(ModuleList):
         self.full_block_repeat = full_block_repeat
         self.enable_encoder=enable_encoder
         self.repeated_deberta_layers = repeated_deberta_layers
-
-        if hop_dim==None:
-            hop_dim = d_model//4
 
         if not enable_encoder:
             block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
@@ -692,7 +691,7 @@ class TransformerModel(Module):
                 #nn.LeakyReLU(0.05),
             ) if discriminator else self.decoder
 
-        self.ffd1 = GRUGating(ninp,ET_ffd(dim=ninp,layers=1,kernal_size=1,mult=4))
+        self.ffd1 = ET_ffd(dim=ninp)
         self.ffd2 = copy.deepcopy(self.ffd1)
 
         self.mem_exist = True if mem_token else False
@@ -1242,12 +1241,14 @@ class TransformerModel(Module):
         if type(mem) != None or self.mem_exist:
             mem = output[:,:output.size(1)-s_]
             mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.mem.shape) / b
+            mem = mem.detach()
             output = output[:,output.size(1)-s_:]
 
         if context != None:
             if type(context_mem) != None or self.context_mem_exist:
                 context_mem = context[:,:context.size(1)-s_c_]
                 context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.context_mem.shape) / b
+                context_mem = context_mem.detach()
                 context = context[:,context.size(1)-s_c_:]
         
         

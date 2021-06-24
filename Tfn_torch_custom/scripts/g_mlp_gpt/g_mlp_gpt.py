@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, einsum
 
-from einops import rearrange
+from einops import rearrange, repeat
 
 from .reversible import ReversibleSequence, SequentialSequence
 
@@ -43,29 +43,6 @@ def dropout_layers(layers, prob_survival):
 
 # helper classes
 
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-8):
-        super().__init__()
-        self.scale = dim ** -0.5
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
-        return x / norm.clamp(min = self.eps) * self.g
-
-class ScaleNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-4):
-        super().__init__()
-        self.scale = dim ** -0.5
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(1))
-
-    def forward(self, x):
-        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
-        return x / norm.clamp(min = self.eps) * self.g
-
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
@@ -89,6 +66,18 @@ class GEGLU(nn.Module):
         x, gates = x.chunk(2, dim = -1)
         return x * F.gelu(gates)
 
+class ScaleNorm(nn.Module):
+    def __init__(self, dim, eps = 1e-4):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(1))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
+
 class FeedForward(nn.Module):
     def __init__(self, dim, mult = 4):
         super().__init__()
@@ -102,6 +91,62 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+class Attention(nn.Module):
+    def __init__(self, dim_in, dim_out, dim_inner):
+        super().__init__()
+        self.scale = dim_inner ** -0.5
+        self.to_qkv = nn.Linear(dim_in, dim_inner * 3, bias = False)
+        self.to_out = nn.Linear(dim_inner, dim_out)
+
+    def forward(self, x):
+        device = x.device
+        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+
+        mask = torch.ones(sim.shape[-2:], device = device).triu(1).bool()
+        sim.masked_fill_(mask[None, ...], -torch.finfo(q.dtype).max)
+
+        attn = sim.softmax(dim = -1)
+        out = einsum('b i j, b j d -> b i d', attn, v)
+        return self.to_out(out)
+
+class LocalAttention(nn.Module):
+    def __init__(self, dim_in, dim_inner, dim_out, window = 128):
+        super().__init__()
+        self.scale = dim_inner ** -0.5
+        self.window = window
+
+        self.to_qkv = nn.Linear(dim_in, dim_inner * 3, bias = False)
+        self.to_out = nn.Linear(dim_inner, dim_out)
+
+    def forward(self, x):
+        b, n, *_, device, w = *x.shape, x.device, self.window
+
+        x = pad_to_multiple(x, w, dim = -2, value = 0.)
+        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+
+        window_fn = lambda t: rearrange(t, 'b (w n) d -> b w n d', n = w)
+        q, k, v = map(window_fn, (q, k, v))
+
+        k, v = map(lambda t: F.pad(t, (0, 0, 0, 0, 1, 0)), (k, v))
+        k, v = map(lambda t: torch.cat((k[:, :-1], k[:, 1:]), dim = 2), (k, v))
+
+        sim = einsum('b w i d, b w j d -> b w i j', q, k) * self.scale
+        buckets, i, j = sim.shape[-3:]
+
+        mask_value = -torch.finfo(sim.dtype).max
+        mask = torch.ones(i, j, device = device).triu_(j - i + 1).bool()
+        mask = repeat(mask, 'i j -> () u i j', u = buckets)
+
+        sim.masked_fill_(mask, mask_value)
+
+        attn = sim.softmax(dim = -1)
+
+        out = einsum('b w i j, b w j d -> b w i d', attn, v)
+        out = rearrange(out, 'b w n d -> b (w n) d')
+        out = self.to_out(out[:, :n])
+        return out
 
 class CausalSGU(nn.Module):
     def __init__(
@@ -128,7 +173,7 @@ class CausalSGU(nn.Module):
         self.act = act
         self.register_buffer('mask', ~torch.ones(dim_seq, dim_seq).triu_(1).bool())
 
-    def forward(self, x):
+    def forward(self, x, gate_res = None):
         device, n, h = x.device, x.shape[1], self.heads
 
         res, gate = x.chunk(2, dim = -1)
@@ -137,12 +182,15 @@ class CausalSGU(nn.Module):
         weight, bias = self.weight, self.bias
         weight, bias = weight[:, :n, :n], bias[:, :n]
 
-        weight = weight * self.mask[None, ...].int().float()
+        weight = weight * self.mask[None, :n, :n].int().float()
 
         gate = rearrange(gate, 'b n (h d) -> b h n d', h = h)
         gate = einsum('b h n d, h m n -> b h m d', gate, weight)
         gate = gate + rearrange(bias, 'h n -> () h n ()')
         gate = rearrange(gate, 'b h n d -> b n (h d)')
+
+        if exists(gate_res):
+            gate = gate + gate_res
 
         return self.act(gate) * res
 
@@ -170,15 +218,17 @@ class CausalLocalSGU(nn.Module):
         nn.init.uniform_(self.weight, -init_eps, init_eps)
         nn.init.constant_(self.bias, 1.)
 
+        self.act = act
         self.register_buffer('mask', ~torch.ones(window, window * 2).triu_(window + 1).bool())
 
-    def forward(self, x):
+    def forward(self, x, gate_res = None):
         device, n, h, w = x.device, x.shape[1], self.heads, self.window
 
-        x = pad_to_multiple(x, w, dim = -2)
-        x = rearrange(x, 'b (w n) d -> b w n d', n = w)
-
         res, gate = x.chunk(2, dim = -1)
+
+        gate = pad_to_multiple(gate, w, dim = -2)
+        gate = rearrange(gate, 'b (w n) d -> b w n d', n = w)
+
         gate = self.norm(gate)
 
         gate = F.pad(gate, (0, 0, 0, 0, 1, 0), value = 0.)
@@ -194,9 +244,13 @@ class CausalLocalSGU(nn.Module):
 
         gate = rearrange(gate, 'b w h n d -> b w n (h d)')
 
-        out = gate * res
-        out = rearrange(out, 'b w n d -> b (w n) d')
-        return out[:, :n]
+        gate = rearrange(gate, 'b w n d -> b (w n) d')
+        gate = gate[:, :n]
+
+        if exists(gate_res):
+            gate = gate + gate_res
+
+        return self.act(gate) * res
 
 class AxiallyFold(nn.Module):
     def __init__(self, dim, every, fn):
@@ -221,24 +275,40 @@ class AxiallyFold(nn.Module):
         out = rearrange(out, 'b d n -> b n d')
         return out[:, :n]
 
-def gMLPBlock(
-    *,
-    dim,
-    seq_len,
-    dim_ff,
-    heads = 4,
-    causal = False,
-    window = None,
-    act = nn.Identity()
-):
-    SGU = partial(CausalLocalSGU, window = window) if exists(window) and window < seq_len else CausalSGU
+class gMLPBlock(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        seq_len,
+        dim_ff,
+        heads = 4,
+        causal = False,
+        window = None,
+        attn_dim = None,
+        act = nn.Identity()
+    ):
+        super().__init__()
+        is_windowed = exists(window) and window < seq_len
 
-    return nn.Sequential(
-        nn.Linear(dim, dim_ff),
-        nn.GELU(),
-        SGU(dim_ff, seq_len, causal, heads = heads, act = act),
-        nn.Linear(dim_ff // 2, dim)
-    )
+        SGU_klass = partial(CausalLocalSGU, window = window) if is_windowed else CausalSGU
+        Attention_klass = partial(LocalAttention, window = window) if is_windowed else Attention
+
+        self.attn = Attention_klass(dim_in = dim, dim_inner = attn_dim, dim_out = dim_ff // 2) if exists(attn_dim) else None
+
+        self.proj_in = nn.Sequential(
+            nn.Linear(dim, dim_ff),
+            nn.GELU()
+        )
+        self.sgu =  SGU_klass(dim_ff, seq_len, causal, heads = heads, act = act)
+        self.proj_out = nn.Linear(dim_ff // 2, dim)
+
+    def forward(self, x):
+        gate_res = self.attn(x) if exists(self.attn) else None
+        x = self.proj_in(x)
+        x = self.sgu(x, gate_res = gate_res)
+        x = self.proj_out(x)
+        return x
 
 # main classes
 
@@ -251,10 +321,11 @@ class gMLPGPT(nn.Module):
         seq_len,
         num_tokens=None,
         heads = 1,
-        ff_mult = 1,
+        ff_mult = 2,
         prob_survival = 1.,
         reversible = False,
         window = None,
+        attn_dim = None,
         act = nn.Identity()
     ):
         super().__init__()
@@ -266,12 +337,16 @@ class gMLPGPT(nn.Module):
 
         window = cast_tuple(window, depth)
         window = tuple(map(lambda t: t if isinstance(t, tuple) else (t, 1), window))
+
+        attn_dims = cast_tuple(attn_dim, depth)
+
         assert len(window) == depth, f'num window sizes {len(window)} must be equal to depth {depth}'
 
         layers = nn.ModuleList([])
 
-        for ind, (w, ax) in zip(range(depth), window):
-            get_gmlp = lambda: PreNorm(dim, AxiallyFold(dim, ax, gMLPBlock(dim = dim, dim_ff = dim_ff, seq_len = seq_len, heads = heads, window = w, act = act)))
+        for ind, (w, ax), attn_dim in zip(range(depth), window, attn_dims):
+            attn_dim = attn_dim if exists(window) else None
+            get_gmlp = lambda: PreNorm(dim, AxiallyFold(dim, ax, gMLPBlock(dim = dim, dim_ff = dim_ff, seq_len = seq_len, heads = heads, window = w, act = act, attn_dim = attn_dim)))
 
             layer_blocks = nn.ModuleList([
                 get_gmlp()

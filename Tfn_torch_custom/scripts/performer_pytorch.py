@@ -407,7 +407,7 @@ class NystromAttention_Full(nn.Module):
 class NystromAttention(nn.Module):
     def __init__(
         self,
-        dim,
+        dim = None,
         dim_head = 64,
         heads = 8,
         num_landmarks = 256,
@@ -418,6 +418,8 @@ class NystromAttention(nn.Module):
         eps = 1e-8,
         dropout = 0.,
         transpose_heads_n_dims = False,
+        conv_in = None,
+        conv_out = None,
     ):
         super().__init__()
         self.eps = eps
@@ -444,9 +446,15 @@ class NystromAttention(nn.Module):
             kernel_size = residual_conv_kernel
             padding = residual_conv_kernel // 2
             if not self.transpose_heads_n_dims:
-                self.res_conv = nn.Conv2d(heads, heads, (kernel_size, 1), padding = (padding, 0), groups = heads, bias = False)
+                conv_in = conv_in if conv_in != None else heads
+                conv_out = conv_out if conv_out != None else heads
+                groups = math.gcd(conv_out,conv_in)
+                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = groups, bias = False)
             else:
-                self.res_conv = nn.Conv2d(dim_head, dim_head, (kernel_size, 1), padding = (padding, 0), groups = dim_head, bias = False)
+                conv_in = conv_in if conv_in != None else dim_head
+                conv_out = conv_out if conv_out != None else dim_head
+                groups = math.gcd(conv_out,conv_in)
+                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = groups, bias = False)
 
     def forward(self, q,k,v, mask = None, return_attn = False):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
@@ -475,7 +483,7 @@ class NystromAttention(nn.Module):
             mask = rearrange(mask, 'b n -> b () n')
             q, k, v = map(lambda t: t * mask[..., None], (q, k, v))
 
-        q = q * self.scale
+        #q = q * self.scale
 
         # generate landmarks by sum reduction, and then calculate mean using the mask
 
@@ -523,10 +531,11 @@ class NystromAttention(nn.Module):
 
         if self.residual:
             context = True if q.size(-2) != k.size(-2) else self.context
+            inp = v if not context else q
             if not self.transpose_heads_n_dims:
-                out = out + self.res_conv(v if not context else q)
+                out = out + self.res_conv(inp)
             else:
-                out = out + self.res_conv(v.transpose(-3,-1) if not context else q.transpose(-3,-1)).transpose(-3,-1)
+                out = out + self.res_conv(inp.transpose(-3,-1)).transpose(-3,-1)
 
         # merge and combine heads
 
@@ -1026,7 +1035,7 @@ class Attention(nn.Module):
         heads = 16,
         dim_head = 32,
         local_heads = 0,
-        local_window_size = 256,
+        local_window_size = 64,
         nystromer_landmarks = None,
         nb_features = 1024,
         feature_redraw_interval = 1024,
@@ -1057,18 +1066,18 @@ class Attention(nn.Module):
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
         inner_dim = dim_head * heads
-        pos_scales = int(default(pos_scales,math.log(dim)))
+        pos_scales = int(default(pos_scales,2 * math.log(2,dim)))
         #dim_head += 2*pos_scales
-        additional_heads = 2*pos_scales if not content_rel_attn else 4*pos_scales
+        additional_head_dims = 2*pos_scales if not content_rel_attn else 4*pos_scales
 
         self.heads = heads
-        self.global_heads = heads - local_heads
+        self.global_heads = global_heads = heads - local_heads
 
-        nystromer_landmarks = default(nystromer_landmarks,local_window_size)
+        nystromer_landmarks = default(nystromer_landmarks,128)
         if nystrom:
-            self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head + additional_heads,heads=global_heads,num_landmarks=nystromer_landmarks)
+            self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,heads=global_heads,num_landmarks=nystromer_landmarks,context=True,transpose_heads_n_dims=True,conv_in=dim_head + additional_head_dims,conv_out=dim_head)
         else:
-            self.fast_attention = FastAttention(dim_head + additional_heads, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+            self.fast_attention = FastAttention(dim_head + additional_head_dims, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
         self.local_attn = LocalAttention(window_size = local_window_size, causal = causal, autopad = True, dropout = dropout, look_forward = int(not causal), rel_pos_emb_config = (dim_head, local_heads)) if local_heads > 0 else None
 
@@ -1111,7 +1120,7 @@ class Attention(nn.Module):
         self.attn_to_self = None
         if attend_to_self:
             self_head_dim = 1
-            self.features = 7
+            self.features = (((heads*2)**2)//2)*2 + 1
             scale = 2
             self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,self.features,groups=inner_dim)
             self.project_down = nn.Linear(inner_dim*scale, inner_dim)
@@ -1122,27 +1131,33 @@ class Attention(nn.Module):
                 self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=2**(int(math.log(2,math.log(2,inner_dim*scale)))) , transpose_heads_n_dims=True)
             else:
                 self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
-
-            #self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
-
+            
         self.num_mem_kv = num_mem_kv
         num_prev_state = default(num_prev_state,num_mem_kv)
         
         if num_mem_kv > 0:
-            self.mem_k = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
-            self.mem_v = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
+            self.mem_k = nn.Parameter(torch.randn(self.heads, num_mem_kv, dim_head))
+            self.mem_v = nn.Parameter(torch.randn(self.heads, num_mem_kv, dim_head))
             self.register_buffer(
                                 name='prev_state',
-                                tensor=torch.zeros((heads, num_prev_state, dim_head))
+                                tensor=torch.zeros((self.heads, num_prev_state, dim_head))
                                 )
             self.hop_attn = hop_attn
             self.mem_lin_k = nn.Linear(dim_head,dim_head)
             self.mem_lin_v = nn.Linear(dim_head,dim_head)
-            self.out = nn.Linear(dim_head,dim_head)
+            self.out_mem = nn.Linear(dim_head,dim_head)
             
-            self.mem_attn = FastAttention(dim_head + additional_heads, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
-            self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
-            self.out_2 = nn.Linear(dim_head,dim_head)
+            #NystromAttention(dim=dim,dim_head=dim_head,context=True,heads=self.heads,num_landmarks=nystromer_landmarks)
+            
+            if nystrom:
+                self.mem_attn = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,context=True,heads=self.heads,num_landmarks=nystromer_landmarks,transpose_heads_n_dims=True,conv_in=dim_head + additional_head_dims,conv_out=dim_head)#FastAttention(dim_head + additional_head_dims, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+                self.prev_state_attn = NystromAttention(dim=dim,dim_head=dim_head,context=True,heads=self.heads,num_landmarks=nystromer_landmarks)#FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+            else:
+                self.mem_attn = FastAttention(dim_head + additional_head_dims, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+                self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+            
+            self.out_k = nn.Linear(dim_head,dim_head)
+            self.out_v = nn.Linear(dim_head,dim_head)
             self.zero_0 = nn.Parameter(torch.ones(dim_head))
             self.zero_1 = nn.Parameter(torch.zeros(dim_head))
             self.norm = ScaleNorm(dim_head)
@@ -1232,8 +1247,8 @@ class Attention(nn.Module):
             mem_k, mem_v, prev_state = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v, self.prev_state))
 
             if exists(self.hop_attn):
-                hop_k = self.hop_attn(tmp_k.reshape(b,tmp_k.size(-2),d)).reshape(b,mem_k.size(1),-1,mem_k.size(-1))
-                hop_v = self.hop_attn(tmp_v.reshape(b,tmp_v.size(-2),d)).reshape(b,mem_v.size(1),-1,mem_v.size(-1))
+                hop_k = ckpt(self.hop_attn,tmp_k).reshape(b,self.heads,-1,d//h)
+                hop_v = ckpt(self.hop_attn,tmp_v).reshape(b,self.heads,-1,d//h)
                 mem_k = torch.cat((mem_k,hop_k),dim=-2)
                 mem_v = torch.cat((mem_v,hop_v),dim=-2)
 
@@ -1249,12 +1264,13 @@ class Attention(nn.Module):
             mem_k = ckpt(self.k_rel_pos_emb_mem,mem_k,mem_pos_k)
 
             out_ = ckpt(self.mem_attn,out_,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,out_,mem_k,mem_v)
-            out_ = ckpt(self.out_2,out_)
+            out_ = ckpt(self.out_mem,out_)
             out = self.norm((out*self.zero_1) + (out_*self.zero_0))
 
-            tmp = self.out(out)
-            prev_state = ckpt(self.prev_state_attn,prev_state,tmp,tmp) if not self.vanilla_attn else ckpt(vanilla_attention,prev_state,tmp,tmp)
-            self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((mem_v.size(1),-1,mem_v.size(-1)))
+            out_k = self.out_k(out)
+            out_v = self.out_v(out)
+            prev_state = ckpt(self.prev_state_attn,prev_state,out_k,out_v) if not self.vanilla_attn else ckpt(vanilla_attention,prev_state,out_k,out_v)
+            self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((h,-1,d//h))
 
 
         out = rearrange(out, 'b h n d -> b n (h d)')

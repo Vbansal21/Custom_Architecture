@@ -3,6 +3,7 @@
 from turtle import forward
 import torch
 from einops import rearrange,repeat
+from einops.layers.torch import Rearrange
 from typing import Optional
 from torch.functional import Tensor
 import torch.nn as nn
@@ -96,9 +97,11 @@ class ET_Encoder_Block(nn.Module):
         self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(4)])
         if ffd == None:
             self.feed_forward = nn.Sequential(
+            Rearrange("... n d -> ... d n"),
                 nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0,groups=d_model),
                 nn.ReLU(),
                 nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0,groups=d_model),
+            Rearrange("... d n -> ... n d")
             )
         else:
             self.feed_forward = ffd
@@ -138,9 +141,9 @@ class ET_Encoder_Block(nn.Module):
 
         normed = self.layer_norms[3](attended)
         if self.pkm == None:
-            forwarded = ckpt(self.feed_forward,normed.transpose(1,2)).transpose(1,2) + attended
+            forwarded = ckpt(self.feed_forward,normed) + attended
         else:
-            forwarded = ckpt(self.feed_forward,normed.transpose(1,2)).transpose(1,2) + ckpt(self.pkm,normed) + attended
+            forwarded = ckpt(self.feed_forward,normed) + ckpt(self.pkm,normed) + attended
         return forwarded
         
 
@@ -150,7 +153,7 @@ class ET_Decoder_Block(nn.Module):
         super(ET_Decoder_Block,self).__init__()
 
         if attn == None:
-            self.attention_self_1 = nn.MultiheadAttention(d_model, num_heads) 
+            self.attention_self_1 = nn.MultiheadAttention(d_model, num_heads*2) 
             self.attention_self_2 = nn.MultiheadAttention(d_model, num_heads) 
             self.attention_cross_1 = nn.MultiheadAttention(d_model, num_heads) 
             self.attention_cross_2 = nn.MultiheadAttention(d_model, num_heads) 
@@ -166,9 +169,11 @@ class ET_Decoder_Block(nn.Module):
 
         if ffd == None:
             self.feed_forward = nn.Sequential(
+                Rearrange("... n d -> ... d n"),
                 nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0,groups=d_model),
                 nn.SiLU(),
                 nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0,groups=d_model),
+                Rearrange("... d n -> ... n d")
             )
         else:
             self.feed_forward = ffd
@@ -209,8 +214,8 @@ class ET_Decoder_Block(nn.Module):
         attn_normed = self.layer_norms[4](cross_attn)
 
         if self.pkm==None:
-            forwarded = ckpt(self.feed_forward,attn_normed.transpose(1,2)).transpose(1,2) + cross_attn
+            forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn
         else:
-            forwarded = ckpt(self.feed_forward,attn_normed.transpose(1,2)).transpose(1,2) + cross_attn + ckpt(self.pkm,attn_normed)
+            forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn + ckpt(self.pkm,attn_normed)
 
         return forwarded
