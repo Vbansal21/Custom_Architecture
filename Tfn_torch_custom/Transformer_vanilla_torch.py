@@ -55,14 +55,16 @@ def list_of_all_files(path:str="./") -> str:
             files += list_of_all_files(i)
     return files
 
-def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".npy",".wav",".tar",".zip",".pt",".pth",".onnx"]) -> str:
     for i in files_not_to_be_included:
         if i in file_name_with_path:
             return ""
     try:
         file_text = textract.process(file_name_with_path, encoding="utf-8").decode()
+        print("textract",file_name_with_path)
     except:
         f = open(file_name_with_path)
+        print("python native file opener",file_name_with_path)
         file_text = str(f)
     return file_text
 
@@ -75,7 +77,7 @@ def initialize_tokenizer(target_vacab = 2**15):
     path = "../"
     files += list_of_all_files(path)
     for i in files:
-        string_of_files += file_to_str(i)
+        string_of_files += "[sos]"+file_to_str(i)+"[eos]"
     sample += " ".join([i for i in string_of_files])
     sample = "".join(list(set([i for i in sample])))
     print("parsed all files")
@@ -127,42 +129,42 @@ def batchify(data, bsz,dim=0):
     data = data.reshape(bsz, -1).contiguous()
     return data
 
-batch_size = 1
-eval_batch_size = batch_size
-mini_batch_size = 1
+batch_size: int = 1
+eval_batch_size: int = batch_size
+mini_batch_size: int = 1
 
-ntokens = tokenizer.vocab_size # None
-emsize = 512
-nhid = emsize * 4
-nlayers = 1
-deberta_layers = 2
-repeated_deberta_layers = 1
-full_block_repeat = False
-nhead = 8
+ntokens: int = tokenizer.vocab_size # None
+emsize: int = 512
+nhid: int = emsize * 4
+nlayers: int = 1
+deberta_layers: int = 2
+repeated_deberta_layers: int = 1
+full_block_repeat: bool = False
+nhead: int = 8
 dropout = (math.pi/10)
-mem_tokens = emsize*2
-bptt = (1024*1) #- mem_tokens
-seq_scale_down = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
-max_seq_len = max(2**14,2**17 // seq_scale_down)
-mlp_layers = 1
-fno_layers = 4
-modes = 8
-width = 8
-causal = False
-nystrom = True
-attend_to_self = True
-attend_to_inp = True
-feature_redraw_interval = 384
-prev_state_len = emsize*4
-prev_state_self_num = 8
-local_heads = 2
-local_heads = min(local_heads,nhead)
+mem_tokens: int = emsize*2
+bptt: int = (1024*1) #- mem_tokens
+seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
+max_seq_len: int = max(2**14,2**17 // seq_scale_down)
+mlp_layers: int = 1
+fno_layers: int = 4
+modes: int = 8
+width: int = 8
+causal: bool = False
+nystrom: bool = True
+attend_to_self: bool = True
+attend_to_inp: bool = True
+feature_redraw_interval: int = 384
+prev_state_len: int = emsize*4
+prev_state_self_num: int = 8
+local_heads: int = 2
+local_heads: int = min(local_heads,nhead)
 
-discriminator = False #INTEGRATED DISCRIMINATOR: DEPRECATED
-progressive_generation = True
-use_deepspeed = False
+discriminator: bool = False #INTEGRATED DISCRIMINATOR: DISABLED
+progressive_generation: bool = True
+use_deepspeed: bool = False
 
-use_sgd = True
+use_sgd: bool = True
 
 def data_process(raw_text_iter):
   data = tokenizer.encode(raw_text_iter)
@@ -258,15 +260,23 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
     if progressive:
         seq_len = min(bptt, source.size(1) - j)
         data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1-rnd_2_1],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
-        data = torch.cat((torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),rnd_2+1-min(1,rnd_1) + rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        sos = data_process("[sos]")
+        sos_tok = torch.full((data.size(0),sos.size(0)),2,dtype=torch.long,device=device)
+        eos = data_process("[eos]")
+        eos_tok = torch.full((data.size(0),eos.size(0)),3,dtype=torch.long,device=device)
+        data = torch.cat((torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),sos,data.to(device),torch.full((data.size(0),rnd_2+1-min(1,rnd_1) + rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device),eos),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
-        targets = torch.cat((torch.full((data.size(0),max(rnd_1-1,0)),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        targets = torch.cat((torch.full((data.size(0),max(rnd_1-1,0)),2,dtype=torch.long,device=device),sos_tok,targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device),eos_tok),dim=1).contiguous()
     else:
         seq_len = min(bptt, source.size(1) - j)
         data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-rnd_2_1],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
-        data = torch.cat((torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),rnd_2+rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        sos = data_process("[sos]")
+        sos_tok = torch.full((data.size(0),sos.size(0)),2,dtype=torch.long,device=device)
+        eos = data_process("[eos]")
+        eos_tok = torch.full((data.size(0),eos.size(0)),3,dtype=torch.long,device=device)
+        data = torch.cat((torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),sos,data.to(device),torch.full((data.size(0),rnd_2+rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device),eos),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
-        targets = torch.cat((torch.full((targets.size(0),rnd_1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device)),dim=1).contiguous()
+        targets = torch.cat((torch.full((targets.size(0),rnd_1),2,dtype=torch.long,device=device),sos_tok,targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device),eos_tok),dim=1).contiguous()
     torch.cuda.empty_cache()
     return data,targets,index_to_be_trained_on
 

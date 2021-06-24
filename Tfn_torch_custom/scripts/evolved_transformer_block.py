@@ -137,7 +137,7 @@ class ET_Encoder_Block(nn.Module):
         mid_result = mid_result + glued
 
         normed = self.layer_norms[2](mid_result)
-        attended = ckpt(self.attention,normed) + mid_result
+        attended = ckpt(self.attention,normed,*args) + mid_result
 
         normed = self.layer_norms[3](attended)
         if self.pkm == None:

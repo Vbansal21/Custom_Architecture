@@ -479,6 +479,9 @@ class TransformerModule(ModuleList):
                     ):
         super(TransformerModule, self).__init__()
 
+        # deprecated cross attention config saveing
+        self.config = {d_model=d_model, nhead=nhead, dim_feedforward=nhid, dropout=dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers}
+
         self.full_block_repeat = full_block_repeat
         self.enable_encoder=enable_encoder
         self.repeated_deberta_layers = repeated_deberta_layers
@@ -534,21 +537,32 @@ class TransformerModule(ModuleList):
         
     def pretrained_layer_multiplier(self,num=1,deb_num=1):
         self.num_layers *= num
+        def multiple_of_layers(layers,num_=1):
+            l = [i for i in layers]
+            for i in range(num_-1):
+                for j in layers:
+                    l.append(copy.deepcopy(j))
+            return l
         if self.enable_encoder:
-            self.encoder = nn.ModuleList([copy.deepcopy(i) for i in self.encoder] * num)
-            self.decoder_self = nn.ModuleList([copy.deepcopy(i) for i in self.decoder_self] * num)
-            self.decoder_cross = nn.ModuleList([copy.deepcopy(i) for i in self.decoder_cross] * num)
-            self.deberta_layers = nn.ModuleList([copy.deepcopy(i) for i in self.deberta_layers] * deb_num)
+            self.encoder = nn.ModuleList(multiple_of_layers(self.encoder,num))
+            self.decoder_self = nn.ModuleList(multiple_of_layers(self.decoder_self,num))
+            self.decoder_cross = nn.ModuleList(multiple_of_layers(self.decoder_cross,num))
+            self.deberta_layers = nn.ModuleList(multiple_of_layers(self.deberta_layers,deb_num))
         else:
-            self.decoder = nn.ModuleList([copy.deepcopy(i) for i in self.decoder] * num)
-            self.deberta_layers = nn.ModuleList([copy.deepcopy(i) for i in self.deberta_layers] * deb_num)
+            self.decoder = nn.ModuleList(multiple_of_layers(self.decoder,num))
+            self.deberta_layers = nn.ModuleList(multiple_of_layers(self.deberta_layers,deb_num))
             
     def convert_decoder_only_to_encoder_decoder(self):
+        #Deprecated
         self.enable_encoder = True
         self.encoder = copy.deepcopy(self.decoder)
-        self.decoder_cross = copy.deepcopy(self.decoder)
         self.decoder_self = self.decoder
-
+        if deberta_layers != None:
+            self.decoder_cross = copy.deepcopy(self.deberta_layers)
+        else:
+            block = TransformerBlock(*self.config)
+            self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(self.num_layers-1)])
+            
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
         output = src
