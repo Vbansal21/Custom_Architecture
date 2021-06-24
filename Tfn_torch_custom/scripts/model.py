@@ -480,7 +480,7 @@ class TransformerModule(ModuleList):
         super(TransformerModule, self).__init__()
 
         # deprecated cross attention config saveing
-        self.config = {d_model=d_model, nhead=nhead, dim_feedforward=nhid, dropout=dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers}
+        self.config = dict(d_model=d_model, nhead=nhead, dim_feedforward=nhid, dropout=dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
 
         self.full_block_repeat = full_block_repeat
         self.enable_encoder=enable_encoder

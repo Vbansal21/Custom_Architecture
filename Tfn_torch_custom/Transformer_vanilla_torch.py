@@ -55,9 +55,9 @@ def list_of_all_files(path:str="./") -> str:
             files += list_of_all_files(i)
     return files
 
-def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".npy",".wav",".tar",".zip",".pt",".pth",".onnx"]) -> str:
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
     for i in files_not_to_be_included:
-        if i in file_name_with_path:
+        if ((i in file_name_with_path) and (not "tokenizer" in file_name_with_path)):
             return ""
     try:
         file_text = textract.process(file_name_with_path, encoding="utf-8").decode()
@@ -77,12 +77,12 @@ def initialize_tokenizer(target_vacab = 2**15):
     path = "../"
     files += list_of_all_files(path)
     for i in files:
-        string_of_files += "[sos]"+file_to_str(i)+"[eos]"
-    sample += " ".join([i for i in string_of_files])
+        string_of_files += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
+    sample += " ".join([i for i in string_of_files]) + string_of_files
     sample = "".join(list(set([i for i in sample])))
     print("parsed all files")
     tokenizer = SubwordEncoder(sample,target_vocab_size=target_vacab,reserved_tokens=[
-    '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]'
+    '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]',"[Instruct Mode]"
     ],
     eos_index=3,unknown_index=1,padding_index=0)
     vocab_size = tokenizer.vocab_size
@@ -257,26 +257,31 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
     rnd_2 = random.randint(0,12)
     rnd_2_1 = random.randint(0,min((seq_len-1),(bptt//8),(seq_scale_down*2)**2))
     rnd_3 = random.randint(0,12)
+
+    sos = data_process("[sos]").unsqueeze(0).to(device)
+    sos_tok = torch.full((source.size(0),sos.size(1)),2,dtype=torch.long,device=device)
+    eos = data_process("[eos]").unsqueeze(0).to(device)
+    eos_tok = torch.full((source.size(0),eos.size(1)),3,dtype=torch.long,device=device)
+    
+    start_text = ["Generate text","learn to generate text","learn to predict","masked language modeling","mlm","continue text","continue input","decorrupt and predict according to input"]
+    start_text = start_text[random.randint(0,len(start_text)-1)]
+    if random.randint(0,1):
+        start_text = torch.cat((torch.full((source.size(0),1),6,dtype=torch.long,device=device),torch.full((source.size(0),1),9,dtype=torch.long,device=device),data_process(start_text).unsqueeze(0).to(device),torch.full((source.size(0),1),6,dtype=torch.long,device=device)),dim=1)
+    else:
+        start_text = torch.cat((torch.full((source.size(0),1),6,dtype=torch.long,device=device),torch.full((source.size(0),1),2,dtype=torch.long,device=device),torch.full((source.size(0),1),6,dtype=torch.long,device=device)),dim=1)
+    
     if progressive:
         seq_len = min(bptt, source.size(1) - j)
         data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1-rnd_2_1],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
-        sos = data_process("[sos]")
-        sos_tok = torch.full((data.size(0),sos.size(0)),2,dtype=torch.long,device=device)
-        eos = data_process("[eos]")
-        eos_tok = torch.full((data.size(0),eos.size(0)),3,dtype=torch.long,device=device)
-        data = torch.cat((torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),sos,data.to(device),torch.full((data.size(0),rnd_2+1-min(1,rnd_1) + rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device),eos),dim=1).contiguous()
+        data = torch.cat((start_text,sos,torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),rnd_2+1-min(1,rnd_1) + rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device),eos),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
-        targets = torch.cat((torch.full((data.size(0),max(rnd_1-1,0)),2,dtype=torch.long,device=device),sos_tok,targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device),eos_tok),dim=1).contiguous()
+        targets = torch.cat((start_text,sos_tok,torch.full((data.size(0),max(rnd_1-1,0)),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device),eos_tok),dim=1).contiguous()
     else:
         seq_len = min(bptt, source.size(1) - j)
         data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-rnd_2_1],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
-        sos = data_process("[sos]")
-        sos_tok = torch.full((data.size(0),sos.size(0)),2,dtype=torch.long,device=device)
-        eos = data_process("[eos]")
-        eos_tok = torch.full((data.size(0),eos.size(0)),3,dtype=torch.long,device=device)
-        data = torch.cat((torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),sos,data.to(device),torch.full((data.size(0),rnd_2+rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device),eos),dim=1).contiguous()
+        data = torch.cat((start_text,sos,torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),rnd_2+rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device),eos),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
-        targets = torch.cat((torch.full((targets.size(0),rnd_1),2,dtype=torch.long,device=device),sos_tok,targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device),eos_tok),dim=1).contiguous()
+        targets = torch.cat((start_text,sos_tok,torch.full((targets.size(0),rnd_1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device),eos_tok),dim=1).contiguous()
     torch.cuda.empty_cache()
     return data,targets,index_to_be_trained_on
 
@@ -290,12 +295,51 @@ try:
     processed_val_data = batchify(processed_val_data,eval_batch_size,-1)
 except Exception as e:
     print(e)
-    train_portion = int(len(string_of_files) * 0.6)
+    if len(string_of_files) < 1:
+        path = "../"
+        files += list_of_all_files(path)
+        for i in files:
+            string_of_files += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
+
+    train_portion = int(len(string_of_files) * 0.55)
     test_portion = int(len(string_of_files) * 0.2)
 
-    train_sample = "".join([i for i in io.open(train_filepath, encoding="utf8")]) + string_of_files[:train_portion]
-    test_sample = "".join([i for i in io.open(test_filepath, encoding="utf8")]) + string_of_files[train_portion:train_portion+test_portion]
-    val_sample = "".join([i for i in io.open(valid_filepath, encoding="utf8")]) + string_of_files[train_portion+test_portion:]
+    train_sample = string_of_files[:train_portion]
+
+    offset = 5
+    if "[eos]" not in train_sample[-5:]:
+        while True:
+            new_portion = string_of_files[train_portion:train_portion+offset]
+            
+            if new_portion.find("[eos]") == -1:
+                offset += len(string_of_files)//1000
+            elif len(string_of_files) == 0:
+                break
+            else:
+                train_portion += new_portion.find("[eos]")+5
+                break
+    train_sample = string_of_files[:train_portion]
+
+    offset = 5
+    test_sample = string_of_files[train_portion:train_portion+test_portion]
+    if "[eos]" not in test_sample[-5:]:
+        while True:
+            new_portion = string_of_files[train_portion+test_portion:train_portion+test_portion+offset]
+            
+            if new_portion.find("[eos]") == -1:
+                offset += len(string_of_files)//1000
+            elif len(string_of_files) == 0:
+                break
+            else:
+                test_portion += new_portion.find("[eos]")+5
+                break
+    test_sample = string_of_files[train_portion:train_portion+test_portion]
+
+    val_sample = string_of_files[train_portion+test_portion:]
+
+    train_sample += "".join([i for i in io.open(train_filepath, encoding="utf8")])
+    test_sample += "".join([i for i in io.open(test_filepath, encoding="utf8")])
+    val_sample += "".join([i for i in io.open(valid_filepath, encoding="utf8")])
     
     train_data = data_process(train_sample)
     val_data = data_process(val_sample)
@@ -305,7 +349,7 @@ except Exception as e:
     processed_val_data = batchify(val_data, eval_batch_size)
     processed_test_data = batchify(test_data, eval_batch_size)
 
-    del(train_data,test_data,val_data)
+    del(train_data,test_data,val_data,train_sample,test_sample,val_sample)
 
     if not os.path.exists("models/data_"+str(vocab_size)+"/"):
         os.mkdir("models/data_"+str(vocab_size)+"/")
