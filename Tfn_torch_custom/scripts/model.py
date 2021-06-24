@@ -558,7 +558,14 @@ class TransformerModule(ModuleList):
         self.encoder = copy.deepcopy(self.decoder)
         self.decoder_self = self.decoder
         if deberta_layers != None:
-            self.decoder_cross = copy.deepcopy(self.deberta_layers)
+            self.decoder_cross = nn.ModuleList(copy.deepcopy([i for j,i in enumerate(self.deberta_layers) if j < self.num_layers]))
+            for i in self.decoder_cross:
+                tmp = i.self_inp_enc
+                i.self_inp_enc = Identity()
+                del(tmp)
+                tmp = i.self_ctxt_enc
+                i.self_ctxt_enc = Identity()
+                del(tmp)
         else:
             block = TransformerBlock(*self.config)
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(self.num_layers-1)])
