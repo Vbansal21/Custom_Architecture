@@ -108,7 +108,8 @@ if retrieve_tokenizer:
     vocab_size = tokenizer.vocab_size
 else:
     try:
-        inp = int(inpt(prompt="target vocabulary size (default=2**15):",timeout=15))   
+        inp = int(str(inpt(prompt="target vocabulary size (default=2**15):",timeout=15)))
+        print("")
         if type(inp) != int:
             inp = 2**15
             print("invalid input")
