@@ -55,15 +55,16 @@ def list_of_all_files(path:str="./") -> str:
             files += list_of_all_files(i)
     return files
 
-def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".tar",".zip",".pt",".pth",".onnx"]) -> str:
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
     for i in files_not_to_be_included:
         if i in file_name_with_path:
             return ""
-    f = open(file_name_with_path)
-    file_text = str(f)
-    if len(file_text) < 5:
-        file_text = textract.process(file_name_with_path).decode()
-    return str(file_text)
+    try:
+        file_text = textract.process(file_name_with_path, encoding="utf-8").decode()
+    except:
+        f = open(file_name_with_path)
+        file_text = str(f)
+    return file_text
 
 def initialize_tokenizer(target_vacab = 2**15):
     global files, string_of_files
@@ -98,7 +99,7 @@ if retrieve_tokenizer:
             tokenizer_name = i
     print([[i,j] for i,j in enumerate(tokenizer_files)])
     try:
-        inp = int(inpt(prompt="index of file to be used(starting from 0):\n",timeout=15))   
+        inp = int(str(inpt(prompt="index of file to be used(starting from 0):",timeout=15)))   
     except:
         inp = None
     if inp != None: 

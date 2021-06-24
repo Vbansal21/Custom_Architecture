@@ -301,9 +301,9 @@ class TransformerBlock(Module):
                                     HopfieldLayer(
                                                 input_size=hop_dim,
                                                 num_heads=hop_heads,
-                                                pattern_size=2**8,
+                                                pattern_size=2**7,
                                                 dropout=dropout,
-                                                quantity=2**8,
+                                                quantity=2**7,
                                             ),
                                     nn.Linear(hop_dim,d_model)
                                     )

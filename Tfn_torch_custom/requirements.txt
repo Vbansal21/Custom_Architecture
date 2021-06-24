@@ -1,4 +1,5 @@
-torch 
+torch
+numpy 
 torchtext 
 pytorch-nlp 
 einops 
@@ -11,5 +12,33 @@ wandb
 mmcv
 pytorch-fast-transformers
 inputimeout
+textract
+chardet
+sic
+six
 # sudo apt install libopenmpi-dev
 # sudo apt install libaio-dev
+# sudo apt-get install apt-get install python-dev libxml2-dev libxslt1-dev antiword unrtf poppler-utils pstotext tesseract-ocr flac ffmpeg lame libmad0 libsox-fmt-mp3 sox libjpeg-dev swig 
+"""
+in file lib/python3.8/site-packages/textract/parsers/utils.py
+make changes at line 34
+
+    def process(self, filename, encoding, **kwargs):
+        byte_string = self.extract(filename, **kwargs)
+        unicode_string = self.decode(byte_string,encoding)
+        return self.encode(unicode_string, encoding)
+
+    def decode(self, text, encoding=None):
+        if isinstance(text, six.text_type):
+            return text
+
+        # empty text? nothing to decode
+        if not text:
+            return u''
+
+        # use chardet to automatically detect the encoding text
+        result = chardet.detect(text)
+        encoding = result['encoding'] if encoding == None else encoding
+        return text.decode(encoding)
+
+"""
