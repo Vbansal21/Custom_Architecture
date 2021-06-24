@@ -422,16 +422,26 @@ class TransformerBlock(Module):
 
         self.decoder = decoder
 
+        self.register_buffer(
+                            name='prev_state',
+                            tensor=torch.zeros((1, 1024, d_model))
+                            )
+
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
+
+        prev_state = repeat(self.prev_state,'1 n d -> b n d',b=src.size(0))
+        src = torch.cat((prev_state,src),dim=-2)
 
         output = src
         #output = self.norm1(src)
         #output = Positional_Encoding(output)
+
         output = ckpt(self.feed_forward,output)
 
         if self.decoder:
             context = output if context == None else context
+            context = torch.cat((prev_state,context),dim=-2)
             #context = self.norm2(context)
             #context = Positional_Encoding(context)
             context = ckpt(self.ctxt_ffd,context)
@@ -446,6 +456,11 @@ class TransformerBlock(Module):
 
         output = self.dropout2(output)
         output = self.to_out(src,output)
+
+        prev_state = torch.cat((output[:,:self.prev_state.size(-2)//2],output[:,-(self.prev_state.size(-2)-(self.prev_state.size(-2)//2)):]),dim=-2).clone().detach()
+        output = output[:,self.prev_state.size(-2):]
+
+        self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
 
         return output
 
