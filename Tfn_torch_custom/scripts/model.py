@@ -457,7 +457,7 @@ class TransformerBlock(Module):
         output = self.dropout2(output)
         output = self.to_out(src,output)
 
-        prev_state = torch.cat((output[:,:self.prev_state.size(-2)//2],output[:,-(self.prev_state.size(-2)-(self.prev_state.size(-2)//2)):]),dim=-2).clone().detach()
+        prev_state = torch.cat((output[:,:((self.prev_state.size(-2)*2)//3)],output[:,-(self.prev_state.size(-2)-((self.prev_state.size(-2)*2)//3)):]),dim=-2).clone().detach()
         output = output[:,self.prev_state.size(-2):]
 
         self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
