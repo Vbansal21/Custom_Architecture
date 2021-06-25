@@ -11,7 +11,7 @@ from typing import List
 #from pytorch_model_summary import summary
 from inputimeout import inputimeout as inpt
 from torchnlp.encoders.text import SubwordEncoder
-from torchtext.utils import download_from_url, extract_archive
+#from torchtext.utils import download_from_url, extract_archive
 #from typing import Tuple, Optional, Any, NoReturn, Union, Literal
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,13 +23,7 @@ torch.autograd.set_detect_anomaly(True)
 autocast = torch.cuda.amp.autocast
 
 
-file = "wikitextv103"
-if file == "wikitextv2":
-    url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v1.zip'
-elif file == "wikitextv103":
-    url = 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip'
-test_filepath, valid_filepath, train_filepath = extract_archive(download_from_url(url))
-
+file = "all_files_n_texts"
 files = []
 string_of_files = ""
 
@@ -322,10 +316,6 @@ except Exception as e:
 
     val_sample = string_of_files[train_portion+test_portion:]
 
-    train_sample = "".join([i for i in io.open(train_filepath, encoding="utf8")]) + train_sample
-    test_sample = "".join([i for i in io.open(test_filepath, encoding="utf8")]) + test_sample
-    val_sample = "".join([i for i in io.open(valid_filepath, encoding="utf8")]) + val_sample
-    
     train_data = data_process(train_sample)
     val_data = data_process(val_sample)
     test_data = data_process(test_sample)
