@@ -151,7 +151,7 @@ seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
 mlp_layers: int = 1
 fno_layers: int = 4
-modes: int = 8
+modes: int = 32
 width: int = 8
 causal: bool = False
 nystrom: bool = True
@@ -159,7 +159,7 @@ attend_to_self: bool = True
 attend_to_inp: bool = True
 feature_redraw_interval: int = 384
 prev_state_len: int = emsize*4
-prev_state_self_num: int = 8
+prev_state_self_num: int = 1
 local_heads: int = 2
 local_heads: int = min(local_heads,nhead)
 

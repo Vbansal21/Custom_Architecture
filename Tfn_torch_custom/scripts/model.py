@@ -430,10 +430,11 @@ class TransformerBlock(Module):
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
 
-        prev_state = repeat(self.prev_state,'1 n d -> b n d',b=src.size(0))
-        src = torch.cat((prev_state,src),dim=-2)
-
         output = src
+
+        prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
+        output = torch.cat((prev_state,output),dim=-2)
+
         #output = self.norm1(src)
         #output = Positional_Encoding(output)
 
@@ -455,10 +456,11 @@ class TransformerBlock(Module):
         output = ckpt(self.mlp,output)
 
         output = self.dropout2(output)
-        output = self.to_out(src,output)
 
-        prev_state = torch.cat((output[:,:((self.prev_state.size(-2)*2)//3)],output[:,-(self.prev_state.size(-2)-((self.prev_state.size(-2)*2)//3)):]),dim=-2).clone().detach()
+        prev_state = output[:,-(self.prev_state.size(-2)):].clone().detach()
         output = output[:,self.prev_state.size(-2):]
+        
+        output = self.to_out(src,output)
 
         self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
 
