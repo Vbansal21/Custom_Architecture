@@ -1157,14 +1157,14 @@ class TransformerModel(Module):
         
     def get_prev_state(self) -> List[Tensor]:
         prev_states = {0:self.transformer_block.prev_state}
-        modules = find_modules(self.transformer_block,Attention)
+        modules = find_modules(self.transformer_block,Attention) + find_modules(self.transformer_block,TransformerBlock)
         for i,attn in enumerate(modules):
             prev_states[i+1] = attn.prev_state
         return prev_states
 
     def set_prev_state(self,prev_state:List[Tensor]):
         self.transformer_block.prev_state = prev_state[0]
-        modules = find_modules(self.transformer_block,Attention)
+        modules = find_modules(self.transformer_block,Attention) + find_modules(self.transformer_block,TransformerBlock)
         for i,attn in enumerate(modules):
             attn.prev_state = prev_states[i+1]
 
