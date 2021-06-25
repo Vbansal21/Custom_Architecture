@@ -502,7 +502,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1
+lr = 0.1
 
 if not use_deepspeed:
     if use_sgd:
@@ -537,9 +537,9 @@ def lambda_lr(step_):
     if step_<(1024/(multiplier**(math.pi*2/10))):
         return sub_func(step_)
     elif step_<(2048/(multiplier**(math.pi*2/10))):
-        return sub_func(step_) / (25 * (lr**0.5))
+        return sub_func(step_) / (25 * (lr**0.25))
     else:
-        return sub_func(step_) / (125 * lr)
+        return sub_func(step_) / (125 * (lr**0.5))
 #    pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 #    lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
 
@@ -782,10 +782,14 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         trainable_index = None
         torch.cuda.empty_cache()
 
-        if not discriminator:
-            outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
-        else:
-            pass
+        try:
+            if not discriminator:
+                outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
+            else:
+                pass
+        except:
+            print("error in training step")
+            continue
 
         total_loss += loss
         total_acc += acc
