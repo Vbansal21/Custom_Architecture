@@ -55,7 +55,7 @@ def list_of_all_files(path:str="./") -> str:
             files += list_of_all_files(i)
     return files
 
-def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".pdb",".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
     for i in files_not_to_be_included:
         if ((i in file_name_with_path) and (not "tokenizer" in file_name_with_path)):
             return ""
@@ -141,9 +141,9 @@ emsize: int = 512
 nhid: int = emsize * 4
 nlayers: int = 1
 deberta_layers: int = 2
-repeated_deberta_layers: int = 1
+repeated_deberta_layers: int = 0
 full_block_repeat: bool = False
-nhead: int = 8
+nhead: int = 16
 dropout = (math.pi/10)
 mem_tokens: int = emsize*2
 bptt: int = (1024*1) #- mem_tokens
@@ -157,7 +157,7 @@ causal: bool = False
 nystrom: bool = True
 attend_to_self: bool = True
 attend_to_inp: bool = True
-feature_redraw_interval: int = 384
+feature_redraw_interval: int = 1024
 prev_state_len: int = emsize*4
 prev_state_self_num: int = 1
 local_heads: int = 2
@@ -253,12 +253,12 @@ def random_mask_shuffle_encoder(
 
 def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
     seq_len = min(bptt, source.size(1) - j)
-    rnd_shuffle = 0 if not shuffle else random.randint(0,100000000)/1000000
-    rnd_mask = random.randint(0,7000000000)/100000000
-    rnd_mask_together = random.randint(0,seq_scale_down**2 // 2)
+    rnd_shuffle = 0 if not shuffle else random.randint(0,15000000)/1000000
+    rnd_mask = random.randint(0,1500000000)/100000000
+    rnd_mask_together = random.randint(0,min(min(8,seq_scale_down)**2 // 2,rnd_mask))
     rnd_1 = random.randint(0,24)
     rnd_2 = random.randint(0,12)
-    rnd_2_1 = random.randint(0,min((seq_len-1),(bptt//8),(seq_scale_down*2)**2))
+    rnd_2_1 = random.randint(0,min((seq_len-1),(bptt//8),(min(8,seq_scale_down)*2)**2))
     rnd_3 = random.randint(0,12)
 
     sos = data_process("[sos]").unsqueeze(0).to(device)
@@ -271,7 +271,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
     if random.randint(0,1):
         start_text = torch.cat((torch.full((source.size(0),1),6,dtype=torch.long,device=device),torch.full((source.size(0),1),9,dtype=torch.long,device=device),data_process(start_text).unsqueeze(0).to(device),torch.full((source.size(0),1),6,dtype=torch.long,device=device)),dim=1)
     else:
-        start_text = torch.cat((torch.full((source.size(0),1),6,dtype=torch.long,device=device),torch.full((source.size(0),1),2,dtype=torch.long,device=device),torch.full((source.size(0),1),6,dtype=torch.long,device=device)),dim=1)
+        start_text = torch.full((source.size(0),1),2,dtype=torch.long,device=device)
     
     if progressive:
         seq_len = min(bptt, source.size(1) - j)
@@ -305,44 +305,26 @@ except Exception as e:
             string_of_files += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
 
     train_portion = int(len(string_of_files) * 0.55)
-    test_portion = int(len(string_of_files) * 0.2)
+    test_portion = int(len(string_of_files) * 0.3)
 
     train_sample = string_of_files[:train_portion]
 
-    offset = 5
     if "[eos]" not in train_sample[-5:]:
-        while True:
-            new_portion = string_of_files[train_portion:train_portion+offset]
-            
-            if new_portion.find("[eos]") == -1:
-                offset += len(string_of_files)//1000
-            elif len(string_of_files) == 0:
-                break
-            else:
-                train_portion += new_portion.find("[eos]")+5
-                break
+        new_portion = string_of_files[train_portion:]
+        train_portion += new_portion.find("[eos]")+5
     train_sample = string_of_files[:train_portion]
 
-    offset = 5
     test_sample = string_of_files[train_portion:train_portion+test_portion]
     if "[eos]" not in test_sample[-5:]:
-        while True:
-            new_portion = string_of_files[train_portion+test_portion:train_portion+test_portion+offset]
-            
-            if new_portion.find("[eos]") == -1:
-                offset += len(string_of_files)//1000
-            elif len(string_of_files) == 0:
-                break
-            else:
-                test_portion += new_portion.find("[eos]")+5
-                break
+        new_portion = string_of_files[train_portion+test_portion:]
+        test_portion += new_portion.find("[eos]")+5
     test_sample = string_of_files[train_portion:train_portion+test_portion]
 
     val_sample = string_of_files[train_portion+test_portion:]
 
-    train_sample += "".join([i for i in io.open(train_filepath, encoding="utf8")])
-    test_sample += "".join([i for i in io.open(test_filepath, encoding="utf8")])
-    val_sample += "".join([i for i in io.open(valid_filepath, encoding="utf8")])
+    train_sample = "".join([i for i in io.open(train_filepath, encoding="utf8")]) + train_sample
+    test_sample = "".join([i for i in io.open(test_filepath, encoding="utf8")]) + test_sample
+    val_sample = "".join([i for i in io.open(valid_filepath, encoding="utf8")]) + val_sample
     
     train_data = data_process(train_sample)
     val_data = data_process(val_sample)
@@ -502,7 +484,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.1
+lr = 1
 
 if not use_deepspeed:
     if use_sgd:
@@ -564,7 +546,7 @@ best_val_loss = float("inf")
 
 resume_batch = 0
 log_interval = feature_redraw_interval
-epochs = 4
+epochs = 1
 
 import matplotlib.pyplot as plt
 plt.plot([lambda_lr(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
