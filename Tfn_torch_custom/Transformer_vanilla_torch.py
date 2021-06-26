@@ -971,73 +971,8 @@ while True:
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         best_model = model
-
-    model.eval()
-    best_model.eval()
-
-    model.tokenzier = tokenizer
-    model.vocab = vocab
-    model.optimizer = optimizer
-    #model.optimizer_disc = optimizer_disc
-    model.scheduler = scheduler
-    #model.scheduler_disc = scheduler_disc
-    model.scheduler_lambda = lambda_lr
-    #model.scheduler_disc_lambda = lambda_lr
-
-    if discriminator:
-        torch.save(
-        {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'model':model,
-            'best_model':best_model,
-            'best_model_state_dict': best_model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'optimizer_disc_state_dict': optimizer_disc.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'scheduler_disc_state_dict':scheduler_disc.state_dict(),
-            'best_val_loss': best_val_loss,
-            'vocab': vocab,
-            'tokenizer': tokenizer,
-            'resume_batch':0,
-            'train_eval_events': train_eval_event,
-            'step_number': step
-        },
-        path
-        )
-    else:
-        torch.save(
-        {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'best_model_state_dict': best_model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'optimizer_disc_state_dict': None,
-            'scheduler_state_dict': scheduler.state_dict(),
-            'scheduler_disc_state_dict':None,
-            'best_val_loss': best_val_loss,
-            'vocab': vocab,
-            'tokenizer': tokenizer,
-            'resume_batch':0,
-            'train_eval_events': train_eval_event,
-            'step_number': step
-        },
-        path
-        )
-    """
-    ckpt_id = epoch*(processed_train_data.size(-1)//bptt) + batch
-    model.save_checkpoint(path,ckpt_id,client_sd = {
-            'epoch': epoch,
-            'best_model': best_model,
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'best_val_loss': best_val_loss,
-            'vocab': vocab,
-            'tokenizer': tokenizer,
-            'resume_batch':0,
-            'train_eval_events': train_eval_event,
-            'step_number': step
-        })"""
+        batch = 0
+        save_model()
 model = best_model
 
 test_loss,test_acc = evaluate(best_model, processed_test_data)
