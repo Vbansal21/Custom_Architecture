@@ -4,7 +4,7 @@ import textract
 import random,wandb
 from torch import nn
 from torch import Tensor
-from einops import rearrange
+from einops import rearrange, repeat
 import math, time, torch #,copy
 from typing import List
 #from performer_torch import PerformerLM
@@ -246,39 +246,33 @@ def random_mask_shuffle_encoder(
     return out,index_to_be_trained_on
 
 def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
-    seq_len = min(bptt, source.size(1) - j)
+    seq_len = min(bptt, source.size(1) - j -1)
     rnd_shuffle = 0 if not shuffle else random.randint(0,15000000)/1000000
     rnd_mask = random.randint(0,1500000000)/100000000
     rnd_mask_together = random.randint(0,min(min(8,seq_scale_down)**2 // 2,rnd_mask))
-    rnd_1 = random.randint(0,24)
-    rnd_2 = random.randint(0,12)
-    rnd_2_1 = random.randint(0,min((seq_len-1),(bptt//8),(min(8,seq_scale_down)*2)**2))
-    rnd_3 = random.randint(0,12)
+    rnd = random.randint(0,min((seq_len-1),(bptt//8),(min(8,seq_scale_down)*2)**2))
 
-    sos = data_process("[sos]").unsqueeze(0).to(device)
-    sos_tok = torch.full((source.size(0),sos.size(1)),2,dtype=torch.long,device=device)
-    eos = data_process("[eos]").unsqueeze(0).to(device)
-    eos_tok = torch.full((source.size(0),eos.size(1)),3,dtype=torch.long,device=device)
-    
+    """
     start_text = ["Generate text","learn to generate text","learn to predict","masked language modeling","mlm","continue text","continue input","decorrupt and predict according to input"]
     start_text = start_text[random.randint(0,len(start_text)-1)]
     if random.randint(0,1):
-        start_text = torch.cat((torch.full((source.size(0),1),6,dtype=torch.long,device=device),torch.full((source.size(0),1),9,dtype=torch.long,device=device),data_process(start_text).unsqueeze(0).to(device),torch.full((source.size(0),1),6,dtype=torch.long,device=device)),dim=1)
+        start_text = torch.cat((torch.full((source.size(0),1),6,dtype=torch.long,device=device),torch.full((source.size(0),1),9,dtype=torch.long,device=device),repeat(data_process(start_text).to(device),"n -> b n",b=source.size(0)),torch.full((source.size(0),1),6,dtype=torch.long,device=device)),dim=1)
     else:
-        start_text = torch.full((source.size(0),1),2,dtype=torch.long,device=device)
+        start_text = torch.full((source.size(0),0),2,dtype=torch.long,device=device)
+    start_text = torch.full((source.size(0),0),2,dtype=torch.long,device=device)
+    """
     
     if progressive:
-        seq_len = min(bptt, source.size(1) - j)
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-1-rnd_2_1],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
-        data = torch.cat((start_text,sos,torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),rnd_2+1-min(1,rnd_1) + rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device),eos),dim=1).contiguous()
-        targets = source[:,j:j+seq_len].to(device)
-        targets = torch.cat((start_text,sos_tok,torch.full((data.size(0),max(rnd_1-1,0)),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device),eos_tok),dim=1).contiguous()
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-rnd-1],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
+        data = torch.cat((data.to(device),torch.full((data.size(0),rnd),5,dtype=torch.long,device=device)),dim=1).contiguous()
+        targets = source[:,j+1:j+seq_len].to(device)
+        targets = targets.contiguous()
     else:
         seq_len = min(bptt, source.size(1) - j)
-        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-rnd_2_1],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
-        data = torch.cat((start_text,sos,torch.full((data.size(0),rnd_1),2,dtype=torch.long,device=device),data.to(device),torch.full((data.size(0),rnd_2+rnd_2_1),5,dtype=torch.long,device=device),torch.full((data.size(0),rnd_3),3,dtype=torch.long,device=device),eos),dim=1).contiguous()
+        data,index_to_be_trained_on = random_mask_shuffle_encoder(source[:,j:j+seq_len-rnd],mask_percentage=rnd_mask,mask_together_nos=rnd_mask_together,mask_continuous_pos=170,shuffle_percentage=rnd_shuffle,shuffle_together_nos=seq_scale_down)
+        data = torch.cat((data.to(device),torch.full((data.size(0),rnd),5,dtype=torch.long,device=device)),dim=1).contiguous()
         targets = source[:,j:j+seq_len].to(device)
-        targets = torch.cat((start_text,sos_tok,torch.full((targets.size(0),rnd_1),2,dtype=torch.long,device=device),targets,torch.full((targets.size(0),rnd_2+rnd_3),3,dtype=torch.long,device=device),eos_tok),dim=1).contiguous()
+        targets = targets.contiguous()
     torch.cuda.empty_cache()
     return data,targets,index_to_be_trained_on
 
@@ -543,7 +537,7 @@ plt.ion()
 plt.plot([lambda_lr(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
 #plt.show(block=False)
 plt.draw()
-plt.pause(30.0)
+plt.pause(15.0)
 plt.close()
 del(plt)
 
