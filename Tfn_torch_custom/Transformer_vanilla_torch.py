@@ -49,7 +49,7 @@ def list_of_all_files(path:str="./") -> str:
             files += list_of_all_files(i)
     return files
 
-def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".pdb",".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".code-workspace",".pdb",".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
     for i in files_not_to_be_included:
         if ((i in file_name_with_path) and (not "tokenizer" in file_name_with_path)):
             return ""
@@ -723,6 +723,78 @@ def evaluate(eval_model, data_source, print_val_loss=False):
         print('-' * 110)
     return val_loss, val_acc
 
+def save_model():
+    model.eval()
+    best_model.eval()
+
+    model.tokenzier = tokenizer
+    model.vocab = vocab
+    model.optimizer = optimizer
+    #model.optimizer_disc = optimizer_disc
+    model.scheduler = scheduler
+    #model.scheduler_disc = scheduler_disc
+    model.scheduler_lambda = lambda_lr
+    #model.scheduler_disc_lambda = lambda_lr
+
+    if discriminator:
+        torch.save(
+        {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'model':model,
+            'best_model':best_model,
+            'best_model_state_dict': best_model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'optimizer_disc_state_dict': optimizer_disc.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scheduler_disc_state_dict':scheduler_disc.state_dict(),
+            'best_val_loss': best_val_loss,
+            'vocab': vocab,
+            'tokenizer': tokenizer,
+            'resume_batch':batch,
+            'train_eval_events': train_eval_event,
+            'step_number': step
+        },
+        path
+        )
+    else:
+        torch.save(
+        {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'model':model,
+            'best_model':best_model,
+            'best_model_state_dict': best_model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'optimizer_disc_state_dict': None,
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scheduler_disc_state_dict':None,
+            'best_val_loss': best_val_loss,
+            'vocab': vocab,
+            'tokenizer': tokenizer,
+            'resume_batch':batch,
+            'train_eval_events': train_eval_event,
+            'step_number': step
+        },
+        path
+        )
+    """
+    ckpt_id = epoch*(processed_train_data.size(-1)//bptt) + batch
+    model.save_checkpoint(path,ckpt_id,client_sd = {
+        'epoch': epoch,
+        'best_model': best_model,
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'best_val_loss': best_val_loss,
+        'vocab': vocab,
+        'tokenizer': tokenizer,
+        'resume_batch':batch,
+        'train_eval_events': train_eval_event,
+        'step_number': step
+    })
+    """
+    model.train()
+
 torch.cuda.empty_cache()
 def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,optimizer=optimizer,optimizer_disc=optimizer_disc):
     
@@ -759,8 +831,18 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
             else:
                 pass
-        except:
-            print("error in training step")
+        except KeyboardInterrupt as e:
+            print("KeyboardInterrupt\v",e)
+            try:
+                inp = int(inpt(prompt="Save the model(0/1)?:\v",timeout=15))
+                print("")
+            except:
+                inp = 1
+            if inp:
+                save_model()
+            raise KeyboardInterrupt
+        except Exception as e:
+            print("error in training step\v",e)
             continue
 
         total_loss += loss
@@ -784,78 +866,10 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
 
         if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
             inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
-
-            model.eval()
-            best_model.eval()
-
-            model.tokenzier = tokenizer
-            model.vocab = vocab
-            model.optimizer = optimizer
-            #model.optimizer_disc = optimizer_disc
-            model.scheduler = scheduler
-            #model.scheduler_disc = scheduler_disc
-            model.scheduler_lambda = lambda_lr
-            #model.scheduler_disc_lambda = lambda_lr
-
-            if discriminator:
-                torch.save(
-                {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'model':model,
-                    'best_model':best_model,
-                    'best_model_state_dict': best_model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'optimizer_disc_state_dict': optimizer_disc.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'scheduler_disc_state_dict':scheduler_disc.state_dict(),
-                    'best_val_loss': best_val_loss,
-                    'vocab': vocab,
-                    'tokenizer': tokenizer,
-                    'resume_batch':batch,
-                    'train_eval_events': train_eval_event,
-                    'step_number': step
-                },
-                path
-                )
-            else:
-                torch.save(
-                {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'model':model,
-                    'best_model':best_model,
-                    'best_model_state_dict': best_model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'optimizer_disc_state_dict': None,
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'scheduler_disc_state_dict':None,
-                    'best_val_loss': best_val_loss,
-                    'vocab': vocab,
-                    'tokenizer': tokenizer,
-                    'resume_batch':batch,
-                    'train_eval_events': train_eval_event,
-                    'step_number': step
-                },
-                path
-                )
-            """
-            ckpt_id = epoch*(processed_train_data.size(-1)//bptt) + batch
-            model.save_checkpoint(path,ckpt_id,client_sd = {
-                'epoch': epoch,
-                'best_model': best_model,
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_val_loss': best_val_loss,
-                'vocab': vocab,
-                'tokenizer': tokenizer,
-                'resume_batch':batch,
-                'train_eval_events': train_eval_event,
-                'step_number': step
-            })
-            """
+            save_model()
             intermediate_save_time = time.time()
             model.train()
+
         if step_scheduler != None and batch%mini_batch_size == 0:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
                 scheduler.step(step)

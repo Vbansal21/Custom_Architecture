@@ -1260,12 +1260,11 @@ class Attention(nn.Module):
             mem_pos_q = rearrange(self.rel_pos_emb_q_mem(torch.arange(out.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
             mem_pos_k = rearrange(self.rel_pos_emb_k_mem(torch.arange(mem_k.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
             
-            out_ = ckpt(self.q_rel_pos_emb_mem,out,mem_pos_q)
+            out = ckpt(self.q_rel_pos_emb_mem,out,mem_pos_q)
             mem_k = ckpt(self.k_rel_pos_emb_mem,mem_k,mem_pos_k)
 
-            out_ = ckpt(self.mem_attn,out_,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,out_,mem_k,mem_v)
-            out_ = ckpt(self.out_mem,out_)
-            out = self.norm((out*self.zero_1) + (out_*self.zero_0))
+            out = ckpt(self.mem_attn,out,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,out,mem_k,mem_v)
+            out = ckpt(self.out_mem,out)
 
             out_k = self.out_k(out)
             out_v = self.out_v(out)
@@ -1275,6 +1274,7 @@ class Attention(nn.Module):
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         out =  self.to_out(out)
+        torch.cuda.empty_cache()
         return self.dropout(out)
 
 class SelfAttention(Attention):

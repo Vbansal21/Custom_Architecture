@@ -239,7 +239,7 @@ class TransformerBlock(Module):
                      dim_feedforward=512, 
                      dropout=0.1, 
                      activation="relu",
-                     mem_kv=64*16,
+                     mem_kv=1024,
                      pkm_dims=None,
                      pkm_keys=64,
                      decoder=False,
@@ -422,19 +422,10 @@ class TransformerBlock(Module):
 
         self.decoder = decoder
 
-        self.register_buffer(
-                            name='prev_state',
-                            tensor=torch.zeros((1, 1024, d_model))
-                            )
-
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
 
         output = src
-
-        prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
-        output = torch.cat((prev_state,output),dim=-2)
-
         #output = self.norm1(src)
         #output = Positional_Encoding(output)
 
@@ -442,7 +433,6 @@ class TransformerBlock(Module):
 
         if self.decoder:
             context = output if context == None else context
-            context = torch.cat((prev_state,context),dim=-2)
             #context = self.norm2(context)
             #context = Positional_Encoding(context)
             context = ckpt(self.ctxt_ffd,context)
@@ -457,12 +447,7 @@ class TransformerBlock(Module):
 
         output = self.dropout2(output)
 
-        prev_state = output[:,-(self.prev_state.size(-2)):].clone().detach()
-        output = output[:,self.prev_state.size(-2):]
-        
         output = self.to_out(src,output)
-
-        self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
 
         return output
 
@@ -1128,7 +1113,7 @@ class TransformerModel(Module):
                 trainable_output_targets = output_targets
                 
             loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
-            loss.backward(retain_graph=True)
+            loss.backward()
             torch.cuda.empty_cache()
             if mini_batch_size != None and batch != None:
                 if batch%mini_batch_size == 0:
@@ -1159,14 +1144,14 @@ class TransformerModel(Module):
         
     def get_prev_state(self) -> List[Tensor]:
         prev_states = {0:self.transformer_block.prev_state}
-        modules = find_modules(self.transformer_block,Attention) + find_modules(self.transformer_block,TransformerBlock)
+        modules = find_modules(self.transformer_block,Attention)
         for i,attn in enumerate(modules):
             prev_states[i+1] = attn.prev_state
         return prev_states
 
     def set_prev_state(self,prev_state:List[Tensor]):
         self.transformer_block.prev_state = prev_state[0]
-        modules = find_modules(self.transformer_block,Attention) + find_modules(self.transformer_block,TransformerBlock)
+        modules = find_modules(self.transformer_block,Attention)
         for i,attn in enumerate(modules):
             attn.prev_state = prev_states[i+1]
 
