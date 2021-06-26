@@ -587,7 +587,10 @@ wandb.init(project=project_name,config={
     "attend_to_inp":attend_to_inp,
     "prev_state_self_num":prev_state_self_num,
     "mlp_layers":mlp_layers,
-}
+},
+resume="bc1akjb3",
+force=True,
+save_code=True
 )
 
 #wandb.watch(model,criterion=criterion,log_freq=20)
@@ -865,9 +868,9 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
 
         log_interval = log_interval
         total_ppl += ppl
-        inputs = "\n".join([tokenizer.decode(i.to(torch.device('cpu'))) for i in data])
-        output = "\n".join([tokenizer.decode(torch.argmax(i,dim=-1).to(torch.device('cpu'))) for i in outputs['output']])
-        req_targets = "\n".join([tokenizer.decode(i.to(torch.device('cpu'))) for i in targets])
+        inputs = str("\n".join([tokenizer.decode(i.to(torch.device('cpu'))) for i in data]))
+        output = str("\n".join([tokenizer.decode(torch.argmax(i,dim=-1).to(torch.device('cpu'))) for i in outputs['output']]))
+        req_targets = str("\n".join([tokenizer.decode(i.to(torch.device('cpu'))) for i in targets]))
         del(data,targets,outputs,losses)
         torch.cuda.empty_cache()
 
@@ -887,7 +890,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
             total_ppl /= log_interval
-            _,__ = evaluate(model,processed_val_data,True)
+            _,__ = evaluate(model,processed_val_data[:,i-((log_interval)*stride_size):i],True)
             elapsed = time.time() - start_time
             if discriminator:
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '
