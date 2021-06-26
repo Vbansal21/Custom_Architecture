@@ -135,7 +135,7 @@ emsize: int = 256
 nhid: int = emsize * 4
 nlayers: int = 2
 deberta_layers: int = 4
-repeated_deberta_layers: int = 1
+repeated_deberta_layers: int = 0
 full_block_repeat: bool = False
 nhead: int = 16
 dropout = (math.pi/10)
@@ -468,7 +468,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1
+lr = 0.1
 
 if not use_deepspeed:
     if use_sgd:
@@ -500,12 +500,12 @@ def lambda_lr(step_):
     def sub_func(step):
         return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 
-    if step_<(1024/(multiplier**(math.pi*2/10))):
+    if step_<(1024/(lr*multiplier**(math.pi*2/10))):
         return sub_func(step_)
-    elif step_<(2048/(multiplier**(math.pi*2/10))):
-        return sub_func(step_) / (25 * (lr**0.25))
+    elif step_<(2048/(lr*multiplier**(math.pi*2/10))):
+        return sub_func(step_) / (25 * (lr**0.125))
     else:
-        return sub_func(step_) / (125 * (lr**0.5))
+        return sub_func(step_) / (125 * (lr**0.25))
 #    pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 #    lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
 
@@ -529,7 +529,7 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-log_interval = feature_redraw_interval
+log_interval = 50
 epochs = 1
 
 import matplotlib.pyplot as plt
@@ -583,7 +583,7 @@ wandb.init(project=project_name,config={
     "mlp_layers":mlp_layers,
 },
 resume=False,#"bc1akjb3",
-force=False,
+force=True,
 save_code=True
 )
 
@@ -869,7 +869,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         torch.cuda.empty_cache()
 
         if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
-            inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
+            #inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
             save_model(batch)
             intermediate_save_time = time.time()
             model.train()
@@ -884,7 +884,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
             total_ppl /= log_interval
-            _,__ = evaluate(model,processed_val_data[:,i-((log_interval)*stride_size):i],True)
             elapsed = time.time() - start_time
             if discriminator:
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '

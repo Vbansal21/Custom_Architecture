@@ -1158,9 +1158,9 @@ class Attention(nn.Module):
             
             self.out_k = nn.Linear(dim_head,dim_head)
             self.out_v = nn.Linear(dim_head,dim_head)
-            self.zero_0 = nn.Parameter(torch.ones(dim_head))
-            self.zero_1 = nn.Parameter(torch.zeros(dim_head))
-            self.norm = ScaleNorm(dim_head)
+            #self.zero_0 = nn.Parameter(torch.ones(dim_head))
+            #self.zero_1 = nn.Parameter(torch.zeros(dim_head))
+            #self.norm = ScaleNorm(dim_head)
 
             self.q_rel_pos_emb_mem = ConstrainedLinear(
                 self.heads*dim_head,

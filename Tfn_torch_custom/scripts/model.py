@@ -447,7 +447,7 @@ class TransformerBlock(Module):
 
         output = self.dropout2(output)
 
-        output = self.to_out(src,output)
+        output = self.to_out(output)
 
         return output
 
