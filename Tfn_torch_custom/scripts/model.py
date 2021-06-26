@@ -801,15 +801,15 @@ class TransformerModel(Module):
         else:
             return 0
 
-    def fix_projection_matrices_(self):
+    def fix_projection_matrices_(self) -> NoReturn :
         self.proj_updater.feature_redraw_interval = None
 
-    def defix_projection_matrices_(self):
+    def defix_projection_matrices_(self) -> NoReturn :
         self.proj_updater.feature_redraw_interval = self.feature_redraw_interval
 
     def init_weights(self) -> NoReturn :
         for w in self.parameters():
-            w.data.uniform_(-1/12,1/12)
+            w.data.uniform_(-0.01,0.01)
             
     def __len__(self) -> int:
         return sum(p.numel() for p in self.parameters())
@@ -1079,7 +1079,7 @@ class TransformerModel(Module):
                     loss_criterion,
                     mem_tokens=None,
                     opt=None,
-                    grad_clip=0.5,
+                    grad_clip=0.125,
                     deepspeed_enabled=False,
                     autocast_enabled=False,
                     trainable_index=None,
