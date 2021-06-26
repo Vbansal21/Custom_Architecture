@@ -1084,7 +1084,7 @@ class Attention(nn.Module):
         self.fixed_emb = fixed_emb
         if rotary_pos_emb:
             self.pos_emb = None
-            self.layer_pos_emb = FixedPositionalEmbedding(dim_head, max_seq_len) if fixed_emb else RotaryEmbedding(dim_head)
+            self.layer_pos_emb = FixedPositionalEmbedding(dim, max_seq_len) if fixed_emb else RotaryEmbedding(dim)
         elif axial_position_emb:
             axial_position_shape = default(axial_position_shape, (math.ceil(max_seq_len / 64), 64))
             self.pos_emb = AxialPositionalEmbedding(dim, axial_position_shape)
@@ -1120,9 +1120,9 @@ class Attention(nn.Module):
         self.attn_to_self = None
         if attend_to_self:
             self_head_dim = 1
-            self.features = (((heads*2)**2)//2)*2 + 1
+            self.features = 11
             scale = 2
-            self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,self.features,groups=inner_dim)
+            self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,kernel_size=self.features,padding=self.features//2,padding_mode="replicate",groups=1)
             self.project_down = nn.Linear(inner_dim*scale, inner_dim)
 
             self_nystrom = True
@@ -1201,10 +1201,7 @@ class Attention(nn.Module):
         tmp_k,tmp_v = k,v
 
         if self.attn_to_self != None:
-            self_q = torch.cat((q[:,-(self.features//2):],q,q[:,:self.features//2]),dim=-2)
-            if self_q.size(-2) < self.features:
-                padding = torch.zeros((self_q.size(0),self.features-self_q.size(1),self_q.size(-1)),dtype=self_q.dtype,device=self_q.device)
-                self_q = torch.cat((padding,self_q),dim=-2)
+            self_q = q
             self_q = ckpt(self.feat_prep,self_q.transpose(-1,-2)).transpose(-1,-2)
             org_shape = self_q.shape
             self_q = rearrange(self_q, 'b n d -> b n d 1')
@@ -1213,10 +1210,10 @@ class Attention(nn.Module):
             q = ckpt(self.project_down,self_q)
             del(self_q)
 
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
-
         if exists(pos_emb) and not cross_attend:
             q, k = apply_rotary_pos_emb(q, k, pos_emb)
+
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
         (q, lq), (k, lk), (v, lv) = map(lambda t: (t[:, :gh], t[:, gh:]), (q, k, v))
 

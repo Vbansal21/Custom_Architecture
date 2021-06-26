@@ -1,5 +1,5 @@
 #from ..models.embedder import Embedder, PositionalEncoder
-#import math
+import math
 from turtle import forward
 import torch
 from einops import rearrange,repeat
@@ -12,26 +12,16 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 checkpointed = True
 
-def ckpt(f,arg1,arg2=None,arg3=None,checkpointed = checkpointed):
+def ckpt(f,*arg,checkpointed = checkpointed):
     if checkpointed:
-        if arg2 == None and arg3 == None:
-            return checkpoint(f,arg1)
-        elif arg3 == None:
-            return checkpoint(f,arg1,arg2)
-        else:
-            return checkpoint(f,arg1,arg2,arg3)
+        return checkpoint(f,*arg)
     else:
-        if arg2 == None and arg3 == None:
-            return f(arg1)
-        elif arg3 == None:
-            return f(arg1,arg2)
-        else:
-            return f(arg1,arg2,arg3)
+        f(*arg)
             
 class GatedConvolution(nn.Module):
     def __init__(self,d_model,patch_size=3,padding=1):
         super(GatedConvolution,self).__init__()
-        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=padding,groups=d_model//2,bias=True)
+        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=padding,groups=1,bias=True)
         #init.xavier_uniform_(self.conv.weight, gain=1)
 
     def forward(self,x):
@@ -56,8 +46,8 @@ class SeparableConv1D(nn.Module):
     """
     def __init__(self, in_channel, inner_channels, out_channel, kernel_size=1, padding=0):
         super().__init__()
-        self.deep_wise = nn.Conv1d(in_channel, inner_channels, kernel_size=kernel_size, padding=padding, groups=min(in_channel,inner_channels))
-        self.point_wise = nn.Conv1d(inner_channels, out_channel, kernel_size=1,groups=min(inner_channels,out_channel))
+        self.deep_wise = nn.Conv1d(in_channel, inner_channels, kernel_size=kernel_size, padding=padding, groups=math.gcd(in_channel,inner_channels))
+        self.point_wise = nn.Conv1d(inner_channels, out_channel, kernel_size=1,groups=1)
 
     def forward(self, x):
         x = self.deep_wise(x)
@@ -98,9 +88,9 @@ class ET_Encoder_Block(nn.Module):
         if ffd == None:
             self.feed_forward = nn.Sequential(
             Rearrange("... n d -> ... d n"),
-                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0,groups=d_model),
+                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0,groups=1),
                 nn.ReLU(),
-                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0,groups=d_model),
+                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0,groups=1),
             Rearrange("... d n -> ... n d")
             )
         else:
@@ -108,14 +98,14 @@ class ET_Encoder_Block(nn.Module):
         self.pkm = pkm
         self.glu = GLU(d_model,1)
         self.left_net = nn.Sequential(
-            nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,padding=0,groups=d_model),
+            nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,padding=0,groups=1),
             nn.ReLU(),
-            nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,padding=0,groups=d_model//2),
+            nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,padding=0,groups=1),
         )
         self.right_net = nn.Sequential(
-            nn.Conv1d(in_channels=d_model,out_channels=d_model//2,kernel_size=3,padding=1,groups=d_model//2),
+            nn.Conv1d(in_channels=d_model,out_channels=d_model//2,kernel_size=3,padding=1,groups=1),
             nn.ReLU(),
-            nn.Conv1d(in_channels=d_model//2,out_channels=d_model,kernel_size=1,padding=0,groups=d_model//2),
+            nn.Conv1d(in_channels=d_model//2,out_channels=d_model,kernel_size=1,padding=0,groups=1),
         )
 
         self.mid_layer_norm=ScaleNorm(d_model)
@@ -170,9 +160,9 @@ class ET_Decoder_Block(nn.Module):
         if ffd == None:
             self.feed_forward = nn.Sequential(
                 Rearrange("... n d -> ... d n"),
-                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0,groups=d_model),
+                nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0,groups=1),
                 nn.SiLU(),
-                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0,groups=d_model),
+                nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0,groups=1),
                 Rearrange("... d n -> ... n d")
             )
         else:

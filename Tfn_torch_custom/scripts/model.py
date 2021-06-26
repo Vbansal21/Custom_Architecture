@@ -176,7 +176,7 @@ class ET_ffd(Module):
     def __init__(self,dim,activation="silu",layers=1,kernal_size=7,mult=4,fn=None,sequential=False):
         super(ET_ffd,self).__init__()
         self.l_1 = nn.Sequential(
-            nn.Conv1d(dim,dim*mult,kernal_size,1,padding=kernal_size//2,groups=dim),
+            nn.Conv1d(dim,dim*mult,kernal_size,1,padding=kernal_size//2,groups=1),
             _get_activation_fn(activation),
         )
         self.l_2 = GEGLU(dim*mult,dim,layers)
@@ -745,8 +745,8 @@ class TransformerModel(Module):
         attn_len = ((self.seq_scale_down // 2)*2 + 1)*3
 
         self.scale_down_conv = nn.Sequential(
-            nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=ninp),
-            nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=ninp),
+            nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=1),
+            nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=1),
             nn.Conv1d(ninp,ninp,3,padding=1),
         )
 
@@ -766,8 +766,8 @@ class TransformerModel(Module):
 
         self.scale_up_conv = nn.Sequential(
             nn.Conv1d(ninp,ninp,3,padding=1),
-            nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=ninp),
-            nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=ninp),
+            nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=1),
+            nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=1),
         )
 
         self.scale_up_fno = FNO1d(modes,

@@ -257,7 +257,7 @@ class AxiallyFold(nn.Module):
         super().__init__()
         self.fn = fn
         self.every = every
-        self.conv = nn.Conv1d(dim, dim, kernel_size = every, groups = dim) if every > 1 else None
+        self.conv = nn.Conv1d(dim, dim, kernel_size = every, groups = 1) if every > 1 else None
 
     def forward(self, x):
         every = self.every

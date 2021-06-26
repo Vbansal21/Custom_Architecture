@@ -131,11 +131,11 @@ eval_batch_size: int = batch_size
 mini_batch_size: int = 1
 
 ntokens: int = tokenizer.vocab_size # None
-emsize: int = 512
+emsize: int = 256
 nhid: int = emsize * 4
-nlayers: int = 1
-deberta_layers: int = 2
-repeated_deberta_layers: int = 0
+nlayers: int = 2
+deberta_layers: int = 4
+repeated_deberta_layers: int = 1
 full_block_repeat: bool = False
 nhead: int = 16
 dropout = (math.pi/10)
@@ -588,8 +588,8 @@ wandb.init(project=project_name,config={
     "prev_state_self_num":prev_state_self_num,
     "mlp_layers":mlp_layers,
 },
-resume="bc1akjb3",
-force=True,
+resume=False,#"bc1akjb3",
+force=False,
 save_code=True
 )
 
