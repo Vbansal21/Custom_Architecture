@@ -539,8 +539,12 @@ log_interval = feature_redraw_interval
 epochs = 1
 
 import matplotlib.pyplot as plt
+plt.ion()
 plt.plot([lambda_lr(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
-plt.show()
+#plt.show(block=False)
+plt.draw()
+plt.pause(30.0)
+plt.close()
 del(plt)
 
 train_eval_event = [date_time]
@@ -838,6 +842,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 print("")
             except:
                 inp = 1
+            if inp != 0 and inp != 1:
+                inp=1
             if inp:
                 save_model()
             raise KeyboardInterrupt
