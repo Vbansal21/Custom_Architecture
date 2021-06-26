@@ -727,7 +727,8 @@ def evaluate(eval_model, data_source, print_val_loss=False):
         print('-' * 110)
     return val_loss, val_acc
 
-def save_model():
+def save_model(batch):
+    global step
     model.eval()
     best_model.eval()
 
@@ -845,7 +846,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             if inp != 0 and inp != 1:
                 inp=1
             if inp:
-                save_model()
+                save_model(min(0,batch-1))
             raise KeyboardInterrupt
         except Exception as e:
             print("error in training step\v",e)
@@ -872,7 +873,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
 
         if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
             inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
-            save_model()
+            save_model(batch)
             intermediate_save_time = time.time()
             model.train()
 
@@ -971,8 +972,7 @@ while True:
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         best_model = model
-        batch = 0
-        save_model()
+        save_model(0)
 model = best_model
 
 test_loss,test_acc = evaluate(best_model, processed_test_data)
