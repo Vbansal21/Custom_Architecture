@@ -49,7 +49,7 @@ def list_of_all_files(path:str="./") -> str:
             files += list_of_all_files(i)
     return files
 
-def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".code-workspace",".pdb",".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".vscode",".git",".code-workspace",".pdb",".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
     for i in files_not_to_be_included:
         if ((i in file_name_with_path) and (not "tokenizer" in file_name_with_path)):
             return ""
