@@ -1142,6 +1142,7 @@ class Attention(nn.Module):
                                 name='prev_state',
                                 tensor=torch.zeros((self.heads, num_prev_state, dim_head))
                                 )
+            self.p_s_conv = nn.Conv2d(self.heads*2, self.heads, (2, 1), padding = (0, 0), groups = 1, bias = True)
             self.hop_attn = hop_attn
             self.mem_lin_k = nn.Linear(dim_head,dim_head)
             self.mem_lin_v = nn.Linear(dim_head,dim_head)
@@ -1265,6 +1266,10 @@ class Attention(nn.Module):
 
             out_k = self.out_k(out)
             out_v = self.out_v(out)
+            tmp = out[:,:,-prev_state.size(-2):]
+            tmp = F.pad(tmp,(0,0,0,max(0,prev_state.size(-2)-tmp.size(-2))),value=0)
+            prev_state = torch.cat((prev_state,tmp),dim=1)
+            prev_state = ckpt(self.p_s_conv,prev_state)
             prev_state = ckpt(self.prev_state_attn,prev_state,out_k,out_v) if not self.vanilla_attn else ckpt(vanilla_attention,prev_state,out_k,out_v)
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape((h,-1,d//h))
 

@@ -2,6 +2,8 @@ torch
 numpy 
 torchtext 
 pytorch-nlp 
+zstandard
+jsonlines
 einops 
 local_attention 
 mogrifier 

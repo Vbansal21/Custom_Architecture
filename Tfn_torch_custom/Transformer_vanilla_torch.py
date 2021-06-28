@@ -23,7 +23,7 @@ torch.autograd.set_detect_anomaly(True)
 autocast = torch.cuda.amp.autocast
 
 
-file = "all_files_n_texts"
+file = "wikitextv2"
 files = []
 string_of_files = ""
 
@@ -37,6 +37,34 @@ try:
 except:
     retrieve_tokenizer = True
 
+import jsonlines,zstandard
+
+def handle_jsonl(jsonl_reader, get_meta, autojoin_paragraphs, para_joiner, key='text'):
+    for ob in jsonl_reader:
+        # naive jsonl where each object is just the string itself, with no meta. For legacy compatibility.
+        if isinstance(ob, str):
+            assert not get_meta
+            yield ob
+            continue
+        text = ob[key]
+        if autojoin_paragraphs and isinstance(text, list):
+            text = para_joiner.join(text)
+        if get_meta:
+            yield text, (ob['meta'] if 'meta' in ob else {})
+        else:
+            yield text
+
+def read_jsonl(file, get_meta=False, autojoin_paragraphs=True, para_joiner='\n\n', key='text'):
+    try:
+        with open(file, 'rb') as fh:
+            cctx = zstandard.ZstdDecompressor()
+            reader = io.BufferedReader(cctx.stream_reader(fh))
+            rdr = jsonlines.Reader(reader)
+            yield from handle_jsonl(rdr, get_meta, autojoin_paragraphs, para_joiner, key)
+    except:
+        return None
+
+
 def list_of_all_files(path:str="./") -> str:
     try:
         super_dirs = os.listdir(path)
@@ -49,17 +77,18 @@ def list_of_all_files(path:str="./") -> str:
             files += list_of_all_files(i)
     return files
 
-def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".vscode",".git",".code-workspace",".pdb",".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx"]) -> str:
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".vscode/",".git/",".code-workspace",".pdb",".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx",".history/","wandb/"]) -> str:
     for i in files_not_to_be_included:
         if ((i in file_name_with_path) and (not "tokenizer" in file_name_with_path)):
             return ""
+
     try:
         file_text = "".join([i for i in textract.process(file_name_with_path, encoding="utf-8").decode()])
         print("textract",file_name_with_path)
     except:
         try:
-            f = "".join([i for i in io.open(file_name_with_path, encoding="utf8")])
             print("python native file opener",file_name_with_path)
+            f = "".join([i for i in io.open(file_name_with_path, encoding="utf8")])
             file_text = str(f)
         except:
             return ""
@@ -74,10 +103,14 @@ def initialize_tokenizer(target_vacab = 2**15):
     path = "../"
     files += list_of_all_files(path)
     for i in files:
-        string_of_files += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
-    sample += " ".join([i for i in string_of_files]) + string_of_files
+        if "jsonl.zst" not in i:
+            string_of_files += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
+        else:
+            string_of_files += "".join(["".join(list(set([k for k in "[sos]"+j+"[eos]"]))) for j in read_jsonl(i)])
+    set_of_chars = "".join(list(set([i for i in string_of_files])))
+    sample += " ".join([i for i in set_of_chars]) + set_of_chars
     sample = "".join(list(set([i for i in sample])))
-    print("parsed all files")
+    print("parsed all chars")
     tokenizer = SubwordEncoder(sample,target_vocab_size=target_vacab,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]',"[Instruct Mode]"
     ],
@@ -118,14 +151,6 @@ else:
     tokenizer, vocab_size = initialize_tokenizer(inp)
 vocab = tokenizer.vocab
 
-def batchify(data, bsz,dim=0):
-    if data.size(0) == 2 and len(data.size())==3:
-        data = data[0]
-    nbatch = data.size(dim) // bsz
-    data = data.narrow(dim, 0, nbatch * bsz)
-    data = data.reshape(bsz, -1).contiguous()
-    return data
-
 batch_size: int = 1
 eval_batch_size: int = batch_size
 mini_batch_size: int = 1
@@ -163,9 +188,31 @@ use_deepspeed: bool = False
 
 use_sgd: bool = True
 
+def batchify(data, bsz,dim=0):
+    if data.size(0) == 2 and len(data.size())==3:
+        data = data[0]
+    nbatch = data.size(dim) // bsz
+    data = data.narrow(dim, 0, nbatch * bsz)
+    data = data.reshape(bsz, -1).contiguous()
+    return data
+
 def data_process(raw_text_iter):
   data = tokenizer.encode(raw_text_iter)
   return data.contiguous()
+
+def data_retrieve(data=None,path=None):
+    if data != None:
+        assert type(data) == str
+        for i in data:
+            yield i
+    elif path != None:
+        if "jsonl.zst" in path:
+            zst_gen = read_jsonl(path)
+            for i in zst_gen:
+                yield "[sos]"
+                for j in i:
+                    yield j
+                yield "[eos]"
 
 def random_mask_shuffle_encoder(
                             inp: Tensor,
@@ -245,12 +292,74 @@ def random_mask_shuffle_encoder(
     torch.cuda.empty_cache()
     return out,index_to_be_trained_on
 
-def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
+def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch_size,generator=None,prefer_source_over_generator=True,j_0 = -1):
+    """
+    if not prefer_string_over_path:
+        data = None
+        if "jsonl.zst" in path:
+            tmp = ""
+            for i in data_retrieve(path=path):
+                tmp += i
+                if len(tmp) >= bptt*batch_size_:
+                    data = data_process(tmp)
+                    if data.size(0) >= bptt*batch_size_:
+                        break
+            source = data
+    else:
+        #"[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
+        tmp = "[sos]"+"path:"+i+"|data:"
+        for i in data_retrieve(data=file_to_str(path)):
+            tmp += i
+            if len(tmp) >= bptt*batch_size_:
+                data = data_process(tmp)
+                if data.size(0) >= bptt*batch_size_:
+                    break
+        source = data
+    """
+    data_stream_ended = False
+    if not prefer_source_over_generator and generator != None:
+        data = None
+        tmp = ""
+        for i in generator:
+            tmp += i
+            if len(tmp) >= bptt*batch_size_:
+                data = data_process(tmp)
+                if data.size(0) >= bptt*batch_size_:
+                    data = batchify(data,batch_size_,-1)
+                    break
+        if data.size(-1) > 0:
+            source = data.contiguous()
+            j=0
+        else:
+            if j_0 == -1:
+                j_0 = j
+            j = j - j_0
+    elif generator != None:
+        if j+bptt >= (source.size(1) - 1):
+            data = None
+            tmp = ""
+            for i in generator:
+                tmp += i
+                if len(tmp) >= bptt*batch_size_:
+                    data = data_process(tmp)
+                    if data.size(0) >= bptt*batch_size_:
+                        data = batchify(data,batch_size_,-1)
+                        break
+            if data.size(-1) > 0:
+                source = data.contiguous()
+                j=0
+
+    if type(source) == str:
+        source = data_process(source)
+
     seq_len = min(bptt, source.size(1) - j -1)
     rnd_shuffle = 0 if not shuffle else random.randint(0,15000000)/1000000
     rnd_mask = random.randint(0,1500000000)/100000000
     rnd_mask_together = random.randint(0,min(min(8,seq_scale_down)**2 // 2,rnd_mask))
     rnd = random.randint(0,min((seq_len-1),(bptt//8),(min(8,seq_scale_down)*2)**2))
+
+    if ((j_0 != -1) and (j+bptt) > (source.size(1) - 1)):
+        data_stream_ended = True
 
     """
     start_text = ["Generate text","learn to generate text","learn to predict","masked language modeling","mlm","continue text","continue input","decorrupt and predict according to input"]
@@ -274,7 +383,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True):
         targets = source[:,j:j+seq_len].to(device)
         targets = targets.contiguous()
     torch.cuda.empty_cache()
-    return data,targets,index_to_be_trained_on
+    return data,targets,index_to_be_trained_on,data_stream_ended
 
 try:
     processed_train_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_train.tar",map_location=torch.device('cpu'))
@@ -289,26 +398,35 @@ except Exception as e:
     if len(string_of_files) < 1:
         path = "../"
         files += list_of_all_files(path)
+        string_of_files = {"train":string_of_files,"test":"","val":""}
         for i in files:
-            string_of_files += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
+            txt_type = "train"
+            if "test" in i:
+                txt_type = "test"
+            elif "val" in i or "valid" in i:
+                txt_type = "val"
+            if "jsonl.zst" not in i:
+                string_of_files[txt_type] += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
+            else:
+                continue
+                #string_of_files["zst"] = {txt_type:i} #"".join(["[sos]"+i+"[eos]" for i in read_jsonl(i)])
 
-    train_portion = int(len(string_of_files) * 0.55)
-    test_portion = int(len(string_of_files) * 0.3)
+    train_portion = int(len(string_of_files["train"]) * 0.8)
+    test_portion = int(len(string_of_files["train"]) * 0.0625)
 
-    train_sample = string_of_files[:train_portion]
-
-    if "[eos]" not in train_sample[-5:]:
-        new_portion = string_of_files[train_portion:]
-        train_portion += new_portion.find("[eos]")+5
-    train_sample = string_of_files[:train_portion]
-
-    test_sample = string_of_files[train_portion:train_portion+test_portion]
+    test_sample = string_of_files["train"][:test_portion]
     if "[eos]" not in test_sample[-5:]:
-        new_portion = string_of_files[train_portion+test_portion:]
+        new_portion = string_of_files["train"][test_portion:]
         test_portion += new_portion.find("[eos]")+5
-    test_sample = string_of_files[train_portion:train_portion+test_portion]
+    test_sample = string_of_files["train"][:test_portion] + string_of_files["test"]
 
-    val_sample = string_of_files[train_portion+test_portion:]
+    train_sample = string_of_files["train"][test_portion:train_portion+test_portion]
+    if "[eos]" not in train_sample[-5:]:
+        new_portion = string_of_files["train"][train_portion:]
+        train_portion += new_portion.find("[eos]")+5
+    train_sample = string_of_files["train"][:train_portion+test_portion]
+
+    val_sample = string_of_files["train"][train_portion+test_portion:] + string_of_files["val"]
 
     train_data = data_process(train_sample)
     val_data = data_process(val_sample)
@@ -529,7 +647,7 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-log_interval = 50
+log_interval = 2
 epochs = 1
 
 import matplotlib.pyplot as plt
@@ -696,17 +814,22 @@ def inference(text,size=128,eval_model = best_model,reccurent_mem=None,reccurent
 
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 
-def evaluate(eval_model, data_source, print_val_loss=False):
+def evaluate(eval_model, data_source, print_val_loss=False,generator=None):
     eval_model.eval()
     total_loss = 0.
     total_acc = 0.
     single_pass_mem = None
     single_pass_mem_ctxt = None
     stride_size = bptt#-3 if progressive_generation else bptt -3
+    data_stream_ended = False
+    continue_training = True
+    j_0 = -1
     with torch.no_grad():
-        for i in range(0, data_source.size(1), stride_size):
+        while continue_training:
+            if data_stream_ended:
+                break
             torch.cuda.empty_cache()
-            data, targets, trainable_index = get_batch(data_source, i)
+            data, targets, trainable_index,data_stream_ended = get_batch(data_source, i,generator=generator,prefer_source_over_generator=False,j_0 = j_0)
             if use_deepspeed:
                 with autocast():
                     output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
@@ -716,8 +839,9 @@ def evaluate(eval_model, data_source, print_val_loss=False):
                 output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
                 total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
                 total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
-    val_loss = total_loss / (data_source.size(1))
-    val_acc = total_acc/data_source.size(1)
+            i+=stride_size
+    val_loss = total_loss / i
+    val_acc = total_acc/i
     if print_val_loss:
         print('-' * 110)
         print('valid acc {:3.2f}% | valid loss {:5.3f} | valid ppl {:10.3f}'.format(val_acc*100,val_loss, math.exp(val_loss)))
@@ -815,7 +939,18 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     total_acc = 0
     total_acc_d = 0
     stride_size = bptt#-3 if progressive_generation else bptt -3
-    for batch, i in enumerate(range(0, processed_train_data.size(1), stride_size)):
+    i = 0
+    batch = 0
+    j_0 = -1
+    continue_training = True
+    zst_gen = read_jsonl("./.data/the_pile/00.jsonl.zst")
+    data_stream_ended = False
+    while continue_training:
+        if data_stream_ended:
+            print("\nTraining epoch finished.\n")
+            j_0 = -1
+            break
+        batch +=1
         model.train()
         step_time = time.time()
         if resume_batch != None:
@@ -824,7 +959,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         if ((batch + epoch)%2==1):
             single_pass_mem = None
             single_pass_mem_ctxt = None
-        data, targets, trainable_index = get_batch(processed_train_data, i,progressive=progressive_generation) #Indexed Selective training broken
+        data, targets, trainable_index, data_stream_ended = get_batch(processed_train_data, i,progressive=progressive_generation,batch_size_=batch_size,generator=zst_gen,prefer_source_over_generator=False,j_0=j_0) #Indexed Selective training broken
         trainable_index = None
         torch.cuda.empty_cache()
 
@@ -862,9 +997,9 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
 
         log_interval = log_interval
         total_ppl += ppl
-        inputs = str("\n".join([tokenizer.decode(i.to(torch.device('cpu'))) for i in data]))
-        output = str("\n".join([tokenizer.decode(torch.argmax(i,dim=-1).to(torch.device('cpu'))) for i in outputs['output']]))
-        req_targets = str("\n".join([tokenizer.decode(i.to(torch.device('cpu'))) for i in targets]))
+        inputs = str("\n".join([tokenizer.decode(k.to(torch.device('cpu'))) for k in data]))
+        output = str("\n".join([tokenizer.decode(torch.argmax(k,dim=-1).to(torch.device('cpu'))) for k in outputs['output']]))
+        req_targets = str("\n".join([tokenizer.decode(k.to(torch.device('cpu'))) for k in targets]))
         del(data,targets,outputs,losses)
         torch.cuda.empty_cache()
 
@@ -884,6 +1019,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
             total_ppl /= log_interval
+            _,__ = evaluate(model,processed_val_data,True,read_jsonl("./.data/the_pile/val.jsonl.zst"))
             elapsed = time.time() - start_time
             if discriminator:
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '
@@ -948,6 +1084,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     
                 )
             total_time_per_step = 0
+        i+=stride_size
 
 while True:
     if epoch >= epochs:
@@ -971,7 +1108,7 @@ while True:
         save_model(0)
 model = best_model
 
-test_loss,test_acc = evaluate(best_model, processed_test_data)
+test_loss,test_acc = evaluate(best_model,processed_test_data,True,read_jsonl("./.data/the_pile/test.jsonl.zst"))
 print('=' * 110)
 print('| End of training | test acc {:3.2f}% | test loss {:5.3f} | test ppl {:10.3f}'.format(test_acc*100,
     test_loss, math.exp(test_loss)))
