@@ -79,7 +79,7 @@ def list_of_all_files(path:str="./") -> str:
 
 def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".vscode/",".git/",".code-workspace",".pdb",".pyc",".gz",".npy",".wav","2003/",".tar",".zip",".pt",".pth",".onnx",".history/","wandb/"]) -> str:
     for i in files_not_to_be_included:
-        if ((i in file_name_with_path) and (not "tokenizer" in file_name_with_path)):
+        if (i in file_name_with_path):
             return ""
 
     try:
@@ -352,7 +352,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
     if type(source) == str:
         source = data_process(source)
 
-    seq_len = min(bptt, source.size(1) - j -1)
+    seq_len = min(bptt, source.size(1) - j)
     rnd_shuffle = 0 if not shuffle else random.randint(0,15000000)/1000000
     rnd_mask = random.randint(0,1500000000)/100000000
     rnd_mask_together = random.randint(0,min(min(8,seq_scale_down)**2 // 2,rnd_mask))
