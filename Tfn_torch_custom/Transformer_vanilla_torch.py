@@ -646,12 +646,12 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-log_interval = 25
+log_interval = 1024
 epochs = 1
 
 import matplotlib.pyplot as plt
 plt.ion()
-plt.plot([lambda_lr(i) for i in range(int((processed_train_data.size(1)*epochs) / (bptt*batch_size)))])
+plt.plot([lambda_lr(i)*lr for i in range(int((processed_train_data.size(1)*epochs) / (bptt*batch_size)))])
 #plt.show(block=False)
 plt.draw()
 plt.pause(15.0)
@@ -699,7 +699,7 @@ wandb.init(project=project_name,config={
     "prev_state_self_num":prev_state_self_num,
     "mlp_layers":mlp_layers,
 },
-resume=False,#"bc1akjb3",
+resume=False,
 force=True,
 save_code=True
 )
@@ -1009,12 +1009,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             intermediate_save_time = time.time()
             model.train()
 
-        if step_scheduler != None and batch%mini_batch_size == 0:
-            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
-                scheduler.step(step)
-                if discriminator:
-                    scheduler_disc.step(step)
-                step += 1
         if (batch % log_interval == 0 and batch != resume_batch):
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
@@ -1102,6 +1096,12 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     
                 )
             total_time_per_step = 0
+        if step_scheduler != None and batch%mini_batch_size == 0:
+            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
+                scheduler.step(step)
+                if discriminator:
+                    scheduler_disc.step(step)
+                step += 1
         i+=stride_size
 
 while True:
