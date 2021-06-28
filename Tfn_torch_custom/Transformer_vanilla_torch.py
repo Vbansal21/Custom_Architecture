@@ -160,11 +160,11 @@ emsize: int = 256
 nhid: int = emsize * 4
 nlayers: int = 1
 deberta_layers: int = 4
-repeated_deberta_layers: int = 1
-full_block_repeat: bool = False
+repeated_deberta_layers: int = 2
+full_block_repeat: bool = True
 nhead: int = 16
 dropout = (math.pi/10)
-mem_tokens: int = emsize*2
+mem_tokens: int = emsize*4
 bptt: int = (1024*1) #- mem_tokens
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
@@ -178,7 +178,7 @@ attend_to_self: bool = True
 attend_to_inp: bool = True
 feature_redraw_interval: int = 1024
 prev_state_len: int = emsize*4
-prev_state_self_num: int = 1
+prev_state_self_num: int = 4
 local_heads: int = 2
 local_heads: int = min(local_heads,nhead)
 
@@ -586,7 +586,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.1
+lr = 1
 
 if not use_deepspeed:
     if use_sgd:
@@ -1055,47 +1055,90 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             total_ppl = 0.
             start_time = time.time()
         total_time_per_step += (time.time() - step_time)
-        if batch%mini_batch_size == 0:
-            if discriminator:
-                wandb.log(
-                    {
-                        "Loss Generator":loss_g,
-                        "Total Loss Generator":tmp_loss,
-                        "Loss Discriminator":loss_d,
-                        "step":step,
-                        "Accuracy Generator(%)":acc*100/2,
-                        "Total Accuracy Generator(%)":tmp_acc*100/2,
-                        "Accuracy Discriminator(%)":acc_d*100/2,
-                        "epoch":epoch,
-                        "batch":batch,
-                        "Perplexity of Generator":ppl,
-                        'Learning_Rate':scheduler.get_last_lr()[0],
-                        'Time per Step':total_time_per_step/mini_batch_size,
-                        "input":wandb.Html(inputs),
-                        "output":wandb.Html(output),
-                        "target":wandb.Html(req_targets),
-                        "avg_inference_time":model.get_avg_inference_time(),
-                    }
-                )
-            else:
-                wandb.log(
-                    {
-                        "Loss Generator":loss,
-                        "step":step,
-                        "Accuracy Generator(%)":acc*100/2,
-                        "epoch":epoch,
-                        "batch":batch,
-                        "Perplexity of Generator":ppl,
-                        'Learning_Rate':scheduler.get_last_lr()[0],
-                        'Time per Step':total_time_per_step/mini_batch_size,
-                        "input":wandb.Html(inputs),
-                        "output":wandb.Html(output),
-                        "target":wandb.Html(req_targets),
-                        "avg_inference_time":model.get_avg_inference_time()
-                    },
-                    
-                )
-            total_time_per_step = 0
+        try:
+            if batch%mini_batch_size == 0:
+                if discriminator:
+                    wandb.log(
+                        {
+                            "Loss Generator":loss_g,
+                            "Total Loss Generator":tmp_loss,
+                            "Loss Discriminator":loss_d,
+                            "step":step,
+                            "Accuracy Generator(%)":acc*100/2,
+                            "Total Accuracy Generator(%)":tmp_acc*100/2,
+                            "Accuracy Discriminator(%)":acc_d*100/2,
+                            "epoch":epoch,
+                            "batch":batch,
+                            "Perplexity of Generator":ppl,
+                            'Learning_Rate':scheduler.get_last_lr()[0],
+                            'Time per Step':total_time_per_step/mini_batch_size,
+                            "input":wandb.Html(inputs),
+                            "output":wandb.Html(output),
+                            "target":wandb.Html(req_targets),
+                            "avg_inference_time":model.get_avg_inference_time(),
+                        }
+                    )
+                else:
+                    wandb.log(
+                        {
+                            "Loss Generator":loss,
+                            "step":step,
+                            "Accuracy Generator(%)":acc*100/2,
+                            "epoch":epoch,
+                            "batch":batch,
+                            "Perplexity of Generator":ppl,
+                            'Learning_Rate':scheduler.get_last_lr()[0],
+                            'Time per Step':total_time_per_step/mini_batch_size,
+                            "input":wandb.Html(inputs),
+                            "output":wandb.Html(output),
+                            "target":wandb.Html(req_targets),
+                            "avg_inference_time":model.get_avg_inference_time()
+                        },
+                        
+                    )
+                total_time_per_step = 0
+        except:
+            if batch%mini_batch_size == 0:
+                if discriminator:
+                    wandb.log(
+                        {
+                            "Loss Generator":loss_g,
+                            "Total Loss Generator":tmp_loss,
+                            "Loss Discriminator":loss_d,
+                            "step":step,
+                            "Accuracy Generator(%)":acc*100/2,
+                            "Total Accuracy Generator(%)":tmp_acc*100/2,
+                            "Accuracy Discriminator(%)":acc_d*100/2,
+                            "epoch":epoch,
+                            "batch":batch,
+                            "Perplexity of Generator":ppl,
+                            'Learning_Rate':scheduler.get_last_lr()[0],
+                            'Time per Step':total_time_per_step/mini_batch_size,
+                            "input":wandb.Html("<error>"),
+                            "output":wandb.Html("<error>"),
+                            "target":wandb.Html("<error>"),
+                            "avg_inference_time":model.get_avg_inference_time(),
+                        }
+                    )
+                else:
+                    wandb.log(
+                        {
+                            "Loss Generator":loss,
+                            "step":step,
+                            "Accuracy Generator(%)":acc*100/2,
+                            "epoch":epoch,
+                            "batch":batch,
+                            "Perplexity of Generator":ppl,
+                            'Learning_Rate':scheduler.get_last_lr()[0],
+                            'Time per Step':total_time_per_step/mini_batch_size,
+                            "input":wandb.Html("<error>"),
+                            "output":wandb.Html("<error>"),
+                            "target":wandb.Html("<error>"),
+                            "avg_inference_time":model.get_avg_inference_time()
+                        },
+                        
+                    )
+                total_time_per_step = 0
         if step_scheduler != None and batch%mini_batch_size == 0:
             if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
                 scheduler.step(step)
