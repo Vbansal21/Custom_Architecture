@@ -23,14 +23,14 @@ torch.autograd.set_detect_anomaly(True)
 autocast = torch.cuda.amp.autocast
 
 
-file = "wikitextv2"
+file = "all_files"
 files = []
 string_of_files = ""
 
 try:
     retrieve_tokenizer = inpt(prompt="retrieve tokenizer?(default: True):",timeout=15)
     print("")
-    if retrieve_tokenizer in ['0','false','False','null','None']:
+    if retrieve_tokenizer.lower() in ['0','false','null','none',"no","not"]:
         retrieve_tokenizer = False
     else:
         retrieve_tokenizer = True
@@ -77,7 +77,7 @@ def list_of_all_files(path:str="./") -> str:
             files += list_of_all_files(i)
     return files
 
-def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".vscode/",".git/",".code-workspace",".pdb",".pyc",".gz",".npy",".wav",".pdf",".tar",".zip",".pt",".pth",".onnx",".history/","wandb/"]) -> str:
+def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = [".vscode/",".git/",".code-workspace",".pdb",".pyc",".gz",".npy",".wav","2003/",".tar",".zip",".pt",".pth",".onnx",".history/","wandb/"]) -> str:
     for i in files_not_to_be_included:
         if ((i in file_name_with_path) and (not "tokenizer" in file_name_with_path)):
             return ""
@@ -607,12 +607,11 @@ if not use_deepspeed:
 else:
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
 
-step = 1
+step = 0
 def lambda_lr(step_):
     a = 5000000
     b = 1000
     c = 0.0
-    step = 1
     multiplier = (bptt/512)*batch_size
 
     def sub_func(step):
@@ -647,12 +646,12 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-log_interval = 2
+log_interval = 25
 epochs = 1
 
 import matplotlib.pyplot as plt
 plt.ion()
-plt.plot([lambda_lr(i) for i in range( int((processed_train_data.size(1)*epochs) / (bptt*batch_size)) + 1)])
+plt.plot([lambda_lr(i) for i in range(int((processed_train_data.size(1)*epochs) / (bptt*batch_size)))])
 #plt.show(block=False)
 plt.draw()
 plt.pause(15.0)
@@ -824,6 +823,7 @@ def evaluate(eval_model, data_source, print_val_loss=False,generator=None):
     data_stream_ended = False
     continue_training = True
     j_0 = -1
+    i = 0
     with torch.no_grad():
         while continue_training:
             if data_stream_ended:
@@ -1019,7 +1019,25 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             cur_loss = total_loss / log_interval
             cur_loss_d = total_loss_d / log_interval
             total_ppl /= log_interval
-            _,__ = evaluate(model,processed_val_data,True,read_jsonl("./.data/the_pile/val.jsonl.zst"))
+
+            try:
+                _,__ = evaluate(model,processed_val_data,True,read_jsonl("./.data/the_pile/val.jsonl.zst"))
+            except KeyboardInterrupt as e:
+                print("KeyboardInterrupt\v",e)
+                try:
+                    inp = int(inpt(prompt="Save the model(0/1)?:\v",timeout=15))
+                    print("")
+                except:
+                    inp = 1
+                if inp != 0 and inp != 1:
+                    inp=1
+                if inp:
+                    save_model(min(0,batch-1))
+                raise KeyboardInterrupt
+            except Exception as e:
+                print("error in training step\v",e)
+                continue
+
             elapsed = time.time() - start_time
             if discriminator:
                 print('| epoch {:3d} | {:5d}/{:5d} batches | '
