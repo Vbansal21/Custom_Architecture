@@ -943,7 +943,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     batch = 0
     j_0 = -1
     continue_training = True
-    zst_gen = read_jsonl("./.data/the_pile/00.jsonl.zst")
+    zst_gen = data_retrieve(path="./.data/the_pile/00.jsonl.zst")
     data_stream_ended = False
     while continue_training:
         if data_stream_ended:
@@ -1015,7 +1015,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             total_ppl /= log_interval
 
             try:
-                _,__ = evaluate(model,processed_val_data,True,read_jsonl("./.data/the_pile/val.jsonl.zst"))
+                _,__ = evaluate(model,processed_val_data,True,data_retrieve(path="./.data/the_pile/val.jsonl.zst"))
             except KeyboardInterrupt as e:
                 print("KeyboardInterrupt\v",e)
                 try:
@@ -1169,7 +1169,7 @@ while True:
         save_model(0)
 model = best_model
 
-test_loss,test_acc = evaluate(best_model,processed_test_data,True,read_jsonl("./.data/the_pile/test.jsonl.zst"))
+test_loss,test_acc = evaluate(best_model,processed_test_data,True,data_retrieve(path="./.data/the_pile/test.jsonl.zst"))
 print('=' * 110)
 print('| End of training | test acc {:3.2f}% | test loss {:5.3f} | test ppl {:10.3f}'.format(test_acc*100,
     test_loss, math.exp(test_loss)))
