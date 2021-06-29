@@ -971,15 +971,29 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         except KeyboardInterrupt as e:
             print("KeyboardInterrupt\v",e)
             try:
-                inp = int(inpt(prompt="Save the model(0/1)?:\v",timeout=15))
+                inp = int(inpt(prompt="Save the model(0/1/2 (for pausing training)/3 (pause + save))?:\v",timeout=15))
                 print("")
             except:
                 inp = 1
             if inp != 0 and inp != 1:
                 inp=1
-            if inp:
+            if inp==1:
                 save_model(min(0,batch-1))
-            raise KeyboardInterrupt
+                raise KeyboardInterrupt
+            elif inp >= 2:
+                if inp == 3:
+                    save_model(min(0,batch-1))
+                pause_time = time.time()
+                try:
+                    while True:
+                        text = "Training Paused since:"+str(time.time() - pause_time)
+                        print(text,end="")
+                        print("\b"*len(text),end='')
+                except KeyboardInterrupt:
+                    print("Resuming Training after:",str(time.time() - pause_time))
+                except Exception as e:
+                    print("Some Other Exception:\v",str(e))
+
         except Exception as e:
             print("error in training step\v",e)
             continue
