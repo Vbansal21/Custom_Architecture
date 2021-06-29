@@ -383,7 +383,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
         targets = source[:,j:j+seq_len].to(device)
         targets = targets.contiguous()
     torch.cuda.empty_cache()
-    return data,targets,index_to_be_trained_on,data_stream_ended
+    return data.to(device),targets.to(device),index_to_be_trained_on,data_stream_ended
 
 try:
     processed_train_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_train.tar",map_location=torch.device('cpu'))
@@ -647,7 +647,7 @@ best_val_loss = float("inf")
 
 resume_batch = 0
 log_interval = 1024
-epochs = 1
+epochs = 2
 
 import matplotlib.pyplot as plt
 plt.ion()
@@ -699,7 +699,7 @@ wandb.init(project=project_name,config={
     "prev_state_self_num":prev_state_self_num,
     "mlp_layers":mlp_layers,
 },
-resume=False,
+resume="3r8gfxsz",
 force=True,
 save_code=True
 )
@@ -793,10 +793,11 @@ model.to(device)
 
 # TODO: Setup 'curses' module to print colored text for inference output
 #import curses
-def inference(text,size=128,eval_model = best_model,reccurent_mem=None,reccurent_mem_ctxt=None,return_mem=True):
-    model.eval()
+def inference(text,size=128,eval_model = model,reccurent_mem=None,reccurent_mem_ctxt=None,return_mem=True):
+    eval_model.eval()
+    eval_model = eval_model.to(device)
     torch.cuda.empty_cache()
-    text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device )
+    text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device)
     if use_deepspeed:
         with autocast():
             out,mem,mem_ctxt = eval_model(text_input,mem=reccurent_mem,context_mem=reccurent_mem_ctxt)
@@ -825,6 +826,7 @@ def evaluate(eval_model, data_source, print_val_loss=False,generator=None):
     continue_training = True
     j_0 = -1
     i = 0
+    eval_model = eval_model.to(device)
     with torch.no_grad():
         while continue_training:
             if data_stream_ended:
@@ -954,9 +956,11 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         batch +=1
         model.train()
         step_time = time.time()
+        """
         if resume_batch != None:
             if batch < resume_batch:
                 continue
+        """
         if ((batch + epoch)%2==1):
             single_pass_mem = None
             single_pass_mem_ctxt = None
@@ -1031,7 +1035,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         except:
             ppl = -1.0
 
-        log_interval = log_interval
         total_ppl += ppl
         inputs = str("\n".join([tokenizer.decode(k.to(torch.device('cpu'))) for k in data]))
         output = str("\n".join([tokenizer.decode(torch.argmax(k,dim=-1).to(torch.device('cpu'))) for k in outputs['output']]))
@@ -1039,7 +1042,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         del(data,targets,outputs,losses)
         torch.cuda.empty_cache()
 
-        if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
+        if ((batch % save_intermediate_intervel == 0 and batch > 0) or ((time.time()-intermediate_save_time) > save_intermediate_intervel_time_s) and batch>(resume_batch + 10)):
             inference("Hello World!!! This is inference function on the currently trained model",eval_model=model,return_mem=False)
             save_model(batch)
             intermediate_save_time = time.time()
@@ -1063,10 +1066,8 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     inp=1
                 if inp:
                     save_model(min(0,batch-1))
-                raise KeyboardInterrupt
             except Exception as e:
-                print("error in training step\v",e)
-                continue
+                print("error in evaluation step\v",e)
 
             elapsed = time.time() - start_time
             if discriminator:
