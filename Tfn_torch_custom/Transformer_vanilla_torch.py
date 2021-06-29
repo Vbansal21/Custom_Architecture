@@ -996,6 +996,17 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     print("Some Other Exception:\v",str(e))
                 finally:
                     pause_time = time.time() - pause_time
+                    inp = inpt(prompt="Run inference?\v",timeout=30)
+                    if inp.lower() in ['yes','1']:
+                        tmp_mem = tmp_mem_ctxt = None
+                        while True:
+                            i = int(input("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:"))
+                            if i == 0:
+                                break
+                            inp = input("input text, 1 string at a time, for inference:")
+                            tmp_mem = None if i==1 else tmp_mem
+                            tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
+                            tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt)
 
         except Exception as e:
             print("error in training step\v",e)
