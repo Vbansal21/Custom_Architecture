@@ -151,6 +151,11 @@ else:
     tokenizer, vocab_size = initialize_tokenizer(inp)
 vocab = tokenizer.vocab
 
+import sys,select
+
+def isdata():
+    return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
+
 batch_size: int = 1
 eval_batch_size: int = batch_size
 mini_batch_size: int = 1
@@ -667,42 +672,45 @@ best_model = model
 
 project_name = "Tfn_X"
 
-wandb.init(project=project_name,config={
-    "ntokens":ntokens,
-    "d_model":emsize,
-    "ffd":nhid,
-    "layers":nlayers,
-    "heads":nhead,
-    "deberta_layers":deberta_layers,
-    "repeated_deberta_layers":repeated_deberta_layers,
-    "dropout":dropout,
-    "memory_tokens":mem_tokens,
-    "total_epochs":epochs,
-    "Sequence_length":bptt,
-    "max_seq_len":max_seq_len,
-    "seq_scale_down":seq_scale_down,
-    "discriminator":discriminator,
-    "Number of Parameters":len(model),
-    "Progressive generation training":progressive_generation,
-    "use_sgd":use_sgd,
-    "full_block_repeat":full_block_repeat,
-    "causal":causal,
-    "nystromer":nystrom,
-    "attend_to_self":attend_to_self,
-    "fno_layers":fno_layers,
-    "modes":modes,
-    "width":width,
-    "feature_redraw_intervel":feature_redraw_interval,
-    "prev_state_len":prev_state_len,
-    "local_heads":local_heads,
-    "attend_to_inp":attend_to_inp,
-    "prev_state_self_num":prev_state_self_num,
-    "mlp_layers":mlp_layers,
-},
-resume="3r8gfxsz",
-force=True,
-save_code=True
-)
+def wandb_init():
+    wandb.init(project=project_name,config={
+        "ntokens":ntokens,
+        "d_model":emsize,
+        "ffd":nhid,
+        "layers":nlayers,
+        "heads":nhead,
+        "deberta_layers":deberta_layers,
+        "repeated_deberta_layers":repeated_deberta_layers,
+        "dropout":dropout,
+        "memory_tokens":mem_tokens,
+        "total_epochs":epochs,
+        "Sequence_length":bptt,
+        "max_seq_len":max_seq_len,
+        "seq_scale_down":seq_scale_down,
+        "discriminator":discriminator,
+        "Number of Parameters":len(model),
+        "Progressive generation training":progressive_generation,
+        "use_sgd":use_sgd,
+        "full_block_repeat":full_block_repeat,
+        "causal":causal,
+        "nystromer":nystrom,
+        "attend_to_self":attend_to_self,
+        "fno_layers":fno_layers,
+        "modes":modes,
+        "width":width,
+        "feature_redraw_intervel":feature_redraw_interval,
+        "prev_state_len":prev_state_len,
+        "local_heads":local_heads,
+        "attend_to_inp":attend_to_inp,
+        "prev_state_self_num":prev_state_self_num,
+        "mlp_layers":mlp_layers,
+    },
+    resume="3r8gfxsz",
+    force=True,
+    save_code=False
+    )
+
+wandb_init()
 
 #wandb.watch(model,criterion=criterion,log_freq=20)
 
@@ -770,6 +778,7 @@ try:
         print("Exception",e)
         
     try:
+        pass
         best_model.load_state_dict(checkpoint_['best_model_state_dict'],strict=False)
         best_model = best_model.to(torch.device('cpu'))
     except Exception as e:
@@ -973,53 +982,80 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
             else:
                 pass
-        except KeyboardInterrupt as e:
-            print("KeyboardInterrupt\v",e)
-            try:
-                inp = int(inpt(prompt="Save the model(0/1/2 (for pausing training)/3 (pause + save))?:\v",timeout=15))
-                print("")
-            except:
-                inp = 1
-            if inp != 0 and inp != 1:
-                inp=1
-            if inp==1:
-                save_model(min(0,batch-1))
-                raise KeyboardInterrupt
-            elif inp >= 2:
-                if inp == 3:
-                    save_model(min(0,batch-1))
-                pause_time = time.time()
-                try:
-                    while True:
-                        text = "Training Paused since:"+str(time.time() - pause_time)
-                        print(text,end="")
-                        time.sleep(15)
-                        print("\b"*len(text),end='')
-                except KeyboardInterrupt:
-                    print("Resuming Training after:",str(time.time() - pause_time))
-                except Exception as e:
-                    print("Some Other Exception:\v",str(e))
-                finally:
-                    pause_time = time.time() - pause_time
-                    inp = inpt(prompt="Run inference?\v",timeout=30)
-                    if inp.lower() in ['yes','1']:
-                        tmp_mem = tmp_mem_ctxt = None
-                        while True:
-                            i = int(input("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:"))
-                            if i == 0:
-                                break
-                            inp = ""
+            if isdata():
+                print("In-scope of if-else, press escape button(\\x1b) then enter then CTRL-d/^D")
+                c = sys.stdin.read()
+                if '\x1b' in c or '^D' in c:
+                    try:
+                        inp = int(inpt(prompt="Save the model(0(raise Keyboard Interrupt and exit)/1(raise Keyboard Interrupt and save)/2 (for pausing training)/3 (pause + save))?:\v",timeout=60))
+                        print("")
+                    except:
+                        inp = 1
+                    if inp not in [0,1,2,3]:
+                        inp=1
+                    if inp==1:
+                        save_model(min(0,batch-1))
+                        raise KeyboardInterrupt
+                    elif inp >= 2:
+                        if inp == 3:
+                            save_model(min(0,batch-1))
+                        pause_time = time.time()
+                        try:
+                            print("\nTo resume,press any key and press enter,then after prompt press escape button(\\x1b) then press enter then CTRL+d / ^D\v")
                             while True:
                                 try:
-                                    inp += input("input text for inference:") + "\n"
-                                except (EOFError,KeyboardInterrupt):
-                                    _i = inpt(prompt="end?(0/1):\v",timeout=15)
+                                    if isdata():
+                                        print("\nIn-scope of if-else, press escape button(\\x1b),then press enter atleast once, then CTRL-d/^D")
+                                        c = sys.stdin.read()
+                                        if '\x1b' in c or '^D' in c:
+                                            _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
+                                            if int(_i):
+                                                break
+                                except EOFError:
+                                    _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
                                     if int(_i):
                                         break
-                            tmp_mem = None if i==1 else tmp_mem
-                            tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
-                            tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt)
-
+                                time.sleep(15)
+                            """
+                            while True:
+                                text = "Training Paused since:{:5.2f}s".format(time.time() - pause_time)
+                                print(text,end="")
+                                print("\b"*len(text),end='')
+                            """
+                        except Exception as e:
+                            print("Some Other Exception:\v",str(e))
+                        finally:
+                            print("Training Paused since:{:5.2f}s".format(time.time() - pause_time))
+                            pause_time = time.time() - pause_time
+                            inp = inpt(prompt="Run inference?(1/yes/0/no)\v",timeout=30)
+                            if inp.lower() in ['yes','1']:
+                                tmp_mem = tmp_mem_ctxt = None
+                                while True:
+                                    i = int(input("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:"))
+                                    if i == 0:
+                                        break
+                                    print("\ninput text for inference(type in multi line text,press enter atleast once in total then press CTRL-d/ ^D when complete ):\n")
+                                    inp = ''
+                                    while True:
+                                        try:
+                                            inp += sys.stdin.read()
+                                            """
+                                            if isdata():
+                                                print("\nIn-scope of if-else, press escape button(\\x1b),then press enter atleast once, then CTRL-d/^D")
+                                                c = sys.stdin.read()
+                                                if '\x1b' in c or '^D' in c:
+                                                    _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
+                                                    if int(_i):
+                                                        break
+                                            """
+                                        except EOFError:
+                                            _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
+                                            if int(_i):
+                                                break
+                                    tmp_mem = None if i==1 else tmp_mem
+                                    tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
+                                    tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt)
+                            continue
         except Exception as e:
             print("error in training step\v",e)
             continue
@@ -1055,17 +1091,19 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
 
             try:
                 _,__ = evaluate(model,processed_val_data,True,data_retrieve(path="./.data/the_pile/val.jsonl.zst"))
-            except KeyboardInterrupt as e:
-                print("KeyboardInterrupt\v",e)
-                try:
-                    inp = int(inpt(prompt="Save the model(0/1)?:\v",timeout=15))
-                    print("")
-                except:
-                    inp = 1
-                if inp != 0 and inp != 1:
-                    inp=1
-                if inp:
-                    save_model(min(0,batch-1))
+                if isdata():
+                    print("In-scope of if-else,  type acc.,then press enter atleast once, then CTRL-d/^D")
+                    c = sys.stdin.read()
+                    if '\x1b' in c or '^D' in c:
+                        try:
+                            inp = int(inpt(prompt="Save the model(0/1)?:\v",timeout=15))
+                            print("")
+                        except:
+                            inp = 1
+                        if inp != 0 and inp != 1:
+                            inp=1
+                        if inp:
+                            save_model(min(0,batch-1))
             except Exception as e:
                 print("error in evaluation step\v",e)
 
