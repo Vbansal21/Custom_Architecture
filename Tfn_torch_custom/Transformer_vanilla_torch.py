@@ -988,11 +988,14 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     while True:
                         text = "Training Paused since:"+str(time.time() - pause_time)
                         print(text,end="")
+                        time.sleep(15)
                         print("\b"*len(text),end='')
                 except KeyboardInterrupt:
                     print("Resuming Training after:",str(time.time() - pause_time))
                 except Exception as e:
                     print("Some Other Exception:\v",str(e))
+                finally:
+                    pause_time = time.time() - pause_time
 
         except Exception as e:
             print("error in training step\v",e)
