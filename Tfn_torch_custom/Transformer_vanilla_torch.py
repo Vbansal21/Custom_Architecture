@@ -160,25 +160,25 @@ emsize: int = 256
 nhid: int = emsize * 4
 nlayers: int = 1
 deberta_layers: int = 4
-repeated_deberta_layers: int = 2
+repeated_deberta_layers: int = 1
 full_block_repeat: bool = True
 nhead: int = 16
 dropout = (math.pi/10)
-mem_tokens: int = emsize*4
+mem_tokens: int = emsize*2
 bptt: int = (1024*1) #- mem_tokens
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
 mlp_layers: int = 1
 fno_layers: int = 4
-modes: int = 32
-width: int = 8
+modes: int = 64
+width: int = 32
 causal: bool = False
 nystrom: bool = True
 attend_to_self: bool = True
 attend_to_inp: bool = True
 feature_redraw_interval: int = 1024
 prev_state_len: int = emsize*4
-prev_state_self_num: int = 4
+prev_state_self_num: int = 2
 local_heads: int = 2
 local_heads: int = min(local_heads,nhead)
 
@@ -1004,7 +1004,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         torch.cuda.empty_cache()
 
         if (batch % save_intermediate_intervel == 0 and batch > 0) or (time.time()-intermediate_save_time) > save_intermediate_intervel_time_s:
-            #inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
+            inference("Hello World!!! This is inference function on the currently trained model",eval_model=model,return_mem=False)
             save_model(batch)
             intermediate_save_time = time.time()
             model.train()

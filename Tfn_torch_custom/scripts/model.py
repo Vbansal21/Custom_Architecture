@@ -418,7 +418,7 @@ class TransformerBlock(Module):
         
         self.attn = GRUGating(d_model,attn_block,norm=False)
 
-        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,seq_len=2**16,window=d_model,attn_dim=d_model//2,prob_survival=1-dropout),norm=False)
+        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,seq_len=2**16,window=d_model,attn_dim=d_model//4,prob_survival=1-dropout),norm=False)
 
         self.decoder = decoder
 
