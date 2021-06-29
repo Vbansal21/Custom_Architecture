@@ -721,6 +721,7 @@ try:
     
     try:
         model.load_state_dict(checkpoint_['model_state_dict'],strict=False)
+        model = checkpoint_['model'].to(device)
     except:
         try:
             model = checkpoint_['model']
@@ -940,7 +941,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     total_acc_d = 0
     stride_size = bptt#-3 if progressive_generation else bptt -3
     i = 0
-    batch = 0
+    batch = resume_batch
     j_0 = -1
     continue_training = True
     zst_gen = data_retrieve(path="./.data/the_pile/00.jsonl.zst")
