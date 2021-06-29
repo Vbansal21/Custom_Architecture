@@ -1003,7 +1003,14 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                             i = int(input("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:"))
                             if i == 0:
                                 break
-                            inp = input("input text, 1 string at a time, for inference:")
+                            inp = ""
+                            while True:
+                                try:
+                                    inp += input("input text for inference:") + "\n"
+                                except (EOFError,KeyboardInterrupt):
+                                    _i = inpt(prompt="end?(0/1):\v",timeout=15)
+                                    if int(_i):
+                                        break
                             tmp_mem = None if i==1 else tmp_mem
                             tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
                             tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt)
