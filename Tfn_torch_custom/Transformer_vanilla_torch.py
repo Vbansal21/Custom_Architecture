@@ -707,7 +707,7 @@ def wandb_init():
     },
     resume="3r8gfxsz",
     force=True,
-    save_code=False
+    save_code=True
     )
 
 wandb_init()
@@ -778,7 +778,6 @@ try:
         print("Exception",e)
         
     try:
-        pass
         best_model.load_state_dict(checkpoint_['best_model_state_dict'],strict=False)
         best_model = best_model.to(torch.device('cpu'))
     except Exception as e:
@@ -1223,10 +1222,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         i+=stride_size
 
 while True:
-    if epoch >= epochs:
-        break
-    if resume_batch==0:
-        epoch +=1
     step=step
     epoch_start_time = time.time()
     train(resume_batch=resume_batch)
@@ -1242,6 +1237,10 @@ while True:
         best_val_loss = val_loss
         best_model = model
         save_model(0)
+    if epoch >= epochs:
+        break
+    if resume_batch==0:
+        epoch +=1
 model = best_model
 
 test_loss,test_acc = evaluate(best_model,processed_test_data,True,data_retrieve(path="./.data/the_pile/test.jsonl.zst"))
