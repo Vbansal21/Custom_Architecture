@@ -183,7 +183,7 @@ attend_to_self: bool = True
 attend_to_inp: bool = True
 feature_redraw_interval: int = 1024
 prev_state_len: int = emsize*4
-prev_state_self_num: int = 2
+prev_state_self_num: int = 4
 local_heads: int = 2
 local_heads: int = min(local_heads,nhead)
 
@@ -622,9 +622,9 @@ def lambda_lr(step_):
     def sub_func(step):
         return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 
-    if step_<(1024/(lr*multiplier**(math.pi*2/10))):
+    if step_<(1024*(1/lr)/(lr*multiplier**(math.pi*2/10))):
         return sub_func(step_)
-    elif step_<(2048/(lr*multiplier**(math.pi*2/10))):
+    elif step_<(2048*(1/lr)/(lr*multiplier**(math.pi*2/10))):
         return sub_func(step_) / (25 * (lr**0.125))
     else:
         return sub_func(step_) / (125 * (lr**0.25))
@@ -705,7 +705,7 @@ def wandb_init():
         "prev_state_self_num":prev_state_self_num,
         "mlp_layers":mlp_layers,
     },
-    resume="3r8gfxsz",
+    resume=False,
     force=True,
     save_code=True
     )
@@ -758,7 +758,6 @@ try:
             optimizer = torch.optim.SGD(model.parameters(),lr=lr)
 
             
-
     step = checkpoint_['step_number'] if load_step_number else step
 
     if load_scheduler:
@@ -1036,21 +1035,10 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                                     print("\ninput text for inference(type in multi line text,press enter atleast once in total then press CTRL-d/ ^D when complete ):\n")
                                     inp = ''
                                     while True:
-                                        try:
-                                            inp += sys.stdin.read()
-                                            """
-                                            if isdata():
-                                                print("\nIn-scope of if-else, press escape button(\\x1b),then press enter atleast once, then CTRL-d/^D")
-                                                c = sys.stdin.read()
-                                                if '\x1b' in c or '^D' in c:
-                                                    _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
-                                                    if int(_i):
-                                                        break
-                                            """
-                                        except EOFError:
-                                            _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
-                                            if int(_i):
-                                                break
+                                        inp += sys.stdin.read()
+                                        _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
+                                        if int(_i):
+                                            break
                                     tmp_mem = None if i==1 else tmp_mem
                                     tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
                                     tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt)
@@ -1222,7 +1210,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         i+=stride_size
 
 while True:
-    step=step
     epoch_start_time = time.time()
     train(resume_batch=resume_batch)
     resume_batch = 0
@@ -1237,10 +1224,10 @@ while True:
         best_val_loss = val_loss
         best_model = model
         save_model(0)
-    if epoch >= epochs:
-        break
     if resume_batch==0:
         epoch +=1
+    if epoch >= epochs:
+        break
 model = best_model
 
 test_loss,test_acc = evaluate(best_model,processed_test_data,True,data_retrieve(path="./.data/the_pile/test.jsonl.zst"))
