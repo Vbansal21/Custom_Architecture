@@ -931,6 +931,30 @@ def save_model(batch):
     """
     model.train()
 
+"""
+def func():
+    txt = ''
+    t = time.time()
+    _t = False
+    while 1:
+        if time.time()-t > 2.5:
+            print(">>>",end='')
+            _t = True
+            t = time.time()
+        while isdata():
+            tmp = ''
+            tmp = sys.stdin.read(0)
+            tmp = sys.stdin.read(1)
+            txt += tmp
+            print(tmp)
+        if "exit" in txt:
+            break
+        if _t:
+            print("")
+            _t = False
+    return txt
+"""
+
 torch.cuda.empty_cache()
 def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_intermediate_intervel_time_s=900,optimizer=optimizer,optimizer_disc=optimizer_disc):
     
@@ -980,6 +1004,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                 outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
             else:
                 pass
+            # FIX REQUIRED: UNICURSES/THREADING/SYS.STDIN.READLINE()
             if isdata():
                 print("In-scope of if-else, press escape button(\\x1b) then enter then CTRL-d/^D")
                 c = sys.stdin.read()
@@ -988,11 +1013,15 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                         inp = int(inpt(prompt="Save the model(0(raise Keyboard Interrupt and exit)/1(raise Keyboard Interrupt and save)/2 (for pausing training)/3 (pause + save))?:\v",timeout=60))
                         print("")
                     except:
-                        inp = 1
-                    if inp not in [0,1,2,3]:
-                        inp=1
-                    if inp==1:
-                        save_model(min(0,batch-1))
+                        inp = -1
+                    print(inp)
+                    if inp not in [-1,0,1,2,3]:
+                        inp=-1
+                    if inp == -1:
+                        pass
+                    if inp==1 or inp==0:
+                        if inp:
+                            save_model(min(0,batch-1))
                         raise KeyboardInterrupt
                     elif inp >= 2:
                         if inp == 3:
@@ -1042,7 +1071,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                                     tmp_mem = None if i==1 else tmp_mem
                                     tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
                                     tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt)
-                            continue
+                            #pass
         except Exception as e:
             print("error in training step\v",e)
             continue
