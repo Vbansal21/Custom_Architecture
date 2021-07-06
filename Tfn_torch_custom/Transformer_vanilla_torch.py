@@ -96,7 +96,7 @@ def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = ["
 
 def initialize_tokenizer(target_vacab = 2**15):
     global files, string_of_files
-    sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r\v "
+    sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r\v\r "
     sample += " ".join([i for i in sample])
     tmp = "".join([i for i in io.open(train_filepath, encoding="utf8")]) + "".join([i for i in io.open(test_filepath, encoding="utf8")]) + "".join([i for i in io.open(valid_filepath, encoding="utf8")])
     sample += " ".join([i for i in tmp]) + tmp
@@ -224,9 +224,10 @@ def replace_with_reserved_tokens(data,tok_num=1,only_first_instance=False):
 ### Finding all reserved tokens
 reserved_tokens = {}
 for i in range(vocab_size):
-    tmp = data_process(str(tokenizer.decode(torch.tensor((i,),dtype=torch.long))))
-    if tmp[0] == "[" and tmp[-1] == "]":
-        reserved_tokens[i] = tmp
+    tmp = tokenizer.decode(torch.full((1,),i))
+    if len(tmp) > 0:
+        if tmp[0] == "[" and tmp[-1] == "]":
+            reserved_tokens[i] = tmp
 
 def data_retrieve(data=None,path=None):
     if data != None:
