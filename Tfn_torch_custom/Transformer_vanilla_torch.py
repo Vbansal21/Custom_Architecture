@@ -111,6 +111,7 @@ def initialize_tokenizer(target_vacab = 2**15):
     sample += " ".join([i for i in set_of_chars]) + set_of_chars
     sample = "".join(list(set([i for i in sample])))
     print("parsed all chars")
+    ### Reserved Token Format => [content] <-- the square braces are required.
     tokenizer = SubwordEncoder(sample,target_vocab_size=target_vacab,reserved_tokens=[
     '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]',"[Instruct Mode]"
     ],
@@ -194,6 +195,7 @@ encoder_n_decoder: bool = False
 
 use_sgd: bool = True
 
+
 def batchify(data, bsz,dim=0):
     if data.size(0) == 2 and len(data.size())==3:
         data = data[0]
@@ -205,6 +207,26 @@ def batchify(data, bsz,dim=0):
 def data_process(raw_text_iter):
   data = tokenizer.encode(raw_text_iter)
   return data.contiguous()
+
+def replace_with_reserved_tokens(data,tok_num=1,only_first_instance=False):
+    i = 0
+    token = data_process(str(tokenizer.decode(torch.tensor((tok_num,),dtype=torch.long))))
+    while True:
+        if i>=data.size(0) - token.size(0):
+            break
+        if (data[i:i+token.size(0)]==token).sum().item():
+            data = torch.cat((data[:i],torch.full((1,),2,dtype=data.dtype,device=data.device),data[i+token.size(0):]),dim=-1)
+            if only_first_instance:
+                break
+        i+=1
+    return data.contiguous()
+
+### Finding all reserved tokens
+reserved_tokens = {}
+for i in range(vocab_size):
+    tmp = data_process(str(tokenizer.decode(torch.tensor((i,),dtype=torch.long))))
+    if tmp[0] == "[" and tmp[-1] == "]":
+        reserved_tokens[i] = tmp
 
 def data_retrieve(data=None,path=None):
     if data != None:
@@ -298,7 +320,7 @@ def random_mask_shuffle_encoder(
     torch.cuda.empty_cache()
     return out,index_to_be_trained_on
 
-def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch_size,generator=None,prefer_source_over_generator=True,j_0 = -1):
+def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch_size,generator=None,prefer_source_over_generator=True,j_0 = -1,replace_all_with_possible_reserved_tokens=True):
     """
     if not prefer_string_over_path:
         data = None
@@ -322,14 +344,43 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
                     break
         source = data
     """
+
+    if type(source) == str:
+        source = data_process(source)
+
+    for i in reserved_tokens.keys():
+        if not replace_all_with_possible_reserved_tokens and i!=2 and i!=3:
+            continue
+        source = replace_with_reserved_tokens(source,tok_num=i)
+
     data_stream_ended = False
-    if not prefer_source_over_generator and generator != None:
+    if (not prefer_source_over_generator and generator != None) or (generator!=None and j>= source.size(1)):
         data = None
         tmp = ""
         for i in generator:
             tmp += i
             if len(tmp) >= bptt*batch_size_:
                 data = data_process(tmp)
+                for i in reserved_tokens.keys():
+                    if not replace_all_with_possible_reserved_tokens and i!=2 and i!=3:
+                        continue
+                    data = replace_with_reserved_tokens(data,tok_num=i)
+                """
+                i = 0
+                while True:
+                    if i>=data.size(0) - sos_tok.size(0):
+                        break
+                    if (data[i:i+sos_tok.size(0)]==sos_tok).sum().item():
+                        data = torch.cat((data[:i],torch.full((1,),2,dtype=data.dtype,device=data.device),data[i+sos_tok.size(0):]),dim=-1)
+                    i+=1
+                i = 0
+                while True:
+                    if i>=data.size(0) - eos_tok.size(0):
+                        break
+                    if (data[i:i+sos_tok.size(0)]==eos_tok).sum().item():
+                        data = torch.cat((data[:i],torch.full((1,),3,dtype=data.dtype,device=data.device),data[i+eos_tok.size(0):]),dim=-1)
+                    i+=1
+                """
                 if data.size(0) >= bptt*batch_size_:
                     data = batchify(data,batch_size_,-1)
                     break
@@ -340,26 +391,10 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
             if j_0 == -1:
                 j_0 = j
             j = j - j_0
-    elif generator != None:
-        if j+bptt >= (source.size(1) - 1):
-            data = None
-            tmp = ""
-            for i in generator:
-                tmp += i
-                if len(tmp) >= bptt*batch_size_:
-                    data = data_process(tmp)
-                    if data.size(0) >= bptt*batch_size_:
-                        data = batchify(data,batch_size_,-1)
-                        break
-            if data.size(-1) > 0:
-                source = data.contiguous()
-                j=0
 
-    if type(source) == str:
-        source = data_process(source)
 
     seq_len = min(bptt, source.size(1) - j)
-    rnd_shuffle = 0 if not shuffle else random.randint(0,1500000)/1000000
+    rnd_shuffle = random.randint(0,1000000)/1000000 if shuffle else 0
     rnd_mask = random.randint(0,1500000000)/100000000
     rnd_mask_together = random.randint(0,min(min(4,seq_scale_down)**2 // 2,rnd_mask))
     rnd = random.randint(0,min((seq_len-1),(bptt//8),(min(8,seq_scale_down)*2)**2))
@@ -389,7 +424,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
         targets = source[:,j:j+seq_len].to(device)
         targets = targets.contiguous()
     torch.cuda.empty_cache()
-    return data.to(device),targets.to(device),index_to_be_trained_on,data_stream_ended
+    return data.to(device),targets.to(device),index_to_be_trained_on,data_stream_ended,j_0
 
 try:
     processed_train_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_train.tar",map_location=torch.device('cpu'))
@@ -708,7 +743,7 @@ def wandb_init():
         "prev_state_self_num":prev_state_self_num,
         "mlp_layers":mlp_layers,
     },
-    resume=False,
+    resume="h07s9i1r",
     force=True,
     save_code=True
     )
@@ -842,16 +877,21 @@ def evaluate(eval_model, data_source, print_val_loss=False,generator=None):
             if data_stream_ended:
                 break
             torch.cuda.empty_cache()
-            data, targets, trainable_index,data_stream_ended = get_batch(data_source, i,generator=generator,prefer_source_over_generator=False,j_0 = j_0)
-            if use_deepspeed:
-                with autocast():
+            try:
+                data, targets, trainable_index,data_stream_ended,j_0 = get_batch(data_source, i,generator=generator,prefer_source_over_generator=False,j_0 = j_0)
+                if use_deepspeed:
+                    with autocast():
+                        output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
+                        total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
+                        total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
+                else:
                     output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
                     total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
                     total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
-            else:
-                output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
-                total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
-                total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
+            except Exception as e:
+                print("Error in evaluation:",e)
+                total_loss = total_loss + (total_loss/i)*stride_size
+                total_acc = total_acc + (total_acc/i)*stride_size
             i+=stride_size
     val_loss = total_loss / i
     val_acc = total_acc/i
@@ -998,7 +1038,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         if ((batch + epoch)%2==1):
             single_pass_mem = None
             single_pass_mem_ctxt = None
-        data, targets, trainable_index, data_stream_ended = get_batch(processed_train_data, i,progressive=progressive_generation,batch_size_=batch_size,generator=zst_gen,prefer_source_over_generator=False,j_0=j_0) #Indexed Selective training broken
+        data, targets, trainable_index, data_stream_ended,j_0 = get_batch(processed_train_data, i,progressive=progressive_generation,batch_size_=batch_size,generator=zst_gen,prefer_source_over_generator=False,j_0=j_0) #Indexed Selective training broken
         trainable_index = None
         torch.cuda.empty_cache()
 
