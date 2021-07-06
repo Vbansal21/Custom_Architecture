@@ -161,35 +161,36 @@ eval_batch_size: int = batch_size
 mini_batch_size: int = 1
 
 ntokens: int = tokenizer.vocab_size # None
-emsize: int = 256
+emsize: int = 128*1
 nhid: int = emsize * 4
 nlayers: int = 1
-deberta_layers: int = 4
-repeated_deberta_layers: int = 1
+deberta_layers: int = 1
+repeated_deberta_layers: int = 0
 full_block_repeat: bool = True
-nhead: int = 16
+nhead: int = 8
 dropout = (math.pi/10)
-mem_tokens: int = emsize*2
-bptt: int = (1024*1) #- mem_tokens
+mem_tokens: int = emsize*8
+bptt: int = (1024*14) #- mem_tokens
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
 mlp_layers: int = 1
 fno_layers: int = 4
-modes: int = 64
+modes: int = 256
 width: int = 32
 causal: bool = False
 nystrom: bool = True
 attend_to_self: bool = True
 attend_to_inp: bool = True
 feature_redraw_interval: int = 1024
-prev_state_len: int = emsize*4
-prev_state_self_num: int = 4
+prev_state_len: int = emsize*8
+prev_state_self_num: int = 1
 local_heads: int = 2
 local_heads: int = min(local_heads,nhead)
 
 discriminator: bool = False #INTEGRATED DISCRIMINATOR: DISABLED
 progressive_generation: bool = True
 use_deepspeed: bool = False
+encoder_n_decoder: bool = False
 
 use_sgd: bool = True
 
@@ -358,9 +359,9 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
         source = data_process(source)
 
     seq_len = min(bptt, source.size(1) - j)
-    rnd_shuffle = 0 if not shuffle else random.randint(0,15000000)/1000000
+    rnd_shuffle = 0 if not shuffle else random.randint(0,1500000)/1000000
     rnd_mask = random.randint(0,1500000000)/100000000
-    rnd_mask_together = random.randint(0,min(min(8,seq_scale_down)**2 // 2,rnd_mask))
+    rnd_mask_together = random.randint(0,min(min(4,seq_scale_down)**2 // 2,rnd_mask))
     rnd = random.randint(0,min((seq_len-1),(bptt//8),(min(8,seq_scale_down)*2)**2))
 
     if ((j_0 != -1) and (j+bptt) > (source.size(1) - 1)):
@@ -540,6 +541,7 @@ if use_deepspeed:
                                 local_heads=local_heads,
                                 attend_to_inp=attend_to_inp,
                                 mlp_layers=mlp_layers,
+                                encoder_n_decoder=encoder_n_decoder,
                         ).half()
 else:
     model = TransformerModel(
@@ -569,6 +571,7 @@ else:
                             local_heads=local_heads,
                             attend_to_inp=attend_to_inp,
                             mlp_layers=mlp_layers,
+                            encoder_n_decoder=encoder_n_decoder,
                     ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
@@ -1106,7 +1109,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             total_ppl /= log_interval
 
             try:
-                _,__ = evaluate(model,processed_val_data,True,data_retrieve(path="./.data/the_pile/val.jsonl.zst"))
+                _,__ = evaluate(model,processed_val_data,True)
                 if isdata():
                     print("In-scope of if-else,  type acc.,then press enter atleast once, then CTRL-d/^D")
                     c = sys.stdin.read()
@@ -1242,7 +1245,7 @@ while True:
     epoch_start_time = time.time()
     train(resume_batch=resume_batch)
     resume_batch = 0
-    val_loss, val_acc = evaluate(model, processed_val_data)
+    val_loss, val_acc = evaluate(model, processed_val_data,generator=data_retrieve(path="./.data/the_pile/val.jsonl.zst"))
     print('-' * 110)
     print('| end of epoch {:3d} | time: {:08.3f}s | valid acc {:3.2f}% | valid loss {:5.3f} | '
           'valid ppl {:10.3f}'.format(epoch, (time.time() - epoch_start_time),val_acc*100,

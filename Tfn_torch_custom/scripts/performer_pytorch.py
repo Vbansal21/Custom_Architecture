@@ -986,12 +986,12 @@ def rotate_every_two(x):
     x = torch.stack((-x2, x1), dim = -1)
     return rearrange(x, '... d j -> ... (d j)')
 
-def apply_rotary_pos_emb(q, k, sinu_pos):
+def apply_rotary_pos_emb(q, sinu_pos):
     sinu_pos = rearrange(sinu_pos, '() n (j d) -> n j d', j = 2)
     sin, cos = sinu_pos.unbind(dim = -2)
     sin, cos = map(lambda t: repeat(t, 'b n -> b (n j)', j = 2), (sin, cos))
-    q, k = map(lambda t: (t * cos) + (rotate_every_two(t) * sin), (q, k))
-    return q, k
+    q = (q * cos) + (rotate_every_two(q) * sin)#map(lambda t: (t * cos) + (rotate_every_two(t) * sin), (q, k))
+    return q
 
 # sinusoidal positional embeddings
 
@@ -1049,9 +1049,9 @@ class Attention(nn.Module):
         qkv_bias = True,
         attn_out_bias = True,
         max_seq_len = 2**17,
-        pos_scales = None,
+        pos_scales = 0,
         content_rel_attn = True,
-        rotary_pos_emb = False,
+        rotary_pos_emb = True,
         fixed_emb = False,
         axial_position_emb = False,
         axial_position_shape = None,
@@ -1069,7 +1069,7 @@ class Attention(nn.Module):
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
         inner_dim = dim_head * heads
-        pos_scales = int(default(pos_scales,2 * math.log(2,dim)))
+        self.pos_scales = pos_scales = int(default(pos_scales,2 * math.log(2,dim)))
         #dim_head += 2*pos_scales
         additional_head_dims = 2*pos_scales if not content_rel_attn else 4*pos_scales
 
@@ -1102,23 +1102,23 @@ class Attention(nn.Module):
         self.to_out = default(to_out,nn.Linear(inner_dim, dim, bias = attn_out_bias))
         self.dropout = nn.Dropout(dropout)
 
-
-        self.q_rel_pos_emb = ConstrainedLinear(
-            self.global_heads*dim_head,
-            self.global_heads*dim_head,
-            pos_scales,
-            self.global_heads,
-            content_rel_attn=content_rel_attn
-        )
-        self.k_rel_pos_emb = IdentityLinear(
-            self.global_heads*dim_head,
-            self.global_heads*dim_head,
-            pos_scales,
-            self.global_heads,
-            content_rel_attn=content_rel_attn
-        )
-        self.rel_pos_emb_q = LearnableSinusoidEncoding(pos_scales*2)
-        self.rel_pos_emb_k = LearnableSinusoidEncoding(pos_scales*2)
+        if pos_scales>0:
+            self.q_rel_pos_emb = ConstrainedLinear(
+                self.global_heads*dim_head,
+                self.global_heads*dim_head,
+                pos_scales,
+                self.global_heads,
+                content_rel_attn=content_rel_attn
+            )
+            self.k_rel_pos_emb = IdentityLinear(
+                self.global_heads*dim_head,
+                self.global_heads*dim_head,
+                pos_scales,
+                self.global_heads,
+                content_rel_attn=content_rel_attn
+            )
+            self.rel_pos_emb_q = LearnableSinusoidEncoding(pos_scales*2)
+            self.rel_pos_emb_k = LearnableSinusoidEncoding(pos_scales*2)
 
         self.attn_to_self = None
         if attend_to_self:
@@ -1166,22 +1166,35 @@ class Attention(nn.Module):
             #self.zero_1 = nn.Parameter(torch.zeros(dim_head))
             #self.norm = ScaleNorm(dim_head)
 
-            self.q_rel_pos_emb_mem = ConstrainedLinear(
-                self.heads*dim_head,
-                self.heads*dim_head,
-                pos_scales,
-                self.heads,
-                content_rel_attn=content_rel_attn
-            )
-            self.k_rel_pos_emb_mem = IdentityLinear(
-                self.heads*dim_head,
-                self.heads*dim_head,
-                pos_scales,
-                self.heads,
-                content_rel_attn=content_rel_attn
-            )
-            self.rel_pos_emb_q_mem = LearnableSinusoidEncoding(pos_scales*2)
-            self.rel_pos_emb_k_mem = LearnableSinusoidEncoding(pos_scales*2)
+
+            if rotary_pos_emb:
+                self.mem_pos_emb = None
+                self.mem_layer_pos_emb = FixedPositionalEmbedding(dim, max_seq_len) if fixed_emb else RotaryEmbedding(dim)
+            elif axial_position_emb:
+                axial_position_shape = default(axial_position_shape, (math.ceil(max_seq_len / 64), 64))
+                self.mem_pos_emb = AxialPositionalEmbedding(dim, axial_position_shape)
+                self.mem_layer_pos_emb = None
+            else:
+                self.mem_pos_emb = None
+                self.mem_layer_pos_emb = None
+            
+            if pos_scales>0:
+                self.q_rel_pos_emb_mem = ConstrainedLinear(
+                    self.heads*dim_head,
+                    self.heads*dim_head,
+                    pos_scales,
+                    self.heads,
+                    content_rel_attn=content_rel_attn
+                )
+                self.k_rel_pos_emb_mem = IdentityLinear(
+                    self.heads*dim_head,
+                    self.heads*dim_head,
+                    pos_scales,
+                    self.heads,
+                    content_rel_attn=content_rel_attn
+                )
+                self.rel_pos_emb_q_mem = LearnableSinusoidEncoding(pos_scales*2)
+                self.rel_pos_emb_k_mem = LearnableSinusoidEncoding(pos_scales*2)
         else:
             self.prev_state = None
 
@@ -1193,14 +1206,16 @@ class Attention(nn.Module):
         
         cross_attend = exists(context)
 
+        if exists(self.pos_emb):
+            x = x + self.pos_emb(x)
+
         context = default(context, x)
         context_mask = default(context_mask, mask) if not cross_attend else context_mask
 
         q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
 
-        if exists(self.pos_emb):
-            x = x + self.pos_emb(x)
-        pos_emb = (self.layer_pos_emb(x) if pos_emb==None else pos_emb) if exists(self.layer_pos_emb) else None
+        pos_emb_q = (self.layer_pos_emb(q) if pos_emb==None else pos_emb) if exists(self.layer_pos_emb) else None
+        pos_emb_k = (self.layer_pos_emb(k) if pos_emb==None else pos_emb) if exists(self.layer_pos_emb) else None
 
         tmp_k,tmp_v = k,v
 
@@ -1214,8 +1229,9 @@ class Attention(nn.Module):
             q = ckpt(self.project_down,self_q)
             del(self_q)
 
-        if exists(pos_emb) and not cross_attend:
-            q, k = apply_rotary_pos_emb(q, k, pos_emb)
+        if exists(pos_emb_q):
+            q = apply_rotary_pos_emb(q, pos_emb_q)
+            k = apply_rotary_pos_emb(k, pos_emb_k)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
@@ -1228,11 +1244,13 @@ class Attention(nn.Module):
                 global_mask = context_mask[:, None, :, None]
                 v.masked_fill_(~global_mask, 0.)
 
-            pos_q = rearrange(self.rel_pos_emb_q(torch.arange(q.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
-            pos_k = rearrange(self.rel_pos_emb_k(torch.arange(k.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
-            
-            q = ckpt(self.q_rel_pos_emb,q,pos_q)
-            k = ckpt(self.k_rel_pos_emb,k,pos_k)
+            if self.pos_scales>0:
+
+                pos_q = rearrange(self.rel_pos_emb_q(torch.arange(q.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
+                pos_k = rearrange(self.rel_pos_emb_k(torch.arange(k.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
+                
+                q = ckpt(self.q_rel_pos_emb,q,pos_q)
+                k = ckpt(self.k_rel_pos_emb,k,pos_k)
 
             out = ckpt(self.fast_attention,q, k, v) if not self.vanilla_attn else ckpt(vanilla_attention,q,k,v)
             attn_outs.append(out)
@@ -1258,11 +1276,20 @@ class Attention(nn.Module):
             mem_k = self.mem_lin_k(mem_k)
             mem_v = self.mem_lin_v(mem_v) 
 
-            mem_pos_q = rearrange(self.rel_pos_emb_q_mem(torch.arange(out.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
-            mem_pos_k = rearrange(self.rel_pos_emb_k_mem(torch.arange(mem_k.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
-            
-            out = ckpt(self.q_rel_pos_emb_mem,out,mem_pos_q)
-            mem_k = ckpt(self.k_rel_pos_emb_mem,mem_k,mem_pos_k)
+            if exists(self.mem_pos_emb):
+                out = out + self.mem_pos_emb(out)
+            else:
+                mem_pos_emb_mem_k = self.layer_pos_emb(mem_k.reshape(b,-1,d)) if exists(self.mem_layer_pos_emb) else None
+
+            if exists(mem_pos_emb_mem_k):
+                mem_k = apply_rotary_pos_emb(mem_k.reshape(b,-1,d), mem_pos_emb_mem_k).reshape(b,h,-1,d//h)
+
+            if self.pos_scales>0:
+                mem_pos_q = rearrange(self.rel_pos_emb_q_mem(torch.arange(out.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
+                mem_pos_k = rearrange(self.rel_pos_emb_k_mem(torch.arange(mem_k.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
+                
+                out = ckpt(self.q_rel_pos_emb_mem,out,mem_pos_q)
+                mem_k = ckpt(self.k_rel_pos_emb_mem,mem_k,mem_pos_k)
 
             out = ckpt(self.mem_attn,out,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,out,mem_k,mem_v)
             out = ckpt(self.out_mem,out)

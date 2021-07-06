@@ -99,8 +99,8 @@ class Identity(Module):
     def __init__(self):
         super(Identity,self).__init__()
     
-    def forward(self,*args):
-        return args
+    def forward(self,x,*args):
+        return x
 
 class GEGLU(Module):
     def __init__(self, dim_in, dim_out,layers=1):
@@ -376,6 +376,7 @@ class TransformerBlock(Module):
                                         dim_head=d_model//(nhead*2),
                                         num_mem_kv=mem_kv,
                                         hop_attn=hop_attn,
+                                        local_heads=local_heads,
                                         rotary_pos_emb=rotary_pos_emb,
                                         fixed_emb=fixed_emb,
                                         causal=causal,
@@ -397,7 +398,7 @@ class TransformerBlock(Module):
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
                                         hop_attn=copy.deepcopy(hop_attn),
-                                        rotary_pos_emb=False,
+                                        rotary_pos_emb=rotary_pos_emb,
                                         nystrom=nystrom,
                                         attend_to_self=False),
                 'cross_2':Attention(d_model,
@@ -406,7 +407,7 @@ class TransformerBlock(Module):
                                         num_mem_kv=mem_kv,
                                         hop_attn=copy.deepcopy(hop_attn),
                                         nystrom=nystrom,
-                                        rotary_pos_emb=False,
+                                        rotary_pos_emb=rotary_pos_emb,
                                         attend_to_self=False)
             }
 
@@ -478,6 +479,7 @@ class TransformerModule(ModuleList):
                     prev_state_self_num=32,
                     attend_to_inp=True,
                     mlp_layers=1,
+                    encoder_n_decoder=True,
                     ):
         super(TransformerModule, self).__init__()
 
@@ -488,30 +490,42 @@ class TransformerModule(ModuleList):
         self.enable_encoder=enable_encoder
         self.repeated_deberta_layers = repeated_deberta_layers
 
-        if not enable_encoder:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
-            self.decoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
+        if num_layers != 0:
+            if not enable_encoder:
+                block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
+                self.decoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
+            else:
+                block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
+                self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
+                self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
+                block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
+                self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         else:
-            block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
-            self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
-            self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-            block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
-            self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
-        
+            self.decoder = nn.ModuleList([Identity()])
+            self.encoder = nn.ModuleList([Identity()])
+            self.decoder_self = nn.ModuleList([Identity()])
+            self.decoder_cross = nn.ModuleList([Identity()])
+            
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,encoder_n_decoder=True,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
+        self.deb_attn_0 = Attention(d_model,
+                                            heads=nhead,
+                                            dim_head=d_model//nhead,
+                                            num_mem_kv=0,
+                                            rotary_pos_emb=True,
+                                            nystrom=nystrom) if deberta_layers else Identity()
         
         self.attend_to_inp = Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
-                                            rotary_pos_emb=False,
+                                            rotary_pos_emb=True,
                                             nystrom=nystrom) if attend_to_inp else None
 
         self.prev_state_exists = False
 
-        if prev_state_len > 0:
+        if prev_state_len > 0 and prev_state_self_num > 0:
             self.prev_state_exists = True
             self.register_buffer(
                 name='prev_state',
@@ -522,14 +536,14 @@ class TransformerModule(ModuleList):
                                                 heads=nhead,
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
-                                                rotary_pos_emb=False,
+                                                rotary_pos_emb=True,
                                                 nystrom=nystrom)
 
             self.prev_state_attend = Attention(d_model,
                                                 heads=nhead,
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
-                                                rotary_pos_emb=False,
+                                                rotary_pos_emb=True,
                                                 nystrom=nystrom)
 
         self.d_model = d_model
@@ -584,7 +598,7 @@ class TransformerModule(ModuleList):
                 prev_state = ckpt(self.prev_state_update,prev_state,ctxt/ctxt.size(-1))
 
             for _ in range(self.prev_state_self_num):
-                prev_state = ckpt(self.prev_state_update,prev_state,prev_state)
+                prev_state = ckpt(self.prev_state_update,prev_state)
             
         if self.enable_encoder:
             for enc in self.encoder:
@@ -601,6 +615,7 @@ class TransformerModule(ModuleList):
 
         if self.deberta_layers!=None:
             out = Positional_Encoding(self.absolutepositionalembedding(output))
+            out = ckpt(self.deb_attn_0,out,output)
             if self.full_block_repeat:
                 for _ in range(self.repeated_deberta_layers+1):
                     for enc in self.deberta_layers:
@@ -667,6 +682,7 @@ class TransformerModel(Module):
                     width=None,
                     attend_to_inp=True,
                     mlp_layers=1,
+                    encoder_n_decoder=True,
                     device: torch.DeviceObjType = device
                 ) -> NoReturn :
         super(TransformerModel, self).__init__()
@@ -696,6 +712,7 @@ class TransformerModel(Module):
                                                         prev_state_self_num=prev_state_self_num,
                                                         attend_to_inp=attend_to_inp,
                                                         mlp_layers=mlp_layers,
+                                                        encoder_n_decoder=encoder_n_decoder,
                                                         )
         
         self.embedding_encoder = nn.Embedding(ntoken, ninp,padding_idx=padding_idx) if ntoken != None else Identity()
