@@ -514,7 +514,7 @@ class TransformerModule(ModuleList):
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom) if deberta_layers else Identity()
+                                            nystrom=nystrom) if deberta_layers else None
         
         self.attend_to_inp = Attention(d_model,
                                             heads=nhead,
@@ -583,8 +583,8 @@ class TransformerModule(ModuleList):
                 i.self_ctxt_enc = Identity()
                 del(tmp)
         else:
-            block = TransformerBlock(*self.config)
-            self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(self.num_layers-1)])
+            block = TransformerBlock(*self.config) if self.num_layers != 0 else Identity()
+            self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(self.num_layers-1)]) if self.num_layers != 0 else Identity()
             
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
@@ -1130,6 +1130,8 @@ class TransformerModel(Module):
                 trainable_output_targets = output_targets
                 
             loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
+            #loss = loss * min(2,max(1,torch.logical_and(torch.argmax(trainable_output,dim=-1) != trainable_output_targets, torch.argmax(trainable_output,dim=-1) == torch.full(trainable_output_targets.shape,1192,device=trainable_output.device,dtype=trainable_output.dtype)).sum().item()*(10/trainable_output_targets.view(-1).size(-1))))
+            
             loss.backward()
             torch.cuda.empty_cache()
             if mini_batch_size != None and batch != None:

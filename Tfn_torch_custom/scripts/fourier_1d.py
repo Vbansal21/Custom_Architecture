@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange, repeat
 #from torch.nn.parameter import Parameter
 #import matplotlib.pyplot as plt
 
@@ -56,16 +57,22 @@ class SpectralConv1d(nn.Module):
         self.modes1 = modes1  #Number of Fourier modes to multiply, at most floor(N/2) + 1
 
         self.scale = (1 / (in_channels*out_channels))
-        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, dtype=torch.cfloat))
+        #self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, dtype=torch.cfloat))
+        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, self.modes1, dtype=torch.cfloat))
+        self.weights2 = nn.Parameter(self.scale * torch.rand(out_channels, self.modes1, dtype=torch.cfloat))
 
     # Complex multiplication
-    def compl_mul1d(self, input, weights):
+    def compl_mul1d(self, inputs):
         # (batch, in_channel, x ), (in_channel, out_channel, x) -> (batch, out_channel, x)
+        """
         if input.size(-1)<weights.size(-1):
             weights = weights[:,:,:input.size(-1)]
         if input.size(-2)<weights.size(-2):
             weights = weights[:,:input.size(-2),:]
-        return torch.einsum("bix,iox->box", input, weights)
+        """
+        #return torch.einsum("bix,iox->box", input, weights)
+        mat = torch.einsum("bix,bin->bxn",inputs,repeat(self.weights1,"c m -> b c m",b=inputs.size(0)))
+        return torch.einsum("bxn,bon->box",torch.view_as_complex(torch.sigmoid(torch.view_as_real(mat))),repeat(self.weights2,"c m -> b c m",b=inputs.size(0)))
 
     def forward(self, x):
         batchsize = x.shape[0]
@@ -73,8 +80,9 @@ class SpectralConv1d(nn.Module):
         x_ft = ckpt(torch.fft.rfft,x)
 
         # Multiply relevant Fourier modes
-        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-1)//2 + 1,  device=x.device, dtype=torch.cfloat)
-        out_ft[:, :, :self.modes1] = ckpt(self.compl_mul1d,x_ft[:, :, :self.modes1], self.weights1)
+        #out_ft = torch.zeros(batchsize, self.out_channels, x.size(-1)//2 + 1,  device=x.device, dtype=torch.cfloat)
+        #out_ft[:, :, :self.modes1] = ckpt(self.compl_mul1d,x_ft[:, :, :self.modes1])
+        out_ft = ckpt(self.compl_mul1d,x_ft)
 
         #Return to physical space
         x = torch.fft.irfft(out_ft,x.size(-1))

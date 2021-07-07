@@ -1145,7 +1145,7 @@ class Attention(nn.Module):
                                 name='prev_state',
                                 tensor=torch.zeros((self.heads, num_prev_state, dim_head))
                                 )
-            self.p_s_conv = nn.Conv2d(self.heads*2, self.heads, (1, 1), padding = (0, 0), groups = 1, bias = True)
+            #self.p_s_conv = nn.Conv2d(self.heads*2, self.heads, (1, 1), padding = (0, 0), groups = 1, bias = True)
             self.hop_attn = hop_attn
             self.mem_lin_k = nn.Linear(dim_head,dim_head)
             self.mem_lin_v = nn.Linear(dim_head,dim_head)
@@ -1159,9 +1159,17 @@ class Attention(nn.Module):
             else:
                 self.mem_attn = FastAttention(dim_head + additional_head_dims, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
                 self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+
+            mult = 4
             
-            self.out_k = nn.Linear(dim_head,dim_head)
-            self.out_v = nn.Linear(dim_head,dim_head)
+            self.out_k = nn.Sequential(
+                nn.Linear(dim_head,dim_head*mult),
+                nn.Linear(dim_head*mult,dim_head),
+                )
+            self.out_v = nn.Sequential(
+                nn.Linear(dim_head,dim_head*mult),
+                nn.Linear(dim_head*mult,dim_head),
+                )
             #self.zero_0 = nn.Parameter(torch.ones(dim_head))
             #self.zero_1 = nn.Parameter(torch.zeros(dim_head))
             #self.norm = ScaleNorm(dim_head)
@@ -1217,8 +1225,6 @@ class Attention(nn.Module):
         pos_emb_q = (self.layer_pos_emb(q) if pos_emb==None else pos_emb) if exists(self.layer_pos_emb) else None
         pos_emb_k = (self.layer_pos_emb(k) if pos_emb==None else pos_emb) if exists(self.layer_pos_emb) else None
 
-        tmp_k,tmp_v = k,v
-
         if self.attn_to_self != None:
             self_q = q
             self_q = ckpt(self.feat_prep,self_q.transpose(-1,-2)).transpose(-1,-2)
@@ -1232,6 +1238,8 @@ class Attention(nn.Module):
         if exists(pos_emb_q):
             q = apply_rotary_pos_emb(q, pos_emb_q)
             k = apply_rotary_pos_emb(k, pos_emb_k)
+
+        tmp_k,tmp_v = k,v
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
@@ -1296,10 +1304,12 @@ class Attention(nn.Module):
 
             out_k = self.out_k(out)
             out_v = self.out_v(out)
+            """
             tmp = out[:,:,-prev_state.size(-2):]
             tmp = F.pad(tmp,(0,0,0,max(0,prev_state.size(-2)-tmp.size(-2))),value=0)
             prev_state = torch.cat((prev_state,tmp),dim=1)
             prev_state = ckpt(self.p_s_conv,prev_state)
+            """
             prev_state = ckpt(self.prev_state_attn,prev_state,out_k,out_v) if not self.vanilla_attn else ckpt(vanilla_attention,prev_state,out_k,out_v)
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape)
 

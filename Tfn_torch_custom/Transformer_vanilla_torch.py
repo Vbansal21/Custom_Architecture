@@ -171,19 +171,19 @@ full_block_repeat: bool = True
 nhead: int = 8
 dropout = (math.pi/10)
 mem_tokens: int = emsize*8
-bptt: int = (1024*14) #- mem_tokens
+bptt: int = (1024*12) #- mem_tokens
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
 mlp_layers: int = 1
 fno_layers: int = 4
-modes: int = 256
+modes: int = 4096
 width: int = 32
 causal: bool = False
 nystrom: bool = True
 attend_to_self: bool = True
 attend_to_inp: bool = True
 feature_redraw_interval: int = 1024
-prev_state_len: int = emsize*8
+prev_state_len: int = 4096
 prev_state_self_num: int = 1
 local_heads: int = 2
 local_heads: int = min(local_heads,nhead)
@@ -214,7 +214,7 @@ def replace_with_reserved_tokens(data,tok_num=1,only_first_instance=False):
     while True:
         if i>=data.size(0) - token.size(0):
             break
-        if (data[i:i+token.size(0)]==token).sum().item():
+        if ((data[i:i+token.size(0)]==token).sum().item())//token.size(0):
             data = torch.cat((data[:i],torch.full((1,),2,dtype=data.dtype,device=data.device),data[i+token.size(0):]),dim=-1)
             if only_first_instance:
                 break
@@ -321,7 +321,7 @@ def random_mask_shuffle_encoder(
     torch.cuda.empty_cache()
     return out,index_to_be_trained_on
 
-def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch_size,generator=None,prefer_source_over_generator=True,j_0 = -1,replace_all_with_possible_reserved_tokens=True):
+def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch_size,generator=None,prefer_source_over_generator=True,j_0 = -1,replace_all_with_possible_reserved_tokens=False):
     """
     if not prefer_string_over_path:
         data = None
@@ -353,19 +353,18 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
         if not replace_all_with_possible_reserved_tokens and i!=2 and i!=3:
             continue
         source = replace_with_reserved_tokens(source,tok_num=i)
-
+    data = None
     data_stream_ended = False
-    if (not prefer_source_over_generator and generator != None) or (generator!=None and j>= source.size(1)):
-        data = None
+    if ((not prefer_source_over_generator and generator != None) or (generator!=None and j>= source.size(1)) and j_0==-1):
+        
+        step = 0
         tmp = ""
         for i in generator:
             tmp += i
-            if len(tmp) >= bptt*batch_size_:
+            step += 1 
+            if len(tmp) >= bptt*batch_size_ and step >= batch_size_*(bptt/2048):
+                step = 0
                 data = data_process(tmp)
-                for i in reserved_tokens.keys():
-                    if not replace_all_with_possible_reserved_tokens and i!=2 and i!=3:
-                        continue
-                    data = replace_with_reserved_tokens(data,tok_num=i)
                 """
                 i = 0
                 while True:
@@ -383,15 +382,19 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
                     i+=1
                 """
                 if data.size(0) >= bptt*batch_size_:
+                    for i in reserved_tokens.keys():
+                        if not replace_all_with_possible_reserved_tokens and i!=2 and i!=3:
+                            continue
+                        data = replace_with_reserved_tokens(data,tok_num=i)
                     data = batchify(data,batch_size_,-1)
                     break
+    j_0 = j if (j_0 == -1 and (not prefer_source_over_generator and generator != None)) else j_0
+    j -= j_0 if j_0!=-1 else 0
+    if data!= None:
         if data.size(-1) > 0:
             source = data.contiguous()
             j=0
-        else:
-            if j_0 == -1:
-                j_0 = j
-            j = j - j_0
+            j_0 = -1
 
 
     seq_len = min(bptt, source.size(1) - j)
@@ -400,7 +403,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
     rnd_mask_together = random.randint(0,min(min(4,seq_scale_down)**2 // 2,rnd_mask))
     rnd = random.randint(0,min((seq_len-1),(bptt//8),(min(8,seq_scale_down)*2)**2))
 
-    if ((j_0 != -1) and (j+bptt) > (source.size(1) - 1)):
+    if (j+bptt) > source.size(1):
         data_stream_ended = True
 
     """
@@ -690,7 +693,7 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-log_interval = 1024
+log_interval = 16384
 epochs = 2
 
 import matplotlib.pyplot as plt
@@ -744,7 +747,7 @@ def wandb_init():
         "prev_state_self_num":prev_state_self_num,
         "mlp_layers":mlp_layers,
     },
-    resume="h07s9i1r",
+    resume=True,
     force=True,
     save_code=True
     )
@@ -870,16 +873,16 @@ def evaluate(eval_model, data_source, print_val_loss=False,generator=None):
     stride_size = bptt#-3 if progressive_generation else bptt -3
     data_stream_ended = False
     continue_training = True
-    j_0 = -1
+    j_1 = -1
     i = 0
     eval_model = eval_model.to(device)
     with torch.no_grad():
         while continue_training:
-            if data_stream_ended:
+            if data_stream_ended or ((i-j_1)>data_source.size(1)):
                 break
-            torch.cuda.empty_cache()
             try:
-                data, targets, trainable_index,data_stream_ended,j_0 = get_batch(data_source, i,generator=generator,prefer_source_over_generator=False,j_0 = j_0)
+                torch.cuda.empty_cache()
+                data, targets, trainable_index,data_stream_ended,j_1 = get_batch(data_source, i,generator=generator,prefer_source_over_generator=False,j_0 = j_1)
                 if use_deepspeed:
                     with autocast():
                         output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
@@ -1025,10 +1028,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     data_stream_ended = False
     while continue_training:
         if data_stream_ended:
-            print("\nTraining epoch finished.\n")
-            j_0 = -1
             break
-        batch +=1
         model.train()
         step_time = time.time()
         """
@@ -1149,23 +1149,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             cur_loss_d = total_loss_d / log_interval
             total_ppl /= log_interval
 
-            try:
-                _,__ = evaluate(model,processed_val_data,True)
-                if isdata():
-                    print("In-scope of if-else,  type acc.,then press enter atleast once, then CTRL-d/^D")
-                    c = sys.stdin.read()
-                    if '\x1b' in c or '^D' in c:
-                        try:
-                            inp = int(inpt(prompt="Save the model(0/1)?:\v",timeout=15))
-                            print("")
-                        except:
-                            inp = 1
-                        if inp != 0 and inp != 1:
-                            inp=1
-                        if inp:
-                            save_model(min(0,batch-1))
-            except Exception as e:
-                print("error in evaluation step\v",e)
+            _,__ = evaluate(model,processed_val_data,True)
 
             elapsed = time.time() - start_time
             if discriminator:
@@ -1281,6 +1265,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     scheduler_disc.step(step)
                 step += 1
         i+=stride_size
+        batch +=1
 
 while True:
     epoch_start_time = time.time()
@@ -1303,7 +1288,7 @@ while True:
         break
 model = best_model
 
-test_loss,test_acc = evaluate(best_model,processed_test_data,True,data_retrieve(path="./.data/the_pile/test.jsonl.zst"))
+test_loss,test_acc = evaluate(best_model,processed_test_data,False,data_retrieve(path="./.data/the_pile/test.jsonl.zst"))
 print('=' * 110)
 print('| End of training | test acc {:3.2f}% | test loss {:5.3f} | test ppl {:10.3f}'.format(test_acc*100,
     test_loss, math.exp(test_loss)))
