@@ -459,7 +459,7 @@ class NystromAttention(nn.Module):
     def forward(self, q,k,v, mask = None, return_attn = False):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
 
-        factor = math.pi
+        factor = 2
         m = min(self.num_landmarks,int((k.size(-2)**(1/factor) + q.size(-2)**(1/factor))//2))
 
         q_shape = q.shape
@@ -1076,7 +1076,7 @@ class Attention(nn.Module):
         self.heads = heads
         self.global_heads = global_heads = heads - local_heads
 
-        nystromer_landmarks = default(nystromer_landmarks,256)
+        nystromer_landmarks = default(nystromer_landmarks,512)
         if nystrom:
             self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,heads=global_heads,num_landmarks=nystromer_landmarks,context=True,transpose_heads_n_dims=True,conv_in=dim_head + additional_head_dims,conv_out=dim_head)
         else:
@@ -1123,7 +1123,7 @@ class Attention(nn.Module):
         self.attn_to_self = None
         if attend_to_self:
             self_head_dim = 1
-            self.features = 11
+            self.features = 17
             scale = 2
             self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,kernel_size=self.features,padding=self.features//2,padding_mode="replicate",groups=1)
             self.project_down = nn.Linear(inner_dim*scale, inner_dim)

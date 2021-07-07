@@ -164,8 +164,8 @@ mini_batch_size: int = 1
 ntokens: int = tokenizer.vocab_size # None
 emsize: int = 128*1
 nhid: int = emsize * 4
-nlayers: int = 4
-deberta_layers: int = 0
+nlayers: int = 1
+deberta_layers: int = 1
 repeated_deberta_layers: int = 0
 full_block_repeat: bool = True
 nhead: int = 8
@@ -659,17 +659,19 @@ def lambda_lr(step_):
     a = 5000000
     b = 1000
     c = 0.0
-    multiplier = (bptt/512)*batch_size
+    multiplier = (bptt/2048)*batch_size
 
     def sub_func(step):
         return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 
+    #return sub_func(step_)
+
     if step_<(1024*(1/lr)/(lr*multiplier**(math.pi*2/10))):
         return sub_func(step_)
     elif step_<(2048*(1/lr)/(lr*multiplier**(math.pi*2/10))):
-        return sub_func(step_) / (5 * (lr**0.125))
+        return sub_func(step_) / (3 * (lr**0.125))
     else:
-        return sub_func(step_) / (25 * (lr**0.25))
+        return sub_func(step_) / (9 * (lr**0.25))
 #    pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 #    lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
 
@@ -693,7 +695,7 @@ epoch = 0
 best_val_loss = float("inf")
 
 resume_batch = 0
-log_interval = 16384
+log_interval = 32768
 epochs = 2
 
 import matplotlib.pyplot as plt
@@ -748,7 +750,7 @@ def wandb_init():
         "mlp_layers":mlp_layers,
     },
     resume=True,
-    force=True,
+    force=False,
     save_code=True
     )
 
