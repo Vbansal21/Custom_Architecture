@@ -420,13 +420,17 @@ class NystromAttention(nn.Module):
         transpose_heads_n_dims = False,
         conv_in = None,
         conv_out = None,
+        use_mask = False,
+        talking_head_attn = True,
     ):
         super().__init__()
         self.eps = eps
         inner_dim = heads * dim_head
 
         self.num_landmarks = num_landmarks
-        self.pinv_iterations = pinv_iterations
+        self.pinv_iterations = default(pinv_iterations,heads)
+
+        self.talking_head_attn = talking_head_attn
 
         self.heads = heads
         self.scale = dim_head ** -0.5
@@ -441,6 +445,7 @@ class NystromAttention(nn.Module):
 
         self.residual = residual
         self.context = context
+        self.use_mask = bool(not contex and use_mask)
         self.transpose_heads_n_dims = transpose_heads_n_dims
         if residual:
             kernel_size = residual_conv_kernel
@@ -456,7 +461,15 @@ class NystromAttention(nn.Module):
                 groups = math.gcd(conv_out,conv_in)
                 self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = groups, bias = False)
 
-    def forward(self, q,k,v, mask = None, return_attn = False):
+        if self.talking_head_attn:
+            kernal = self.heads if not transpose_heads_n_dims else self.num_landmarks
+            kernal = (kernal//2)*2 + 1
+            self.talking_head_conv_proj_pre = nn.Conv3d(1,1,kernal_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
+            self.talking_head_conv_fft_pre = nn.Conv3d(1,1,kernal_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
+            self.talking_head_conv_proj_post = nn.Conv3d(1,1,kernal_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
+            self.talking_head_conv_pfft_post = nn.Conv3d(1,1,kernal_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
+
+    def forward(self, q,k,v, residual_attn = None, mask = None, return_attn = False):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
 
         factor = 2
@@ -515,6 +528,27 @@ class NystromAttention(nn.Module):
         sim2 = einsum(einops_eq, q_landmarks, k_landmarks)
         sim3 = einsum(einops_eq, q_landmarks, k)
 
+        if residual_attn != None:
+            sim1 = sim1 + residual_attn['sim1']
+            sim2 = sim2 + residual_attn['sim2']
+            sim3 = sim3 + residual_attn['sim3']
+
+        if self.talking_head_attn:
+           _sim1, _sim2, _sim3 = map(lambda t: ckpt(self.talking_head_conv_proj_pre,rearrange(t, 'b h m n -> b 1 h m n')), (sim1, sim2, sim3))
+           sim1, sim2, sim3 = map(lambda t: rearrange(torch.view_as_real(ckpt(torch.fft.rfftn,t)), 'b h m n r -> b 1 (h r) m n'), (sim1, sim2, sim3))
+           sim1, sim2, sim3 = map(lambda t: ckpt(self.talking_head_conv_fft_pre,t), (sim1, sim2, sim3))
+           sim1, sim2, sim3 = map(lambda t: ckpt(torch.fft.irfftn,torch.view_as_complex(rearrange(t, 'b 1 (h r) m n -> b h m n r',r=2))), (sim1, sim2, sim3))
+           sim1 = sim1 + _sim1
+           sim2 = sim2 + _sim2
+           sim3 = sim3 + _sim3
+           del(_sim1,_sim2,_sim3)
+
+        pre_softmax_attn = {}
+
+        pre_softmax_attn['sim1'] = sim1
+        pre_softmax_attn['sim2'] = sim2
+        pre_softmax_attn['sim3'] = sim3
+
         # masking
 
         if exists(mask):
@@ -523,9 +557,27 @@ class NystromAttention(nn.Module):
             sim2.masked_fill_(~(mask_landmarks[..., None] * mask_landmarks[..., None, :]), mask_value)
             sim3.masked_fill_(~(mask_landmarks[..., None] * mask[..., None, :]), mask_value)
 
+        if self.use_mask and q.size(2)==k.size(2):
+            mask = torch.triu(torch.ones((q.size(0),q.size(1),q.size(2),q.size(2)),device=q.device),diagonal=1)
+            mask_value = -torch.finfo(q.dtype).max
+            sim1.masked_fill_(reduce(mask,"b h i (j l) -> b h i j",'min',l=l).bool(), mask_value)
+            sim2.masked_fill_(reduce(mask,"b h (i k) (j l) -> b h i j",'min',k=l,l=l).bool(), mask_value)
+            sim3.masked_fill_(reduce(mask,"b h (i l) j -> b h i j",'min',l=l).bool(), mask_value)
+
         # eq (15) in the paper and aggregate values
 
         attn1, attn2, attn3 = map(lambda t: t.softmax(dim = -1), (sim1, sim2, sim3))
+
+        if self.talking_head_attn:
+           _attn1, _attn2, _attn3 = map(lambda t: ckpt(self.talking_head_conv_proj_post,rearrange(t, 'b h m n -> b 1 h m n')), (attn1, attn2, attn3))
+           attn1, attn2, attn3 = map(lambda t: rearrange(torch.view_as_real(ckpt(torch.fft.rfftn,t)), 'b h m n r -> b 1 (h r) m n'), (attn1, attn2, attn3))
+           attn1, attn2, attn3 = map(lambda t: ckpt(self.talking_head_conv_fft_post,t), (attn1, attn2, attn3))
+           attn1, attn2, attn3 = map(lambda t: ckpt(torch.fft.irfftn,torch.view_as_complex(rearrange(t, 'b 1 (h r) m n -> b h m n r',r=2))), (attn1, attn2, attn3))
+           attn1 = attn1 + _attn1
+           attn2 = attn2 + _attn2
+           attn3 = attn3 + _attn3
+           del(_attn1,_attn2,_attn3)
+
         attn2_inv = moore_penrose_iter_pinv(attn2, iters)
 
         out = (attn1 @ attn2_inv) @ (attn3 @ v)
@@ -546,11 +598,9 @@ class NystromAttention(nn.Module):
         #out = self.to_out(out)
         out = out[:, :, -n:].reshape(q_shape)
 
-        if return_attn:
-            attn = attn1 @ attn2_inv @ attn3
-            return out, attn
+        attn = attn1 @ attn2_inv @ attn3
+        return out, attn, pre_softmax_attn
 
-        return out
 
 """
 class NystromAttention(nn.Module):
@@ -1024,12 +1074,6 @@ class RotaryEmbedding(nn.Module):
         emb = torch.cat((freqs, freqs), dim=-1)
         return emb[None, :, :]
 
-def vanilla_attention(q,k,v):
-    dots = einsum('b h i d, b h j d -> b h i j', q, k) * (q.size(-1)**(-0.5))
-    attn = F.softmax(dots,dim=-1)
-    out = einsum('b h i j, b h j d -> b h i d', attn, v)
-    return out
-    
 class Attention(nn.Module):
     def __init__(
         self,
@@ -1038,7 +1082,7 @@ class Attention(nn.Module):
         heads = 16,
         dim_head = 32,
         local_heads = 0,
-        local_window_size = 64,
+        local_window_size = 512,
         nystromer_landmarks = None,
         nb_features = 1024,
         feature_redraw_interval = 1024,
@@ -1064,6 +1108,9 @@ class Attention(nn.Module):
         hop_attn = None,
         nystrom = False,
         attend_to_self = False,
+        context = True,
+        use_mask = False,
+        return_residuals = True,
     ):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
@@ -1073,16 +1120,19 @@ class Attention(nn.Module):
         #dim_head += 2*pos_scales
         additional_head_dims = 2*pos_scales if not content_rel_attn else 4*pos_scales
 
+        self.nystrom = nystrom
+        self.return_residuals = return_residuals
+
         self.heads = heads
         self.global_heads = global_heads = heads - local_heads
 
         nystromer_landmarks = default(nystromer_landmarks,512)
         if nystrom:
-            self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,heads=global_heads,num_landmarks=nystromer_landmarks,context=True,transpose_heads_n_dims=True,conv_in=dim_head + additional_head_dims,conv_out=dim_head)
+            self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,heads=global_heads,num_landmarks=nystromer_landmarks,context=context,transpose_heads_n_dims=True,conv_in=dim_head + additional_head_dims,conv_out=dim_head,use_mask=use_mask)
         else:
             self.fast_attention = FastAttention(dim_head + additional_head_dims, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
-        self.local_attn = LocalAttention(window_size = local_window_size, causal = causal, autopad = True, dropout = dropout, look_forward = int(not causal), rel_pos_emb_config = (dim_head, local_heads)) if local_heads > 0 else None
+        self.local_attn = LocalAttention(window_size = local_window_size, causal = bool(use_mask or causal), autopad = True, dropout = dropout, look_forward = int(not bool(use_mask or causal)), rel_pos_emb_config = (dim_head, local_heads)) if local_heads > 0 else None
 
         self.fixed_emb = fixed_emb
         if rotary_pos_emb:
@@ -1128,10 +1178,10 @@ class Attention(nn.Module):
             self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,kernel_size=self.features,padding=self.features//2,padding_mode="replicate",groups=1)
             self.project_down = nn.Linear(inner_dim*scale, inner_dim)
 
-            self_nystrom = True
+            self_nystrom = nystrom
 
             if self_nystrom:
-                self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=2**(int(math.log(2,math.log(2,inner_dim*scale)))) , transpose_heads_n_dims=True)
+                self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=2**(int(math.log(2,math.log(2,inner_dim*scale)))) , transpose_heads_n_dims=True,use_mask=use_mask)
             else:
                 self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
             
@@ -1174,18 +1224,6 @@ class Attention(nn.Module):
             #self.zero_1 = nn.Parameter(torch.zeros(dim_head))
             #self.norm = ScaleNorm(dim_head)
 
-
-            if rotary_pos_emb:
-                self.mem_pos_emb = None
-                self.mem_layer_pos_emb = FixedPositionalEmbedding(dim, max_seq_len) if fixed_emb else RotaryEmbedding(dim)
-            elif axial_position_emb:
-                axial_position_shape = default(axial_position_shape, (math.ceil(max_seq_len / 64), 64))
-                self.mem_pos_emb = AxialPositionalEmbedding(dim, axial_position_shape)
-                self.mem_layer_pos_emb = None
-            else:
-                self.mem_pos_emb = None
-                self.mem_layer_pos_emb = None
-            
             if pos_scales>0:
                 self.q_rel_pos_emb_mem = ConstrainedLinear(
                     self.heads*dim_head,
@@ -1206,13 +1244,17 @@ class Attention(nn.Module):
         else:
             self.prev_state = None
 
-        self.self_attend_vanilla_attn = False
-        self.vanilla_attn = False
-
-    def forward(self, x, context = None, pos_emb = None, mask = None, context_mask = None, **kwargs):
+    def forward(self, x, context = None, residual_attn = {'self':None,'attn':None,'mem':None,'prev_state':None}, mask = None, context_mask = None, **kwargs):
         b, n, d, h, gh = *x.shape, self.heads, self.global_heads
         
         cross_attend = exists(context)
+
+        residual_attn = {} if not exists(residual_attn) else residual_attn
+
+        residual_attn['self'] = None if not 'self' in residual_attn
+        residual_attn['attn'] = None if not 'attn' in residual_attn
+        residual_attn['mem'] = None if not 'mem' in residual_attn
+        residual_attn['prev_state'] = None if not 'prev_state' in residual_attn
 
         if exists(self.pos_emb):
             x = x + self.pos_emb(x)
@@ -1222,15 +1264,18 @@ class Attention(nn.Module):
 
         q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
 
-        pos_emb_q = (self.layer_pos_emb(q) if pos_emb==None else pos_emb) if exists(self.layer_pos_emb) else None
-        pos_emb_k = (self.layer_pos_emb(k) if pos_emb==None else pos_emb) if exists(self.layer_pos_emb) else None
+        pos_emb_q = self.layer_pos_emb(q) if exists(self.layer_pos_emb) else None
+        pos_emb_k = self.layer_pos_emb(k) if exists(self.layer_pos_emb) else None
 
         if self.attn_to_self != None:
             self_q = q
             self_q = ckpt(self.feat_prep,self_q.transpose(-1,-2)).transpose(-1,-2)
             org_shape = self_q.shape
             self_q = rearrange(self_q, 'b n d -> b n d 1')
-            self_q = ckpt(self.attn_to_self,self_q,self_q,self_q) if not self.self_attend_vanilla_attn else ckpt(vanilla_attention,self_q,self_q,self_q)
+            self_q = ckpt(self.attn_to_self,self_q,self_q,self_q) if not self.nystrom else ckpt(self.attn_to_self,self_q,self_q,self_q,residual_attn['self'])
+            if isinstance(self_q,tuple):
+                residual_attn['self'] = self_q[2]
+                self_q = self_q[0]
             self_q = rearrange(self_q, 'b n d 1 -> b n d').reshape(org_shape)
             q = ckpt(self.project_down,self_q)
             del(self_q)
@@ -1260,7 +1305,10 @@ class Attention(nn.Module):
                 q = ckpt(self.q_rel_pos_emb,q,pos_q)
                 k = ckpt(self.k_rel_pos_emb,k,pos_k)
 
-            out = ckpt(self.fast_attention,q, k, v) if not self.vanilla_attn else ckpt(vanilla_attention,q,k,v)
+            out = ckpt(self.fast_attention,q, k, v) if not self.nystrom else ckpt(self.fast_attention,q, k, v,residual_attn['attn'])
+            if isinstance(out,tuple):
+                residual_attn['attn'] = out[2]
+                out = out[0]
             attn_outs.append(out)
 
         if not empty(lq):
@@ -1284,10 +1332,13 @@ class Attention(nn.Module):
             mem_k = self.mem_lin_k(mem_k)
             mem_v = self.mem_lin_v(mem_v) 
 
-            if exists(self.mem_pos_emb):
-                out = out + self.mem_pos_emb(out)
+            if exists(self.pos_emb):
+                mem_k = mem_k + self.pos_emb(mem_k.reshape(b,-1,d)).reshape(b,h,-1,d//h)
+
+            if exists(self.layer_pos_emb):
+                mem_pos_emb_mem_k = self.layer_pos_emb(mem_k.reshape(b,-1,d))
             else:
-                mem_pos_emb_mem_k = self.layer_pos_emb(mem_k.reshape(b,-1,d)) if exists(self.mem_layer_pos_emb) else None
+                mem_pos_emb_mem_k = None
 
             if exists(mem_pos_emb_mem_k):
                 mem_k = apply_rotary_pos_emb(mem_k.reshape(b,-1,d), mem_pos_emb_mem_k).reshape(b,h,-1,d//h)
@@ -1299,7 +1350,10 @@ class Attention(nn.Module):
                 out = ckpt(self.q_rel_pos_emb_mem,out,mem_pos_q)
                 mem_k = ckpt(self.k_rel_pos_emb_mem,mem_k,mem_pos_k)
 
-            out = ckpt(self.mem_attn,out,mem_k,mem_v) if not self.vanilla_attn else ckpt(vanilla_attention,out,mem_k,mem_v)
+            out = ckpt(self.mem_attn,out,mem_k,mem_v) if not self.nystrom else ckpt(self.mem_attn,out,mem_k,mem_v,residual_attn['mem'])
+            if isinstance(out,tuple):
+                residual_attn['mem'] = out[2]
+                out = out[0]
             out = ckpt(self.out_mem,out)
 
             out_k = self.out_k(out)
@@ -1310,14 +1364,22 @@ class Attention(nn.Module):
             prev_state = torch.cat((prev_state,tmp),dim=1)
             prev_state = ckpt(self.p_s_conv,prev_state)
             """
-            prev_state = ckpt(self.prev_state_attn,prev_state,out_k,out_v) if not self.vanilla_attn else ckpt(vanilla_attention,prev_state,out_k,out_v)
+            prev_state = ckpt(self.prev_state_attn,prev_state,out_k,out_v) if not self.nystrom else ckpt(self.prev_state_attn,prev_state,out_k,out_v,residual_attn['prev_state'])
+            if isinstance(prev_state,tuple):
+                residual_attn['prev_state'] = prev_state[2]
+                prev_state = prev_state[0]
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape)
 
 
         out = rearrange(out, 'b h n d -> b n (h d)')
         out =  self.to_out(out)
         torch.cuda.empty_cache()
-        return self.dropout(out)
+        out = self.dropout(out)
+        
+        if self.return_residuals:
+            return out, residual_attn
+        else:
+            return out
 
 class SelfAttention(Attention):
     def forward(self, *args, context = None, **kwargs):

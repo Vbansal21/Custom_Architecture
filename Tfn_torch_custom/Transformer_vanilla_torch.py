@@ -661,6 +661,8 @@ def lambda_lr(step_):
     c = 0.0
     multiplier = (bptt/2048)*batch_size
 
+    scale = 2
+
     def sub_func(step):
         return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 
@@ -669,9 +671,9 @@ def lambda_lr(step_):
     if step_<(1024*(1/lr)/(lr*multiplier**(math.pi*2/10))):
         return sub_func(step_)
     elif step_<(2048*(1/lr)/(lr*multiplier**(math.pi*2/10))):
-        return sub_func(step_) / (3 * (lr**0.125))
+        return sub_func(step_) / (scale * (lr**0.125))
     else:
-        return sub_func(step_) / (9 * (lr**0.25))
+        return sub_func(step_) / (scale**2 * (lr**0.25))
 #    pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 #    lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
 

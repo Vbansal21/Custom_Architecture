@@ -26,7 +26,7 @@ from mogrifier import Mogrifier
 from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block, GLU
 from .product_key_memory import PKM
 from .hopfield_modules import HopfieldLayer
-from .performer_pytorch import Attention,ProjectionUpdater,find_modules
+from .attention_layer_s import Attention,ProjectionUpdater,find_modules
 from .conformer import ConformerConvModule
 
 from .fourier_1d import FNO1d
@@ -150,14 +150,24 @@ class GRUGating(nn.Module):
         if y==None:
             y = x
 
+        args = None
+
         if self.fn != None:
             if self.post_norm:
                 y_ = ckpt(self.fn,y,*args)
+
+                if isinstance(y_,tuple):
+                    args = y_[1:]
+                    y_ = y_[0]
 
                 y = self.norm(y_) if self.norm != None else y_
             else:
                 inp = self.norm(y) if self.norm != None else y
                 y = ckpt(self.fn,inp,*args)
+                if isinstance(y,tuple):
+                    args = y[1:]
+                    y = y[0]
+
         else:
             y = self.norm(y) if self.norm!=None else y
 
@@ -168,8 +178,11 @@ class GRUGating(nn.Module):
             y.reshape(-1, dim),
             x.reshape(-1, dim)
         )
-
-        return gated_output.reshape(shape)
+        out = gated_output.reshape(shape)
+        if args != None:
+            return out,args
+        else:
+            return out
 
 class ET_ffd(Module):
 
@@ -256,6 +269,8 @@ class TransformerBlock(Module):
                      nystrom=False,
                      attend_to_self=True,
                      mlp_layers=1,
+                     use_mask=True,
+                     context=True,
                 ):
         super(TransformerBlock, self).__init__()
         
@@ -324,7 +339,9 @@ class TransformerBlock(Module):
                                                     fixed_emb=fixed_emb,
                                                     causal=causal,
                                                     nystrom=nystrom,
-                                                    attend_to_self=attend_to_self
+                                                    attend_to_self=attend_to_self,
+                                                    context=context,
+                                                    use_mask=use_mask,
                                                 ),
                                 ffd=copy.deepcopy(self.feed_forward),
                                 )
@@ -346,7 +363,9 @@ class TransformerBlock(Module):
                                                                             fixed_emb=fixed_emb,
                                                                             causal=causal,
                                                                             nystrom=nystrom,
-                                                                            attend_to_self=False
+                                                                            attend_to_self=False,
+                                                                            context=False,
+                                                                            use_mask=use_mask,
                                                                         ),
                                                         ffd=copy.deepcopy(self.feed_forward),
                                                         ),norm=False) if encoder_n_decoder else Identity()
@@ -365,7 +384,9 @@ class TransformerBlock(Module):
                                                                             fixed_emb=fixed_emb,
                                                                             causal=causal,
                                                                             nystrom=nystrom,
-                                                                            attend_to_self=False
+                                                                            attend_to_self=False,
+                                                                            context=False,
+                                                                            use_mask=use_mask,
                                                                         ),
                                                         ffd=copy.deepcopy(self.feed_forward),
                                                         ),norm=False) if encoder_n_decoder else Identity()
@@ -381,7 +402,9 @@ class TransformerBlock(Module):
                                         fixed_emb=fixed_emb,
                                         causal=causal,
                                         nystrom=nystrom,
-                                        attend_to_self=attend_to_self),
+                                        attend_to_self=attend_to_self,
+                                        context=False,
+                                        use_mask=use_mask,),
                 'self_2':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
@@ -392,7 +415,9 @@ class TransformerBlock(Module):
                                         fixed_emb=fixed_emb,
                                         causal=causal,
                                         nystrom=nystrom,
-                                        attend_to_self=False),
+                                        attend_to_self=False,
+                                        context=False,
+                                        use_mask=use_mask,),
                 'cross_1':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
@@ -400,7 +425,10 @@ class TransformerBlock(Module):
                                         hop_attn=copy.deepcopy(hop_attn),
                                         rotary_pos_emb=rotary_pos_emb,
                                         nystrom=nystrom,
-                                        attend_to_self=False),
+                                        attend_to_self=False,
+                                        context=context,
+                                        use_mask=bool(not context and use_mask),
+                                        ),
                 'cross_2':Attention(d_model,
                                         heads=nhead,
                                         dim_head=d_model//nhead,
@@ -408,7 +436,10 @@ class TransformerBlock(Module):
                                         hop_attn=copy.deepcopy(hop_attn),
                                         nystrom=nystrom,
                                         rotary_pos_emb=rotary_pos_emb,
-                                        attend_to_self=False)
+                                        attend_to_self=False,
+                                        context=context,
+                                        use_mask=bool(not context and use_mask),
+                                        )
             }
 
             attn_block = ET_Decoder_Block(d_model,
@@ -424,12 +455,22 @@ class TransformerBlock(Module):
         self.decoder = decoder
 
 
-    def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
+    def forward(self, src: Tensor,context: Optional[Tensor] = None,residual_attn: Optional[dict] = None) -> Tensor:
 
         output = src
         #output = self.norm1(src)
         #output = Positional_Encoding(output)
 
+        if residual_attn==None:
+            residual_attn = {'self_1':None,'self_2':None,'cross_1':None,'cross_2':None,'self_inp':None,'ctxt_inp':None}
+        else:
+            residual_attn['self_1'] = None if not 'self_1' in residual_attn
+            residual_attn['self_2'] = None if not 'self_2' in residual_attn
+            residual_attn['cross_1'] = None if not 'cross_1' in residual_attn
+            residual_attn['cross_2'] = None if not 'cross_2' in residual_attn
+            residual_attn['self_inp'] = None if not 'self_inp' in residual_attn
+            residual_attn['ctxt_inp'] = None if not 'ctxt_inp' in residual_attn
+        
         output = ckpt(self.feed_forward,output)
 
         if self.decoder:
@@ -438,10 +479,21 @@ class TransformerBlock(Module):
             #context = Positional_Encoding(context)
             context = ckpt(self.ctxt_ffd,context)
 
-            output = ckpt(self.self_inp_enc,output)
-            context = ckpt(self.self_ctxt_enc,context)
+            output = ckpt(self.self_inp_enc,output,residual_attn['self_inp'])
+            if isinstance(output,tuple):
+                residual_attn['self_inp'] = output[1]
+                output = output[0]context
 
-        output = ckpt(self.attn,output,output,context)
+            context = ckpt(self.self_ctxt_enc,context,residual_attn['ctxt_inp'])
+            if isinstance(context,tuple):
+                residual_attn['ctxt_inp'] = context[1]
+                context = context[0]
+            
+
+        output = ckpt(self.attn,output,output,context,residual_attn)
+        if isinstance(output,tuple):
+            residual_attn = output[1]
+            output = output[0]
         output = self.dropout1(output)
 
         output = ckpt(self.mlp,output)
@@ -450,7 +502,10 @@ class TransformerBlock(Module):
 
         output = self.to_out(output)
 
-        return output
+        if residual_attn['self_1'] != None:
+            return output, residual_attn
+        else:
+            return output
 
 class TransformerModule(ModuleList):
 
@@ -492,36 +547,37 @@ class TransformerModule(ModuleList):
 
         if num_layers != 0:
             if not enable_encoder:
-                block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
-                self.decoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
+                block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False)
+                self.decoder_self = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
             else:
-                block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
+                block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False)
                 self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
                 self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
                 block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers)
                 self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         else:
-            self.decoder = nn.ModuleList([Identity()])
             self.encoder = nn.ModuleList([Identity()])
             self.decoder_self = nn.ModuleList([Identity()])
             self.decoder_cross = nn.ModuleList([Identity()])
             
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
-        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         self.deb_attn_0 = Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom) if deberta_layers else None
+                                            nystrom=nystrom,
+                                            return_residuals=False) if deberta_layers else None
         
         self.attend_to_inp = Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom) if attend_to_inp else None
+                                            nystrom=nystrom,
+                                            return_residuals=False) if attend_to_inp else None
 
         self.prev_state_exists = False
 
@@ -537,19 +593,22 @@ class TransformerModule(ModuleList):
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
                                                 rotary_pos_emb=True,
-                                                nystrom=nystrom)
+                                                nystrom=nystrom,
+                                                return_residuals=False)
 
             self.prev_state_attend = Attention(d_model,
                                                 heads=nhead,
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
                                                 rotary_pos_emb=True,
-                                                nystrom=nystrom)
+                                                nystrom=nystrom,
+                                                return_residuals=False)
 
         self.d_model = d_model
         self.num_layers = num_layers
         self.num_deberta_layers = deberta_layers
         self.prev_state_self_num = prev_state_self_num
+        self.residual_attn = {'decoder_self':None,'decoder_cross':None,'encoder':None,'deberta':None}
         
     def pretrained_layer_multiplier(self,num=1,deb_num=1):
         self.num_layers *= num
@@ -565,14 +624,14 @@ class TransformerModule(ModuleList):
             self.decoder_cross = nn.ModuleList(multiple_of_layers(self.decoder_cross,num))
             self.deberta_layers = nn.ModuleList(multiple_of_layers(self.deberta_layers,deb_num))
         else:
-            self.decoder = nn.ModuleList(multiple_of_layers(self.decoder,num))
+            self.decoder_self = nn.ModuleList(multiple_of_layers(self.decoder_self,num))
             self.deberta_layers = nn.ModuleList(multiple_of_layers(self.deberta_layers,deb_num))
             
     def convert_decoder_only_to_encoder_decoder(self):
         #Deprecated
         self.enable_encoder = True
-        self.encoder = copy.deepcopy(self.decoder)
-        self.decoder_self = self.decoder
+        self.encoder = copy.deepcopy(self.decoder_self)
+        self.decoder_self = self.decoder_self
         if deberta_layers != None:
             self.decoder_cross = nn.ModuleList(copy.deepcopy([i for j,i in enumerate(self.deberta_layers) if j < self.num_layers]))
             for i in self.decoder_cross:
@@ -587,9 +646,17 @@ class TransformerModule(ModuleList):
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(self.num_layers-1)]) if self.num_layers != 0 else Identity()
             
 
-    def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
+    def forward(self, src: Tensor,context: Optional[Tensor] = None,residual_attn: Optional[dict] = None) -> Tensor:
         output = src
         ctxt = context
+
+        if residual_attn==None:
+            residual_attn = self.residual_attn
+        else:
+            residual_attn['decoder_self'] = None if not 'decoder_self' in residual_attn
+            residual_attn['decoder_cross'] = None if not 'decoder_cross' in residual_attn
+            residual_attn['encoder'] = None if not 'encoder' in residual_attn
+            residual_attn['deberta'] = None if not 'deberta' in residual_attn
 
         if self.prev_state_exists:
             prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
@@ -601,14 +668,27 @@ class TransformerModule(ModuleList):
                 prev_state = ckpt(self.prev_state_update,prev_state)
             
         if self.enable_encoder:
+
             for enc in self.encoder:
-                ctxt = ckpt(enc,ctxt)
+                ctxt = ckpt(enc,ctxt,residual_attn['encoder'])
+                if isinstance(ctxt,tuple):
+                    residual_attn['encoder'] = ctxt[1]
+                    ctxt = ctxt[0]
             for i in range(self.num_layers):
-                output = ckpt(self.decoder_self[i],output)
-                output = ckpt(self.decoder_cross[i],output,ctxt)
+                output = ckpt(self.decoder_self[i],output,residual_attn['decoder_self'])
+                if isinstance(output,tuple):
+                    residual_attn['decoder_self'] = output[1]
+                    output = output[0]
+                output = ckpt(self.decoder_cross[i],output,ctxt,residual_attn['decoder_cross'])
+                if isinstance(output,tuple):
+                    residual_attn['decoder_cross'] = output[1]
+                    output = output[0]
         else:
-            for dec in self.decoder:
-                output = ckpt(dec,output)
+            for dec in self.decoder_self:
+                output = ckpt(dec,output['decoder_self'])
+                if isinstance(output,tuple):
+                    residual_attn['decoder_self'] = output[1]
+                    output = output[0]
 
         if self.prev_state_exists:
             output = ckpt(self.prev_state_attend,output,prev_state)
@@ -619,14 +699,20 @@ class TransformerModule(ModuleList):
             if self.full_block_repeat:
                 for _ in range(self.repeated_deberta_layers+1):
                     for enc in self.deberta_layers:
-                        out = ckpt(enc,out,output)
+                        out = ckpt(enc,out,output,residual_attn['deberta'])
+                        if isinstance(out,tuple):
+                            residual_attn['deberta'] = out[1]
+                            out = out[0]
                 else:
                     if self.deberta_layers!=None:
                         output = out
             else:
                 for enc in self.deberta_layers:
                     for _ in range(self.repeated_deberta_layers+1):
-                        out = ckpt(enc,out,output)
+                        out = ckpt(enc,out,output,residual_attn['deberta'])
+                        if isinstance(out,tuple):
+                            residual_attn['deberta'] = out[1]
+                            out = out[0]
                 else:
                     if self.deberta_layers!=None:
                         output = out
@@ -643,6 +729,8 @@ class TransformerModule(ModuleList):
 
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
             
+        self.residual_attn = residual_attn
+
         if context != None:
             return output,ctxt
         else:
@@ -1162,23 +1250,18 @@ class TransformerModel(Module):
         return outputs,losses,loss,acc,(step_start_time-time.time()),mem_,mem_ctxt_
         
     def get_prev_state(self) -> List[Tensor]:
-        prev_states = {0:self.transformer_block.prev_state}
+        prev_states = {0:self.transformer_block.prev_state,1:self.transformer_block.residual_attn}
         modules = find_modules(self.transformer_block,Attention)
         for i,attn in enumerate(modules):
-            prev_states[i+1] = attn.prev_state
+            prev_states[i+2] = attn.prev_state
         return prev_states
 
     def set_prev_state(self,prev_state:List[Tensor]):
         self.transformer_block.prev_state = prev_state[0]
+        self.transformer_block.residual_attn = prev_state[1]
         modules = find_modules(self.transformer_block,Attention)
         for i,attn in enumerate(modules):
-            attn.prev_state = prev_states[i+1]
-
-    def toggle_vanilla_attn_mechanism(self,main_attn=False,self_attn=False):
-        modules = find_modules(self.transformer_block,Attention)
-        for attn in modules:
-            attn.self_attend_vanilla_attn = self_attn
-            attn.vanilla_attn = main_attn
+            attn.prev_state = prev_states[i+2]
 
     #@autocast()
     def forward(self,
