@@ -51,6 +51,12 @@ def ckpt(f,*args,checkpointed = checkpointed):
     else:
         return f(*args)
         
+def exists(val):
+    return val is not None
+
+def default(val, d):
+    return val if exists(val) else d
+
 def _get_activation_fn(activation):
     if activation == "relu":
         return nn.ReLU()
@@ -58,6 +64,8 @@ def _get_activation_fn(activation):
         return nn.GELU()
     elif activation == "silu":
         return nn.SiLU()
+    elif activation == "sigmoid":
+        return nn.Sigmoid()
 
     raise RuntimeError("activation should be relu/gelu/silu, not {}".format(activation))
 
@@ -150,23 +158,14 @@ class GRUGating(nn.Module):
         if y==None:
             y = x
 
-        args = None
-
         if self.fn != None:
             if self.post_norm:
                 y_ = ckpt(self.fn,y,*args)
-
-                if isinstance(y_,tuple):
-                    args = y_[1:]
-                    y_ = y_[0]
 
                 y = self.norm(y_) if self.norm != None else y_
             else:
                 inp = self.norm(y) if self.norm != None else y
                 y = ckpt(self.fn,inp,*args)
-                if isinstance(y,tuple):
-                    args = y[1:]
-                    y = y[0]
 
         else:
             y = self.norm(y) if self.norm!=None else y
@@ -179,14 +178,12 @@ class GRUGating(nn.Module):
             x.reshape(-1, dim)
         )
         out = gated_output.reshape(shape)
-        if args != None:
-            return out,args
-        else:
-            return out
+
+        return out
 
 class ET_ffd(Module):
 
-    def __init__(self,dim,activation="silu",layers=1,kernal_size=7,mult=4,fn=None,sequential=False):
+    def __init__(self,dim,activation="sigmoid",layers=1,kernal_size=3,mult=4,fn=None,sequential=False):
         super(ET_ffd,self).__init__()
         self.l_1 = nn.Sequential(
             nn.Conv1d(dim,dim*mult,kernal_size,1,padding=kernal_size//2,groups=1),
@@ -455,45 +452,26 @@ class TransformerBlock(Module):
         self.decoder = decoder
 
 
-    def forward(self, src: Tensor,context: Optional[Tensor] = None,residual_attn: Optional[dict] = None) -> Tensor:
+    def forward(self, src: Tensor,context: Optional[Tensor] = None, src_mask: Tensor = None) -> Tensor:
 
         output = src
         #output = self.norm1(src)
         #output = Positional_Encoding(output)
 
-        if residual_attn==None:
-            residual_attn = {'self_1':None,'self_2':None,'cross_1':None,'cross_2':None,'self_inp':None,'ctxt_inp':None}
-        else:
-            residual_attn['self_1'] = None if not 'self_1' in residual_attn
-            residual_attn['self_2'] = None if not 'self_2' in residual_attn
-            residual_attn['cross_1'] = None if not 'cross_1' in residual_attn
-            residual_attn['cross_2'] = None if not 'cross_2' in residual_attn
-            residual_attn['self_inp'] = None if not 'self_inp' in residual_attn
-            residual_attn['ctxt_inp'] = None if not 'ctxt_inp' in residual_attn
-        
         output = ckpt(self.feed_forward,output)
 
         if self.decoder:
+            ctxt_mask = src_mask if context is None else None
             context = output if context == None else context
             #context = self.norm2(context)
             #context = Positional_Encoding(context)
             context = ckpt(self.ctxt_ffd,context)
 
-            output = ckpt(self.self_inp_enc,output,residual_attn['self_inp'])
-            if isinstance(output,tuple):
-                residual_attn['self_inp'] = output[1]
-                output = output[0]context
+            output = ckpt(self.self_inp_enc,output,None,src_mask)
+            context = ckpt(self.self_ctxt_enc,context,None,ctxt_mask)
 
-            context = ckpt(self.self_ctxt_enc,context,residual_attn['ctxt_inp'])
-            if isinstance(context,tuple):
-                residual_attn['ctxt_inp'] = context[1]
-                context = context[0]
-            
+        output = ckpt(self.attn,output,output,context,src_mask)
 
-        output = ckpt(self.attn,output,output,context,residual_attn)
-        if isinstance(output,tuple):
-            residual_attn = output[1]
-            output = output[0]
         output = self.dropout1(output)
 
         output = ckpt(self.mlp,output)
@@ -502,10 +480,7 @@ class TransformerBlock(Module):
 
         output = self.to_out(output)
 
-        if residual_attn['self_1'] != None:
-            return output, residual_attn
-        else:
-            return output
+        return output
 
 class TransformerModule(ModuleList):
 
@@ -568,16 +543,14 @@ class TransformerModule(ModuleList):
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom,
-                                            return_residuals=False) if deberta_layers else None
+                                            nystrom=nystrom,) if deberta_layers else None
         
         self.attend_to_inp = Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom,
-                                            return_residuals=False) if attend_to_inp else None
+                                            nystrom=nystrom,) if attend_to_inp else None
 
         self.prev_state_exists = False
 
@@ -593,22 +566,19 @@ class TransformerModule(ModuleList):
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
                                                 rotary_pos_emb=True,
-                                                nystrom=nystrom,
-                                                return_residuals=False)
+                                                nystrom=nystrom,)
 
             self.prev_state_attend = Attention(d_model,
                                                 heads=nhead,
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
                                                 rotary_pos_emb=True,
-                                                nystrom=nystrom,
-                                                return_residuals=False)
+                                                nystrom=nystrom,)
 
         self.d_model = d_model
         self.num_layers = num_layers
         self.num_deberta_layers = deberta_layers
         self.prev_state_self_num = prev_state_self_num
-        self.residual_attn = {'decoder_self':None,'decoder_cross':None,'encoder':None,'deberta':None}
         
     def pretrained_layer_multiplier(self,num=1,deb_num=1):
         self.num_layers *= num
@@ -646,17 +616,11 @@ class TransformerModule(ModuleList):
             self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(self.num_layers-1)]) if self.num_layers != 0 else Identity()
             
 
-    def forward(self, src: Tensor,context: Optional[Tensor] = None,residual_attn: Optional[dict] = None) -> Tensor:
+    def forward(self, src: Tensor,context: Optional[Tensor] = None) -> Tensor:
         output = src
         ctxt = context
 
-        if residual_attn==None:
-            residual_attn = self.residual_attn
-        else:
-            residual_attn['decoder_self'] = None if not 'decoder_self' in residual_attn
-            residual_attn['decoder_cross'] = None if not 'decoder_cross' in residual_attn
-            residual_attn['encoder'] = None if not 'encoder' in residual_attn
-            residual_attn['deberta'] = None if not 'deberta' in residual_attn
+        src_mask = torch.triu(torch.ones((src.size(2),src.size(2))),diagonal=1)
 
         if self.prev_state_exists:
             prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
@@ -670,25 +634,13 @@ class TransformerModule(ModuleList):
         if self.enable_encoder:
 
             for enc in self.encoder:
-                ctxt = ckpt(enc,ctxt,residual_attn['encoder'])
-                if isinstance(ctxt,tuple):
-                    residual_attn['encoder'] = ctxt[1]
-                    ctxt = ctxt[0]
+                ctxt = ckpt(enc,ctxt)
             for i in range(self.num_layers):
-                output = ckpt(self.decoder_self[i],output,residual_attn['decoder_self'])
-                if isinstance(output,tuple):
-                    residual_attn['decoder_self'] = output[1]
-                    output = output[0]
-                output = ckpt(self.decoder_cross[i],output,ctxt,residual_attn['decoder_cross'])
-                if isinstance(output,tuple):
-                    residual_attn['decoder_cross'] = output[1]
-                    output = output[0]
+                output = ckpt(self.decoder_self[i],output,None,src_mask)
+                output = ckpt(self.decoder_cross[i],output,ctxt,src_mask)
         else:
             for dec in self.decoder_self:
-                output = ckpt(dec,output['decoder_self'])
-                if isinstance(output,tuple):
-                    residual_attn['decoder_self'] = output[1]
-                    output = output[0]
+                output = ckpt(dec,output)
 
         if self.prev_state_exists:
             output = ckpt(self.prev_state_attend,output,prev_state)
@@ -699,20 +651,14 @@ class TransformerModule(ModuleList):
             if self.full_block_repeat:
                 for _ in range(self.repeated_deberta_layers+1):
                     for enc in self.deberta_layers:
-                        out = ckpt(enc,out,output,residual_attn['deberta'])
-                        if isinstance(out,tuple):
-                            residual_attn['deberta'] = out[1]
-                            out = out[0]
+                        out = ckpt(enc,out,output,src_mask)
                 else:
                     if self.deberta_layers!=None:
                         output = out
             else:
                 for enc in self.deberta_layers:
                     for _ in range(self.repeated_deberta_layers+1):
-                        out = ckpt(enc,out,output,residual_attn['deberta'])
-                        if isinstance(out,tuple):
-                            residual_attn['deberta'] = out[1]
-                            out = out[0]
+                        out = ckpt(enc,out,output,src_mask)
                 else:
                     if self.deberta_layers!=None:
                         output = out
@@ -728,8 +674,6 @@ class TransformerModule(ModuleList):
                 prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
 
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
-            
-        self.residual_attn = residual_attn
 
         if context != None:
             return output,ctxt
@@ -829,59 +773,26 @@ class TransformerModel(Module):
             elif type(mem_token) == Tensor:
                 assert mem_token.size(-1)==ninp
                 self.mem = nn.Parameter(mem_token)
-
-        
-        if encoder_decoder:
-            self.ffd3 = copy.deepcopy(self.ffd1)
-
-            context_mem_token = mem_token if context_mem_token == None else context_mem_token
-            self.context_mem_exist = True if context_mem_token else False
-            if self.mem_exist:
-                if type(context_mem_token)==int:
-                    self.context_mem = nn.Parameter(torch.randn(context_mem_token,ninp))
-                elif type(context_mem_token) == Tensor:
-                    assert context_mem_token.size(-1)==ninp
-                    self.context_mem = nn.Parameter(context_mem_token)
-
-        self.alt_mem = None
-        self.alt_mem_with_primary_mem = False
-
+        else:
+            self.mem = None
+            
         self.seq_scale_down = seq_scale_down
         attn_len = ((self.seq_scale_down // 2)*2 + 1)*3
 
         self.scale_down_conv = nn.Sequential(
             nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=1),
-            nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=1),
+            nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,padding=self.seq_scale_down*3 - 1,groups=1),
             nn.Conv1d(ninp,ninp,3,padding=1),
         )
 
         modes = nhead if modes == None else modes
         width = nhead if width == None else width
 
-        self.scale_down_fno = FNO1d(modes,
-                                        width,
-                                        inp_dim=ninp,
-                                        out_dim=ninp,
-                                        ffd_dim=nhid,
-                                        num_layers=fno_layers
-                                    )
-
-        self.padding_for_conv_scale_l = nn.Parameter(torch.randn((ninp,(self.seq_scale_down)-1)))
-        self.padding_for_conv_scale_r = nn.Parameter(torch.randn((ninp,self.seq_scale_down*2)))
-
         self.scale_up_conv = nn.Sequential(
             nn.Conv1d(ninp,ninp,3,padding=1),
             nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=1),
             nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=1),
         )
-
-        self.scale_up_fno = FNO1d(modes,
-                                        width,
-                                        inp_dim=ninp,
-                                        out_dim=ninp,
-                                        ffd_dim=nhid,
-                                        num_layers=fno_layers
-                                    )
 
         self.device = device
 
@@ -1250,18 +1161,17 @@ class TransformerModel(Module):
         return outputs,losses,loss,acc,(step_start_time-time.time()),mem_,mem_ctxt_
         
     def get_prev_state(self) -> List[Tensor]:
-        prev_states = {0:self.transformer_block.prev_state,1:self.transformer_block.residual_attn}
+        prev_states = {0:self.transformer_block.prev_state}
         modules = find_modules(self.transformer_block,Attention)
         for i,attn in enumerate(modules):
-            prev_states[i+2] = attn.prev_state
+            prev_states[i+1] = attn.prev_state
         return prev_states
 
     def set_prev_state(self,prev_state:List[Tensor]):
         self.transformer_block.prev_state = prev_state[0]
-        self.transformer_block.residual_attn = prev_state[1]
         modules = find_modules(self.transformer_block,Attention)
         for i,attn in enumerate(modules):
-            attn.prev_state = prev_states[i+2]
+            attn.prev_state = prev_states[i+1]
 
     #@autocast()
     def forward(self,
@@ -1295,11 +1205,8 @@ class TransformerModel(Module):
             tmp = self.prev_states.pop(0)
             del(tmp)
 
-        (b,s_) = src.shape
+        (b,s) = src.shape
         
-        if context != None:
-            s_c_ = src.size(1)
-
         if self.auto_check_redraw:
             self.proj_updater.redraw_projections()
 
@@ -1310,89 +1217,66 @@ class TransformerModel(Module):
         if self.encoder_decoder:
             context = self.embedding_encoder(context)
             context = context * math.sqrt(self.ninp)
-            context = ckpt(self.ffd3,context)
+            context = ckpt(self.ffd1,context)
 
-        if mem != None:
+        if seq_scale_down:
+            src = ckpt(self.scale_down_conv,src.transpose(-1,-2)).transpose(-1,-2)
+            if self.encoder_decoder:
+                context = ckpt(self.scale_down_conv,context.transpose(-1,-2)).transpose(-1,-2)
+                
+        mem = default(mem,self.mem)
+        if exists(mem):
             if (mem.size(-1) == src.size(-1) and len(mem.shape) == 2): 
                 src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-        elif self.mem_exist:
-            src = torch.cat((repeat(self.mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
-
         if self.encoder_decoder:
-            if context_mem != None:
+            context_mem = default(context_mem,self.mem)
+            if exists(context_mem):
                 if (context_mem.size(-1) == context.size(-1) and len(context_mem.shape) == 2): 
                     context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
-            elif self.context_mem_exist:
-                context = torch.cat((repeat(self.context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
 
 
-        s = src.size(1)
-        
-        if context != None:
-            s_c = context.size(1)
-
-        if seq_scale_down:
-            src = ckpt(self.scale_down_fno,src).transpose(-1,-2)
-            src = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=src.size(0)).to(self.device),src,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=src.size(0)).to(self.device)),dim=2)
-            src = ckpt(self.scale_down_conv,src).transpose(-1,-2)
-
-            if self.encoder_decoder:
-                context = ckpt(self.scale_down_fno,context).transpose(-1,-2)
-                context = torch.cat((repeat(self.padding_for_conv_scale_l,'d n -> b d n',b=context.size(0)).to(self.device),context,repeat(self.padding_for_conv_scale_r,'d n -> b d n',b=context.size(0)).to(self.device)),dim=2)
-                context = ckpt(self.scale_down_conv,context).transpose(-1,-2)
-                
-
-        output = Positional_Encoding(src)    
-        output = output.contiguous()
+        output = Positional_Encoding(src).contiguous()
         if self.encoder_decoder:
-            context = Positional_Encoding(context)
-            context = context.contiguous()
+            context = Positional_Encoding(context).contiguous()
 
-        if context == None:
-            output = ckpt(self.transformer_block,output)
-        else:
-            output,context = ckpt(self.transformer_block,output,context)
+        output = ckpt(self.transformer_block,output,context)
+        if isinstance(output,tuple):
+            context = output[1]
+            output = output[0]
 
-        if seq_scale_down:
-            output = ckpt(self.scale_up_fno,output)
-            output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
-            output = output[:,:s]
-
-            if context != None:
-                context = ckpt(self.scale_up_fno,context)
-                context = ckpt(self.scale_up_conv,context.transpose(-1,-2)).transpose(-1,-2)
-                context = context[:,:s_c]
-                
-        if type(mem) != None or self.mem_exist:
-            mem = output[:,:output.size(1)-s_]
+        if exists(mem):
+            mem = output[:,:mem.size(0)]
             mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.mem.shape) / b
             mem = mem.detach()
-            output = output[:,output.size(1)-s_:]
+            output = output[:,mem.size(0):]
 
-        if context != None:
-            if type(context_mem) != None or self.context_mem_exist:
-                context_mem = context[:,:context.size(1)-s_c_]
+        if exists(context):
+            if exists(context_mem):
+                context_mem = context[:,:context_mem.size(0)]
                 context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.context_mem.shape) / b
                 context_mem = context_mem.detach()
-                context = context[:,context.size(1)-s_c_:]
+                context = context[:,context_mem.size(0):]
         
-        
+        if seq_scale_down:
+            output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
+            output = output[:,:-(self.seq_scale_down*3 -1)]
+
+            if context != None:
+                context = ckpt(self.scale_up_conv,context.transpose(-1,-2)).transpose(-1,-2)
+                context = context[:,:-(self.seq_scale_down*3 -1)]
+                
         output = ckpt(self.ffd2,output)
         out = ckpt(self.decoder,output)
         
         self.time_[0] += time.time()-start_time
         self.time_[1] += 1
 
-        if not return_logits:
-            if return_mem:
-                return out, mem, context_mem
-            else:
-                return out
+        out = out if not return_logits else [out,output]
+
+        if return_mem:
+            return out, mem, context_mem
         else:
-            if return_mem:
-                return [out, output], mem, context_mem
-            else:
-                return [out, output]
+            return out
 
 
 

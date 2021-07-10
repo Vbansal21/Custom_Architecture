@@ -44,14 +44,16 @@ class SeparableConv1D(nn.Module):
     """ Input: (batch_size, in_channel, length)
         Output: (batch_size, out_channel, length)
     """
-    def __init__(self, in_channel, inner_channels, out_channel, kernel_size=1, padding=0):
+    def __init__(self, in_channels, inner_channels, out_channel, kernel_size=1, padding=0):
         super().__init__()
-        self.deep_wise = nn.Conv1d(in_channel, inner_channels, kernel_size=kernel_size, padding=padding, groups=math.gcd(in_channel,inner_channels))
-        self.point_wise = nn.Conv1d(inner_channels, out_channel, kernel_size=1,groups=1)
+        self.pre_point_wise = nn.Conv1d(in_channels, inner_channels, kernel_size=1,groups=1)
+        self.deep_wise = nn.Conv1d(inner_channels, inner_channels, kernel_size=kernel_size, padding=padding, groups=inner_channels)
+        self.post_point_wise = nn.Conv1d(inner_channels, out_channel, kernel_size=1,groups=1)
 
     def forward(self, x):
+        x = self.pre_point_wise(x)
         x = self.deep_wise(x)
-        x = self.point_wise(x)
+        x = self.post_point_wise(x)
         return x
 
 
@@ -111,9 +113,8 @@ class ET_Encoder_Block(nn.Module):
         self.mid_layer_norm=ScaleNorm(d_model)
         self.sep_conv = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=9,padding=4)
 
-    def forward(self,x:Tensor,context=None,residual_attn = {'self_1':None}) -> Tensor:
+    def forward(self, x: Tensor, context: Tensor = None, src_mask: Tensor = None) -> Tensor:
 
-        glued = ckpt(self.glu,x)+x
         glued = ckpt(self.glu,self.layer_norms[0](x))+x
         glu_normed = self.layer_norms[1](glued)
 
@@ -127,23 +128,19 @@ class ET_Encoder_Block(nn.Module):
         mid_result = mid_result + glued
 
         normed = self.layer_norms[2](mid_result)
-        attended = ckpt(self.attention,normed,context,residual_attn['self_1'])
-        if isinstance(attended,tuple):
-            residual_attn['self_1'] = attended[1]
-            attended = attended[0]
+        attended = ckpt(self.attention,normed,context,src_mask)
         attended = attended  + mid_result
 
         normed = self.layer_norms[3](attended)
-        if self.pkm == None:
-            forwarded = ckpt(self.feed_forward,normed) + attended
-        else:
-            forwarded = ckpt(self.feed_forward,normed) + ckpt(self.pkm,normed) + attended
-        return forwarded,residual_attn
+        
+        forwarded = ckpt(self.feed_forward,normed) + attended
+
+        return forwarded
         
 
 
 class ET_Decoder_Block(nn.Module):
-    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,pkm=None):
+    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None):
         super(ET_Decoder_Block,self).__init__()
 
         if attn == None:
@@ -158,8 +155,6 @@ class ET_Decoder_Block(nn.Module):
             self.attention_cross_2 = attn['cross_2'] 
 
         self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(5)])
-
-        self.pkm = pkm
 
         if ffd == None:
             self.feed_forward = nn.Sequential(
@@ -177,21 +172,18 @@ class ET_Decoder_Block(nn.Module):
         self.sep_conv_r = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=7,padding=3)
         self.sep_mid = SeparableConv1D(d_model,d_model,d_model,kernel_size=7,padding=3)
 
-    def forward(self,x:Tensor,context:Tensor,residual_attn={'self_1':None,'self_2':None,'cross_1':None,'cross_2':None}) -> Tensor:
+    def forward(self, x: Tensor, context: Tensor = None, src_mask: Tensor = None) -> Tensor:
+            
+        if context == None:
+            context = src
 
         normed_x = self.layer_norms[0](x)
 
-        cross_attn = ckpt(self.attention_cross_1,normed_x,context,residual_attn['cross_1'])
-        if isinstance(cross_attn,tuple):
-            residual_attn['cross_1'] = cross_attn[1]
-            cross_attn = cross_attn[0]
+        cross_attn = ckpt(self.attention_cross_1,normed_x,context)
 
-        self_attn = ckpt(self.attention_self_1,normed_x,residual_attn['self_1'])
-        if isinstance(self_attn,tuple):
-            residual_attn['self_1'] = self_attn[1]
-            self_attn = self_attn[0]
+        self_attn = ckpt(self.attention_self_1,normed_x,None,src_mask)
 
-        attended = self_attn+cross_attn
+        attended = self_attn + cross_attn + x
         attended_normed = self.layer_norms[1](attended)
 
         sep_l = ckpt(self.sep_conv_l,attended_normed.transpose(1,2)).transpose(1,2)
@@ -207,28 +199,18 @@ class ET_Decoder_Block(nn.Module):
 
         sep_attn_normed = self.layer_norms[2](sep_attended)
 
-        self_attn = ckpt(self.attention_self_2,sep_attn_normed,residual_attn['self_2'])
-
-        if isinstance(self_attn,tuple):
-            residual_attn['self_2'] = self_attn[1]
-            self_attn = self_attn[0]
+        self_attn = ckpt(self.attention_self_2,sep_attn_normed,None,src_mask)
 
         self_attn = self_attn + sep_attended
 
         self_attn_normed = self.layer_norms[3](self_attn)
-        cross_attn = ckpt(self.attention_cross_2,self_attn_normed,context,residual_attn['cross_2'])
 
-        if isinstance(cross_attn,tuple):
-            residual_attn['cross_2'] = cross_attn[1]
-            cross_attn = cross_attn[0]
+        cross_attn = ckpt(self.attention_cross_2,self_attn_normed,context)
 
         cross_attn = cross_attn + self_attn
 
         attn_normed = self.layer_norms[4](cross_attn)
 
-        if self.pkm==None:
-            forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn
-        else:
-            forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn + ckpt(self.pkm,attn_normed)
+        forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn
 
-        return forwarded,residual_attn
+        return forwarded
