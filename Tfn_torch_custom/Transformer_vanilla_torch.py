@@ -751,8 +751,8 @@ def wandb_init():
         "prev_state_self_num":prev_state_self_num,
         "mlp_layers":mlp_layers,
     },
-    resume=True,
-    force=False,
+    resume=False,
+    force=True,
     save_code=True
     )
 

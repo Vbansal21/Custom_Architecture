@@ -186,7 +186,7 @@ class GRUGating(nn.Module):
 
 class ET_ffd(Module):
 
-    def __init__(self,dim,activation="sigmoid",layers=1,kernal_size=3,mult=4,fn=None,sequential=False):
+    def __init__(self,dim,activation="relu",layers=1,kernal_size=3,mult=4,fn=None,sequential=False):
         super(ET_ffd,self).__init__()
         self.l_1 = nn.Sequential(
             nn.Conv1d(dim,dim*mult,kernal_size,1,padding=kernal_size//2,groups=1),
@@ -198,7 +198,7 @@ class ET_ffd(Module):
         self.seq = sequential
 
     def forward(self,x,*args):
-        out = ckpt(self.l_1,x.transpose(1,2)).transpose(1,2).contiguous()
+        out = ckpt(self.l_1,x.transpose(1,2)).transpose(1,2)
         out = ckpt(self.l_2,out)
         if self.fn != None:
             for fn in self.fn:
@@ -343,11 +343,10 @@ class TransformerBlock(Module):
                                                     context=context,
                                                     use_mask=use_mask,
                                                 ),
-                                ffd=copy.deepcopy(self.feed_forward),
                                 )
         else:
                 
-            self.ctxt_ffd = copy.deepcopy(self.feed_forward)
+            self.ctxt_ffd = self.feed_forward
 
             self.self_inp_enc = GRUGating(
                                             d_model,
@@ -367,7 +366,6 @@ class TransformerBlock(Module):
                                                                             context=False,
                                                                             use_mask=use_mask,
                                                                         ),
-                                                        ffd=copy.deepcopy(self.feed_forward),
                                                         ),norm=False) if encoder_n_decoder else Identity()
 
             self.self_ctxt_enc = GRUGating(
@@ -388,7 +386,6 @@ class TransformerBlock(Module):
                                                                             context=False,
                                                                             use_mask=use_mask,
                                                                         ),
-                                                        ffd=copy.deepcopy(self.feed_forward),
                                                         ),norm=False) if encoder_n_decoder else Identity()
 
             attn = {
@@ -445,7 +442,6 @@ class TransformerBlock(Module):
             attn_block = ET_Decoder_Block(d_model,
                                 num_heads=nhead,
                                 attn=attn,
-                                ffd=copy.deepcopy(self.feed_forward)
                                 )
         
         self.attn = GRUGating(d_model,attn_block,norm=False)
@@ -548,14 +544,14 @@ class TransformerModule(ModuleList):
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom,) if isinstance(self.decoder_cross,Identity) and isinstance(self.decoder_self,Identity) else None) if deberta_layers else None
+                                            nystrom=nystrom,) 
         
         self.attend_to_inp = (Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom,) if isinstance(self.decoder_cross,Identity) and isinstance(self.decoder_self,Identity) and not exists(self.deberta_layers) else True)if attend_to_inp else None
+                                            nystrom=nystrom,)
 
         self.prev_state_exists = False
 
@@ -578,7 +574,7 @@ class TransformerModule(ModuleList):
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
                                                 rotary_pos_emb=True,
-                                                nystrom=nystrom,) if isinstance(self.decoder_cross,Identity) and isinstance(self.decoder_self,Identity) and not exists(self.deberta_layers) else Identity()
+                                                nystrom=nystrom,)
 
         self.d_model = d_model
         self.num_layers = num_layers
@@ -632,6 +628,8 @@ class TransformerModule(ModuleList):
             prev_state = ckpt(self.prev_state_update,prev_state,output)
             if ctxt != None:
                 prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
+            for _ in range(self.prev_state_self_num):
+                prev_state = ckpt(self.prev_state_update,prev_state)
             
         if self.enable_encoder:
             for enc in self.encoder:
@@ -647,22 +645,17 @@ class TransformerModule(ModuleList):
             prev_state = ckpt(self.prev_state_update,prev_state,output)
             if ctxt != None:
                 prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
+            for _ in range(self.prev_state_self_num):
+                prev_state = ckpt(self.prev_state_update,prev_state)
 
         if self.deberta_layers!=None:
             out = Positional_Encoding(self.absolutepositionalembedding(output))
-
-            if self.enable_encoder and not isinstance(self.decoder_cross,Identity):
-                for enc in self.decoder_cross:
-                    out = ckpt(enc,out,output,src_mask)
-            elif not isinstance(self.decoder_self,Identity):
-                for enc in self.decoder_self:
-                    out = ckpt(enc,out,output,src_mask)
-            else:
-                out = ckpt(self.deb_attn_0,out,output)
+            out = ckpt(self.deb_attn_0,out,output)
             if self.full_block_repeat:
                 for _ in range(self.repeated_deberta_layers+1):
                     for enc in self.deberta_layers:
                         out = ckpt(enc,out,output,src_mask)
+                        out = ckpt(enc,out,prev_state)
                         if exists(context):
                             out = ckpt(enc,out,context)
                 else:
@@ -672,6 +665,7 @@ class TransformerModule(ModuleList):
                 for enc in self.deberta_layers:
                     for _ in range(self.repeated_deberta_layers+1):
                         out = ckpt(enc,out,output,src_mask)
+                        out = ckpt(enc,out,prev_state)
                         if exists(context):
                             out = ckpt(enc,out,context)
                 else:
@@ -679,56 +673,15 @@ class TransformerModule(ModuleList):
                         output = out
 
         if self.attend_to_inp != None:
-            if exists(self.deberta_layers):
-                if self.full_block_repeat:
-                    for _ in range(self.repeated_deberta_layers+1):
-                        for enc in self.deberta_layers:
-                            output = ckpt(enc,output,src,src_mask)
-                            if exists(context):
-                                output = ckpt(enc,output,context)
-                else:
-                    for enc in self.deberta_layers:
-                        for _ in range(self.repeated_deberta_layers+1):
-                            output = ckpt(enc,output,src,src_mask)
-                            if exists(context):
-                                output = ckpt(enc,output,context)
-            elif self.enable_encoder and not isinstance(self.decoder_cross,Identity):
-                for enc in self.decoder_cross:
-                    output = ckpt(enc,output,src,src_mask)
-                    if exists(context):
-                        output = ckpt(enc,output,context)
-            elif not isinstance(self.decoder_self,Identity):
-                for enc in self.decoder_self:
-                    output = ckpt(enc,output,prev_state,src_mask)
-                    if exists(context):
-                        output = ckpt(enc,output,context)
-            else:
-                output = ckpt(self.attend_to_inp,output,src)
-                if exists(context):
-                    output = ckpt(self.attend_to_inp,output,context)
+            output = ckpt(self.attend_to_inp,output,src)
+            if exists(context):
+                output = ckpt(self.attend_to_inp,output,context)
 
         if self.prev_state_exists:
             for _ in range(self.prev_state_self_num):
                 prev_state = ckpt(self.prev_state_update,prev_state)
                 
-            if exists(self.deberta_layers):
-                if self.full_block_repeat:
-                    for _ in range(self.repeated_deberta_layers+1):
-                        for enc in self.deberta_layers:
-                            output = ckpt(enc,output,prev_state)
-                else:
-                    for enc in self.deberta_layers:
-                        for _ in range(self.repeated_deberta_layers+1):
-                            output = ckpt(enc,output,prev_state)
-
-            elif self.enable_encoder and not isinstance(self.decoder_cross,Identity):
-                for enc in self.decoder_cross:
-                    output = ckpt(enc,output,prev_state)
-            elif not isinstance(self.decoder_self,Identity):
-                for enc in self.decoder_self:
-                    output = ckpt(enc,output,prev_state)
-            else:
-                output = ckpt(self.prev_state_attend,output,prev_state)
+            output = ckpt(self.prev_state_attend,output,prev_state)
 
         if self.prev_state_exists:
             prev_state = ckpt(self.prev_state_update,prev_state,output)
