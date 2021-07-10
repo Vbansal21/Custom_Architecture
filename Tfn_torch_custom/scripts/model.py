@@ -266,7 +266,7 @@ class TransformerBlock(Module):
                      nystrom=False,
                      attend_to_self=True,
                      mlp_layers=1,
-                     use_mask=True,
+                     use_mask=False,
                      context=True,
                 ):
         super(TransformerBlock, self).__init__()
@@ -620,7 +620,7 @@ class TransformerModule(ModuleList):
         output = src
         ctxt = context
 
-        src_mask = torch.triu(torch.ones((src.size(2),src.size(2))),diagonal=1)
+        src_mask = None#torch.triu(torch.ones((src.size(1),src.size(1))),diagonal=1)
 
         if self.prev_state_exists:
             prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
@@ -640,7 +640,7 @@ class TransformerModule(ModuleList):
                 output = ckpt(self.decoder_cross[i],output,ctxt,src_mask)
         else:
             for dec in self.decoder_self:
-                output = ckpt(dec,output)
+                output = ckpt(dec,output,None,src_mask)
 
         if self.prev_state_exists:
             output = ckpt(self.prev_state_attend,output,prev_state)
@@ -777,21 +777,17 @@ class TransformerModel(Module):
             self.mem = None
             
         self.seq_scale_down = seq_scale_down
-        attn_len = ((self.seq_scale_down // 2)*2 + 1)*3
+        self.attn_len = (self.seq_scale_down*3 // 2)*2 + 1
 
         self.scale_down_conv = nn.Sequential(
-            nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=1),
-            nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,padding=self.seq_scale_down*3 - 1,groups=1),
-            nn.Conv1d(ninp,ninp,3,padding=1),
+            nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,padding=(self.seq_scale_down*3 - 1)//2,groups=1),
         )
 
         modes = nhead if modes == None else modes
         width = nhead if width == None else width
 
         self.scale_up_conv = nn.Sequential(
-            nn.Conv1d(ninp,ninp,3,padding=1),
             nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=1),
-            nn.Conv1d(ninp,ninp,attn_len,padding=attn_len//2,groups=1),
         )
 
         self.device = device

@@ -154,7 +154,7 @@ class ET_Decoder_Block(nn.Module):
             self.attention_cross_1 = attn['cross_1'] 
             self.attention_cross_2 = attn['cross_2'] 
 
-        self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(5)])
+        self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(6)])
 
         if ffd == None:
             self.feed_forward = nn.Sequential(
@@ -167,10 +167,9 @@ class ET_Decoder_Block(nn.Module):
         else:
             self.feed_forward = ffd
 
-        self.sep_norm=ScaleNorm(d_model)
-        self.sep_conv_l = SeparableConv1D(d_model,d_model*2,d_model,kernel_size=11,padding=5)
-        self.sep_conv_r = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=7,padding=3)
-        self.sep_mid = SeparableConv1D(d_model,d_model,d_model,kernel_size=7,padding=3)
+        self.sep_conv_l = SeparableConv1D(d_model,d_model*2,d_model,kernel_size=11,padding=0)
+        self.sep_conv_r = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=7,padding=0)
+        self.sep_mid = SeparableConv1D(d_model,d_model,d_model,kernel_size=7,padding=0)
 
     def forward(self, x: Tensor, context: Tensor = None, src_mask: Tensor = None) -> Tensor:
             
@@ -186,30 +185,30 @@ class ET_Decoder_Block(nn.Module):
         attended = self_attn + cross_attn + x
         attended_normed = self.layer_norms[1](attended)
 
-        sep_l = ckpt(self.sep_conv_l,attended_normed.transpose(1,2)).transpose(1,2)
+        sep_l = ckpt(self.sep_conv_l,F.pad(attended_normed,(0,0,10,0),value=0).transpose(1,2)).transpose(1,2)
         sep_l = F.relu(sep_l)
 
-        sep_r = ckpt(self.sep_conv_r,attended_normed.transpose(1,2)).transpose(1,2)
+        sep_r = ckpt(self.sep_conv_r,F.pad(attended_normed,(0,0,6,0),value=0).transpose(1,2)).transpose(1,2)
 
         sep_attended = sep_l + sep_r
-        sep_normed = self.sep_norm(sep_attended)
+        sep_normed = self.layer_norms[2](sep_attended)
 
-        sep_normed = ckpt(self.sep_mid,sep_normed.transpose(1,2)).transpose(1,2)
+        sep_normed = ckpt(self.sep_mid,F.pad(sep_normed,(0,0,6,0),value=0).transpose(1,2)).transpose(1,2)
         sep_attended = sep_normed + attended
 
-        sep_attn_normed = self.layer_norms[2](sep_attended)
+        sep_attn_normed = self.layer_norms[3](sep_attended)
 
         self_attn = ckpt(self.attention_self_2,sep_attn_normed,None,src_mask)
 
         self_attn = self_attn + sep_attended
 
-        self_attn_normed = self.layer_norms[3](self_attn)
+        self_attn_normed = self.layer_norms[4](self_attn)
 
         cross_attn = ckpt(self.attention_cross_2,self_attn_normed,context)
 
         cross_attn = cross_attn + self_attn
 
-        attn_normed = self.layer_norms[4](cross_attn)
+        attn_normed = self.layer_norms[5](cross_attn)
 
         forwarded = ckpt(self.feed_forward,attn_normed) + cross_attn
 

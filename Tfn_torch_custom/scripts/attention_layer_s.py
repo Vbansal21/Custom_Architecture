@@ -464,10 +464,8 @@ class NystromAttention(nn.Module):
         if self.talking_head_attn:
             kernal = self.heads
             kernal = (kernal//2)*2 + 1
-            self.talking_head_conv_proj_pre = nn.Conv3d(1,1,kernel_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
-            self.talking_head_conv_fft_pre = nn.Conv3d(1,1,kernel_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
-            self.talking_head_conv_proj_post = nn.Conv3d(1,1,kernel_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
-            self.talking_head_conv_fft_post = nn.Conv3d(1,1,kernel_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
+            self.talking_head_conv_pre = nn.Conv3d(1,1,kernel_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
+            self.talking_head_conv_post = nn.Conv3d(1,1,kernel_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
 
     def forward(self, q, k, v, src_mask = None, mask = None, return_attn = False):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
@@ -480,8 +478,8 @@ class NystromAttention(nn.Module):
         # pad so that sequence can be evenly divided into m landmarks
 
         remainder = n % m
+        padding = m - (n % m)
         if bool(q.size(-2)%m > 0) or bool(k.size(-2)%m > 0):
-            padding = m - (n % m)
             #x = F.pad(x, (0, 0, padding, 0), value = 0)
             q,k,v = map(lambda x: F.pad(x, (0, 0, (m - (x.size(-2) % m)), 0), value = 0), (q, k, v))
 
@@ -529,14 +527,9 @@ class NystromAttention(nn.Module):
         sim3 = einsum(einops_eq, q_landmarks, k)
 
         if self.talking_head_attn:
-           _sim1, _sim2, _sim3 = map(lambda t: ckpt(self.talking_head_conv_proj_pre,t.unsqueeze(1)).squeeze(1), (sim1, sim2, sim3))
-           sim1, sim2, sim3 = map(lambda t: rearrange(torch.view_as_real(torch.fft.rfft(t,dim=1)), 'b h m n r -> b 1 (h r) m n'), (sim1, sim2, sim3))
-           sim1, sim2, sim3 = map(lambda t: ckpt(self.talking_head_conv_fft_pre,t), (sim1, sim2, sim3))
-           sim1, sim2, sim3 = map(lambda t: torch.fft.irfft(torch.view_as_complex(rearrange(t, 'b 1 (h r) m n -> b h m n r',r=2).contiguous()),dim=1), (sim1, sim2, sim3))
-           sim1 = sim1 + _sim1
-           sim2 = sim2 + _sim2
-           sim3 = sim3 + _sim3
-           del(_sim1,_sim2,_sim3)
+           sim1 = ckpt(self.talking_head_conv_pre,sim1.unsqueeze(1)).squeeze(1)
+           sim2 = ckpt(self.talking_head_conv_pre,sim2.unsqueeze(1)).squeeze(1)
+           sim3 = ckpt(self.talking_head_conv_pre,sim3.unsqueeze(1)).squeeze(1)
 
         # masking
 
@@ -547,10 +540,11 @@ class NystromAttention(nn.Module):
             sim3.masked_fill_(~(mask_landmarks[..., None] * mask[..., None, :]), mask_value)
 
         if self.use_mask and q.size(2)==k.size(2):
-            if src_mask == None or src_mask.size()[-2:] != (q.size(2),q.size(2)):
-                mask = torch.triu(torch.ones((q.size(2),q.size(2))),diagonal=1) 
+            if src_mask == None:
+                mask = torch.triu(torch.ones((q.size(2),q.size(2))),diagonal=1)
             else:
-                mask = src_mask
+                mask = F.pad(src_mask, (padding, 0,padding, 0), value = 0)
+                
             mask_value = -torch.finfo(q.dtype).max
 
             sim1_mask = repeat(reduce(mask,"i (j l) -> i j",'min',l=l).bool(),"i j -> b h i j",b=q.size(0),h=q.size(1)) if len(mask.size()) == 2 else reduce(mask,"b h i (j l) -> b h i j",'min',l=l).bool()
@@ -566,15 +560,9 @@ class NystromAttention(nn.Module):
         attn1, attn2, attn3 = map(lambda t: t.softmax(dim = -1), (sim1, sim2, sim3))
 
         if self.talking_head_attn:
-           _attn1, _attn2, _attn3 = map(lambda t: ckpt(self.talking_head_conv_proj_post,t.unsqueeze(1)).squeeze(1), (attn1, attn2, attn3))
-           attn1, attn2, attn3 = map(lambda t: rearrange(torch.view_as_real(torch.fft.rfft(t,dim=1)), 'b h m n r -> b 1 (h r) m n'), (attn1, attn2, attn3))
-           attn1, attn2, attn3 = map(lambda t: ckpt(self.talking_head_conv_fft_post,t), (attn1, attn2, attn3))
-           attn1, attn2, attn3 = map(lambda t: torch.fft.irfft(torch.view_as_complex(rearrange(t, 'b 1 (h r) m n -> b h m n r',r=2).contiguous()),dim=1), (attn1, attn2, attn3))
-           attn1 = attn1 + _attn1
-           attn2 = attn2 + _attn2
-           attn3 = attn3 + _attn3
-           del(_attn1,_attn2,_attn3)
-
+           attn1 = ckpt(self.talking_head_conv_post,attn1.unsqueeze(1)).squeeze(1)
+           attn2 = ckpt(self.talking_head_conv_post,attn2.unsqueeze(1)).squeeze(1)
+           attn3 = ckpt(self.talking_head_conv_post,attn3.unsqueeze(1)).squeeze(1)
         attn2_inv = moore_penrose_iter_pinv(attn2, iters)
 
         out = (attn1 @ attn2_inv) @ (attn3 @ v)
@@ -1180,7 +1168,7 @@ class Attention(nn.Module):
             self_nystrom = nystrom
 
             if self_nystrom:
-                self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=2**(int(math.log(2,math.log(2,inner_dim*scale)))) , transpose_heads_n_dims=True,use_mask=False,talking_head_attn=False)
+                self.attn_to_self = NystromAttention(dim=dim,dim_head=self_head_dim,heads=1,num_landmarks=2**(int(math.log(2,math.log(2,inner_dim*scale)))) , transpose_heads_n_dims=True,talking_head_attn=False)
             else:
                 self.attn_to_self = FastAttention(self_head_dim, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
             
