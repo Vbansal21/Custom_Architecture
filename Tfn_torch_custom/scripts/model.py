@@ -539,14 +539,14 @@ class TransformerModule(ModuleList):
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
         block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
-        self.deb_attn_0 = (Attention(d_model,
+        self.deb_attn_0 = Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom,) 
+                                            nystrom=nystrom,)
         
-        self.attend_to_inp = (Attention(d_model,
+        self.attend_to_inp = Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
