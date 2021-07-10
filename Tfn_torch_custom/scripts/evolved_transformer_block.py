@@ -86,7 +86,7 @@ class ET_Encoder_Block(nn.Module):
             self.attention = nn.MultiheadAttention(d_model, num_heads) 
         else:
             self.attention = attn
-        self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(4)])
+        self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(5)])
         if ffd == None:
             self.feed_forward = nn.Sequential(
             Rearrange("... n d -> ... d n"),
@@ -109,8 +109,6 @@ class ET_Encoder_Block(nn.Module):
             nn.ReLU(),
             nn.Conv1d(in_channels=d_model//2,out_channels=d_model,kernel_size=1,padding=0,groups=1),
         )
-
-        self.mid_layer_norm=ScaleNorm(d_model)
         self.sep_conv = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=9,padding=4)
 
     def forward(self, x: Tensor, context: Tensor = None, src_mask: Tensor = None) -> Tensor:
@@ -122,16 +120,16 @@ class ET_Encoder_Block(nn.Module):
         right_branch = ckpt(self.right_net,glu_normed.transpose(1,2)).transpose(1,2)
 
         mid_result = left_branch+right_branch
-        mid_result = ckpt(self.mid_layer_norm,mid_result)
+        mid_result = ckpt(self.layer_norms[2],mid_result)
         mid_result = ckpt(self.sep_conv,mid_result.transpose(1,2)).transpose(1,2)
 
         mid_result = mid_result + glued
 
-        normed = self.layer_norms[2](mid_result)
+        normed = self.layer_norms[3](mid_result)
         attended = ckpt(self.attention,normed,context,src_mask)
         attended = attended  + mid_result
 
-        normed = self.layer_norms[3](attended)
+        normed = self.layer_norms[4](attended)
         
         forwarded = ckpt(self.feed_forward,normed) + attended
 

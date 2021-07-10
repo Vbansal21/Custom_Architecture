@@ -45,6 +45,9 @@ checkpointed = True
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #device = torch.device("cpu")
 
+if torch.cuda.is_available():
+    torch.backends.cudnn.deterministic = True
+
 def ckpt(f,*args,checkpointed = checkpointed):
     if checkpointed:
         return checkpoint(f,*args)
@@ -524,6 +527,8 @@ class TransformerModule(ModuleList):
             if not enable_encoder:
                 block = TransformerBlock(d_model, nhead, nhid, dropout,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False)
                 self.decoder_self = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
+                self.decoder_cross = Identity()
+                self.encoder = Identity()
             else:
                 block = TransformerBlock(d_model, nhead, nhid, dropout,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False)
                 self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
@@ -538,19 +543,19 @@ class TransformerModule(ModuleList):
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
         block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
-        self.deb_attn_0 = Attention(d_model,
+        self.deb_attn_0 = (Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom,) if deberta_layers else None
+                                            nystrom=nystrom,) if isinstance(self.decoder_cross,Identity) and isinstance(self.decoder_self,Identity) else None) if deberta_layers else None
         
-        self.attend_to_inp = Attention(d_model,
+        self.attend_to_inp = (Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=0,
                                             rotary_pos_emb=True,
-                                            nystrom=nystrom,) if attend_to_inp else None
+                                            nystrom=nystrom,) if isinstance(self.decoder_cross,Identity) and isinstance(self.decoder_self,Identity) and not exists(self.deberta_layers) else True)if attend_to_inp else None
 
         self.prev_state_exists = False
 
@@ -573,7 +578,7 @@ class TransformerModule(ModuleList):
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
                                                 rotary_pos_emb=True,
-                                                nystrom=nystrom,)
+                                                nystrom=nystrom,) if isinstance(self.decoder_cross,Identity) and isinstance(self.decoder_self,Identity) and not exists(self.deberta_layers) else Identity()
 
         self.d_model = d_model
         self.num_layers = num_layers
@@ -624,15 +629,11 @@ class TransformerModule(ModuleList):
 
         if self.prev_state_exists:
             prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
-            prev_state = ckpt(self.prev_state_update,prev_state,output/output.size(-1))
+            prev_state = ckpt(self.prev_state_update,prev_state,output)
             if ctxt != None:
-                prev_state = ckpt(self.prev_state_update,prev_state,ctxt/ctxt.size(-1))
-
-            for _ in range(self.prev_state_self_num):
-                prev_state = ckpt(self.prev_state_update,prev_state)
+                prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
             
         if self.enable_encoder:
-
             for enc in self.encoder:
                 ctxt = ckpt(enc,ctxt)
             for i in range(self.num_layers):
@@ -641,17 +642,29 @@ class TransformerModule(ModuleList):
         else:
             for dec in self.decoder_self:
                 output = ckpt(dec,output,None,src_mask)
-
+        
         if self.prev_state_exists:
-            output = ckpt(self.prev_state_attend,output,prev_state)
+            prev_state = ckpt(self.prev_state_update,prev_state,output)
+            if ctxt != None:
+                prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
 
         if self.deberta_layers!=None:
             out = Positional_Encoding(self.absolutepositionalembedding(output))
-            out = ckpt(self.deb_attn_0,out,output)
+
+            if self.enable_encoder and not isinstance(self.decoder_cross,Identity):
+                for enc in self.decoder_cross:
+                    out = ckpt(enc,out,output,src_mask)
+            elif not isinstance(self.decoder_self,Identity):
+                for enc in self.decoder_self:
+                    out = ckpt(enc,out,output,src_mask)
+            else:
+                out = ckpt(self.deb_attn_0,out,output)
             if self.full_block_repeat:
                 for _ in range(self.repeated_deberta_layers+1):
                     for enc in self.deberta_layers:
                         out = ckpt(enc,out,output,src_mask)
+                        if exists(context):
+                            out = ckpt(enc,out,context)
                 else:
                     if self.deberta_layers!=None:
                         output = out
@@ -659,14 +672,63 @@ class TransformerModule(ModuleList):
                 for enc in self.deberta_layers:
                     for _ in range(self.repeated_deberta_layers+1):
                         out = ckpt(enc,out,output,src_mask)
+                        if exists(context):
+                            out = ckpt(enc,out,context)
                 else:
                     if self.deberta_layers!=None:
                         output = out
 
         if self.attend_to_inp != None:
-            output = ckpt(self.attend_to_inp,output,src)
-            if context != None:
-                output = ckpt(self.attend_to_inp,output,context)
+            if exists(self.deberta_layers):
+                if self.full_block_repeat:
+                    for _ in range(self.repeated_deberta_layers+1):
+                        for enc in self.deberta_layers:
+                            output = ckpt(enc,output,src,src_mask)
+                            if exists(context):
+                                output = ckpt(enc,output,context)
+                else:
+                    for enc in self.deberta_layers:
+                        for _ in range(self.repeated_deberta_layers+1):
+                            output = ckpt(enc,output,src,src_mask)
+                            if exists(context):
+                                output = ckpt(enc,output,context)
+            elif self.enable_encoder and not isinstance(self.decoder_cross,Identity):
+                for enc in self.decoder_cross:
+                    output = ckpt(enc,output,src,src_mask)
+                    if exists(context):
+                        output = ckpt(enc,output,context)
+            elif not isinstance(self.decoder_self,Identity):
+                for enc in self.decoder_self:
+                    output = ckpt(enc,output,prev_state,src_mask)
+                    if exists(context):
+                        output = ckpt(enc,output,context)
+            else:
+                output = ckpt(self.attend_to_inp,output,src)
+                if exists(context):
+                    output = ckpt(self.attend_to_inp,output,context)
+
+        if self.prev_state_exists:
+            for _ in range(self.prev_state_self_num):
+                prev_state = ckpt(self.prev_state_update,prev_state)
+                
+            if exists(self.deberta_layers):
+                if self.full_block_repeat:
+                    for _ in range(self.repeated_deberta_layers+1):
+                        for enc in self.deberta_layers:
+                            output = ckpt(enc,output,prev_state)
+                else:
+                    for enc in self.deberta_layers:
+                        for _ in range(self.repeated_deberta_layers+1):
+                            output = ckpt(enc,output,prev_state)
+
+            elif self.enable_encoder and not isinstance(self.decoder_cross,Identity):
+                for enc in self.decoder_cross:
+                    output = ckpt(enc,output,prev_state)
+            elif not isinstance(self.decoder_self,Identity):
+                for enc in self.decoder_self:
+                    output = ckpt(enc,output,prev_state)
+            else:
+                output = ckpt(self.prev_state_attend,output,prev_state)
 
         if self.prev_state_exists:
             prev_state = ckpt(self.prev_state_update,prev_state,output)
@@ -779,16 +841,12 @@ class TransformerModel(Module):
         self.seq_scale_down = seq_scale_down
         self.attn_len = (self.seq_scale_down*3 // 2)*2 + 1
 
-        self.scale_down_conv = nn.Sequential(
-            nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,padding=(self.seq_scale_down*3 - 1)//2,groups=1),
-        )
+        self.scale_down_conv = nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,padding=(self.seq_scale_down*3 - 1)//2,groups=1)
 
         modes = nhead if modes == None else modes
         width = nhead if width == None else width
 
-        self.scale_up_conv = nn.Sequential(
-            nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=1),
-        )
+        self.scale_up_conv = nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=1)
 
         self.device = device
 

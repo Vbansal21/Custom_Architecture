@@ -162,7 +162,7 @@ eval_batch_size: int = batch_size
 mini_batch_size: int = 1
 
 ntokens: int = tokenizer.vocab_size # None
-emsize: int = 128*1
+emsize: int = 128
 nhid: int = emsize * 4
 nlayers: int = 1
 deberta_layers: int = 1
@@ -178,7 +178,7 @@ mlp_layers: int = 1
 fno_layers: int = 4
 modes: int = 4096
 width: int = 32
-causal: bool = False
+causal: bool = True
 nystrom: bool = True
 attend_to_self: bool = True
 attend_to_inp: bool = True
@@ -624,7 +624,7 @@ if use_deepspeed:
         out,mem,mem_ctxt = model(inp)
 else:
     out,mem,mem_ctxt = model(inp)
-print(torch.argmax((out.reshape(-1,ntokens)),dim=-1))
+print("raw out:",torch.argmax((out.reshape(-1,ntokens)),dim=-1),"\nraw in:",inp,"\nout size:",out.size(),"\nin size:",inp.size())
 print(model.get_avg_inference_time()," seconds")
 del(out,mem,mem_ctxt,inp)
 
@@ -866,7 +866,7 @@ def inference(text,size=128,eval_model = model,reccurent_mem=None,reccurent_mem_
         return mem,mem_ctxt
 
 
-inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
+inference("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new",return_mem=False)
 
 def evaluate(eval_model, data_source, print_val_loss=False,generator=None):
     eval_model.eval()
@@ -1047,84 +1047,118 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         trainable_index = None
         torch.cuda.empty_cache()
 
-        outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
+        if not discriminator:
+            outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
+        else:
+            pass
 
-        try:
-            if not discriminator:
-                outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
-            else:
-                pass
-            # FIX REQUIRED: UNICURSES/THREADING/SYS.STDIN.READLINE()
-            if isdata():
-                print("In-scope of if-else, press escape button(\\x1b) then enter then CTRL-d/^D")
-                c = sys.stdin.read()
-                if '\x1b' in c or '^D' in c:
-                    try:
-                        inp = int(inpt(prompt="Save the model(0(raise Keyboard Interrupt and exit)/1(raise Keyboard Interrupt and save)/2 (for pausing training)/3 (pause + save))?:\v",timeout=60))
-                        print("")
-                    except:
-                        inp = -1
-                    print(inp)
-                    if inp not in [-1,0,1,2,3]:
-                        inp=-1
-                    if inp == -1:
-                        pass
-                    if inp==1 or inp==0:
-                        if inp:
-                            save_model(min(0,batch-1))
-                        raise KeyboardInterrupt
-                    elif inp >= 2:
-                        if inp == 3:
-                            save_model(min(0,batch-1))
-                        pause_time = time.time()
+        # FIX REQUIRED: UNICURSES/THREADING/SYS.STDIN.READLINE()
+        if isdata():
+            tmp = 0
+            print("Save the model(0(continue)/1(raise Keyboard Interrupt and save)/2 (for pausing training)/3 (pause + save))?:\v")
+            while True:
+                if tmp >= 30:
+                    inp = 0
+                    break
+                tmp += 1
+                try:
+                    inp: str = inpt(prompt="-->",timeout=10)
+                    print("")
+                except:
+                    pass
+                if len(inp) > 0:
+                    if inp.isnumeric():
                         try:
-                            print("\nTo resume,press any key and press enter,then after prompt press escape button(\\x1b) then press enter then CTRL+d / ^D\v")
-                            while True:
+                            inp = int(inp)
+                            if inp not in [0,1,2,3]:
+                                raise "Invalid input, type 0 on prompt to continue"
+                            break
+                        except Exception as e:
+                            print("Invalid input:",e)
+            print(inp)
+            if inp == 0:
+                pass
+            elif inp==1:
+                if inp:
+                    save_model(min(0,batch-1))
+                raise KeyboardInterrupt
+            elif inp >= 2:
+                if inp == 3:
+                    save_model(min(0,batch-1))
+                pause_time = time.time()
+                try:
+                    print("\nTo resume,press enter\v")
+                    while True:
+                        try:
+                            if isdata():
+                                #print("\nIn-scope of if-else, press escape button(\\x1b),then press enter atleast once, then CTRL-d/^D")
+                                #c = inpt(prompt="-->",timeout=15)
+                                #print("")
+                                #if '\x1b' in c or '^D' in c:
+                                while isdata():
+                                    c = sys.stdin.read(1)
                                 try:
-                                    if isdata():
-                                        print("\nIn-scope of if-else, press escape button(\\x1b),then press enter atleast once, then CTRL-d/^D")
-                                        c = sys.stdin.read()
-                                        if '\x1b' in c or '^D' in c:
-                                            _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
-                                            if int(_i):
-                                                break
-                                except EOFError:
-                                    _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
+                                    print("\nend?(0/1):\v")
+                                    _i = inpt(prompt="",timeout=15)
+                                    if len(_i) == 0 or not _i.isnumeric():
+                                        _i = inpt(prompt="",timeout=15)
                                     if int(_i):
                                         break
-                                time.sleep(15)
-                            """
+                                except:
+                                    continue
+                        except EOFError:
+                            try:
+                                print("\nend?(0/1):\v")
+                                _i = inpt(prompt="",timeout=15)
+                                if len(_i) == 0 or not _i.isnumeric():
+                                    _i = inpt(prompt="",timeout=15)
+                                if int(_i):
+                                    break
+                            except:
+                                continue
+                        time.sleep(15)
+                    """
+                    while True:
+                        text = "Training Paused since:{:5.2f}s".format(time.time() - pause_time)
+                        print(text,end="")
+                        print("\b"*len(text),end='')
+                    """
+                except Exception as e:
+                    print("Some Other Exception:\v",str(e))
+                finally:
+                    print("Training Paused since:{:5.2f}s".format(time.time() - pause_time))
+                    pause_time = time.time() - pause_time
+                    try:
+                        inp = inpt(prompt="Run inference?(1/yes/0/no)\v",timeout=30)
+                    except Exception as e:
+                        inp = "0"
+                    if inp.lower() in ['yes','1']:
+                        tmp_mem = tmp_mem_ctxt = None
+                        while True:
+                            try:
+                                i = int(inpt("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:",timeout=30))
+                            except:
+                                continue
+                            print("")
+                            if i == 0:
+                                break
+                            print("\ninput text for inference(type in multi line text then press CTRL-d/ ^D (press twice if no newline character is type i.e. \\n -> enter/return key) when complete ):\v")
+                            inp = ''
                             while True:
-                                text = "Training Paused since:{:5.2f}s".format(time.time() - pause_time)
-                                print(text,end="")
-                                print("\b"*len(text),end='')
-                            """
-                        except Exception as e:
-                            print("Some Other Exception:\v",str(e))
-                        finally:
-                            print("Training Paused since:{:5.2f}s".format(time.time() - pause_time))
-                            pause_time = time.time() - pause_time
-                            inp = inpt(prompt="Run inference?(1/yes/0/no)\v",timeout=30)
-                            if inp.lower() in ['yes','1']:
-                                tmp_mem = tmp_mem_ctxt = None
-                                while True:
-                                    i = int(input("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:"))
-                                    if i == 0:
+                                inp += sys.stdin.read()
+                                try:
+                                    print("\nend?(0/1):\v")
+                                    _i = inpt(prompt="",timeout=15)
+                                    if len(_i) == 0 or not _i.isnumeric():
+                                        _i = inpt(prompt="",timeout=15)
+                                    if int(_i):
                                         break
-                                    print("\ninput text for inference(type in multi line text,press enter atleast once in total then press CTRL-d/ ^D when complete ):\n")
-                                    inp = ''
-                                    while True:
-                                        inp += sys.stdin.read()
-                                        _i = inpt(prompt="\nend?(0/1):\v",timeout=15)
-                                        if int(_i):
-                                            break
-                                    tmp_mem = None if i==1 else tmp_mem
-                                    tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
-                                    tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt)
-                            #pass
-        except Exception as e:
-            print("error in training step\v",e)
-            continue
+                                except:
+                                    continue
+                            tmp_mem = None if i==1 else tmp_mem
+                            tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
+                            tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt)
+                    
 
         total_loss += loss
         total_acc += acc
@@ -1145,7 +1179,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         torch.cuda.empty_cache()
 
         if ((batch % save_intermediate_intervel == 0 and batch > 0) or ((time.time()-intermediate_save_time) > save_intermediate_intervel_time_s) and batch>(resume_batch + 10)):
-            inference("Hello World!!! This is inference function on the currently trained model",eval_model=model,return_mem=False)
+            inference("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new",eval_model=model,return_mem=False)
             save_model(batch)
             intermediate_save_time = time.time()
             model.train()
@@ -1180,6 +1214,12 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             total_ppl = 0.
             start_time = time.time()
         total_time_per_step += (time.time() - step_time)
+        if step_scheduler != None and batch%mini_batch_size == 0:
+            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
+                scheduler.step(step)
+                if discriminator:
+                    scheduler_disc.step(step)
+                step += 1
         try:
             if batch%mini_batch_size == 0:
                 if discriminator:
@@ -1264,12 +1304,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                         
                     )
                 total_time_per_step = 0
-        if step_scheduler != None and batch%mini_batch_size == 0:
-            if (batch % step_scheduler == 0 and batch > 0) or (epoch >1 and batch == 0 and processed_train_data.size(1)//bptt < step_scheduler):
-                scheduler.step(step)
-                if discriminator:
-                    scheduler_disc.step(step)
-                step += 1
         i+=stride_size
         batch +=1
 

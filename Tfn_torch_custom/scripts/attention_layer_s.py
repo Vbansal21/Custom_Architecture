@@ -454,18 +454,16 @@ class NystromAttention(nn.Module):
                 conv_in = conv_in if conv_in != None else heads
                 conv_out = conv_out if conv_out != None else heads
                 groups = math.gcd(conv_out,conv_in)
-                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = groups, bias = False)
+                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = 1, bias = True)
             else:
                 conv_in = conv_in if conv_in != None else dim_head
                 conv_out = conv_out if conv_out != None else dim_head
                 groups = math.gcd(conv_out,conv_in)
-                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = groups, bias = False)
+                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = 1, bias = True)
 
         if self.talking_head_attn:
-            kernal = self.heads
-            kernal = (kernal//2)*2 + 1
-            self.talking_head_conv_pre = nn.Conv3d(1,1,kernel_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
-            self.talking_head_conv_post = nn.Conv3d(1,1,kernel_size=(kernal,1,1),padding=(kernal//2,0,0),padding_mode='replicate')
+            self.talking_head_conv_pre = nn.Conv2d(self.heads,self.heads,kernel_size=1)
+            self.talking_head_conv_post = nn.Conv2d(self.heads,self.heads,kernel_size=1)
 
     def forward(self, q, k, v, src_mask = None, mask = None, return_attn = False):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
@@ -527,9 +525,9 @@ class NystromAttention(nn.Module):
         sim3 = einsum(einops_eq, q_landmarks, k)
 
         if self.talking_head_attn:
-           sim1 = ckpt(self.talking_head_conv_pre,sim1.unsqueeze(1)).squeeze(1)
-           sim2 = ckpt(self.talking_head_conv_pre,sim2.unsqueeze(1)).squeeze(1)
-           sim3 = ckpt(self.talking_head_conv_pre,sim3.unsqueeze(1)).squeeze(1)
+           sim1 = ckpt(self.talking_head_conv_pre,sim1)
+           sim2 = ckpt(self.talking_head_conv_pre,sim2)
+           sim3 = ckpt(self.talking_head_conv_pre,sim3)
 
         # masking
 
@@ -560,9 +558,9 @@ class NystromAttention(nn.Module):
         attn1, attn2, attn3 = map(lambda t: t.softmax(dim = -1), (sim1, sim2, sim3))
 
         if self.talking_head_attn:
-           attn1 = ckpt(self.talking_head_conv_post,attn1.unsqueeze(1)).squeeze(1)
-           attn2 = ckpt(self.talking_head_conv_post,attn2.unsqueeze(1)).squeeze(1)
-           attn3 = ckpt(self.talking_head_conv_post,attn3.unsqueeze(1)).squeeze(1)
+           attn1 = ckpt(self.talking_head_conv_post,attn1)
+           attn2 = ckpt(self.talking_head_conv_post,attn2)
+           attn3 = ckpt(self.talking_head_conv_post,attn3)
         attn2_inv = moore_penrose_iter_pinv(attn2, iters)
 
         out = (attn1 @ attn2_inv) @ (attn3 @ v)
@@ -1182,17 +1180,14 @@ class Attention(nn.Module):
                                 name='prev_state',
                                 tensor=torch.zeros((self.heads, num_prev_state, dim_head))
                                 )
-            #self.p_s_conv = nn.Conv2d(self.heads*2, self.heads, (1, 1), padding = (0, 0), groups = 1, bias = True)
             self.hop_attn = hop_attn
             self.mem_lin_k = nn.Linear(dim_head,dim_head)
             self.mem_lin_v = nn.Linear(dim_head,dim_head)
             self.out_mem = nn.Linear(dim_head,dim_head)
             
-            #NystromAttention(dim=dim,dim_head=dim_head,context=True,heads=self.heads,num_landmarks=nystromer_landmarks)
-            
             if nystrom:
-                self.mem_attn = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,context=True,heads=self.heads,num_landmarks=nystromer_landmarks,transpose_heads_n_dims=True,conv_in=dim_head + additional_head_dims,conv_out=dim_head)#FastAttention(dim_head + additional_head_dims, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
-                self.prev_state_attn = NystromAttention(dim=dim,dim_head=dim_head,context=True,heads=self.heads,num_landmarks=nystromer_landmarks)#FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+                self.mem_attn = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,context=True,heads=self.heads,num_landmarks=nystromer_landmarks,transpose_heads_n_dims=True,conv_in=dim_head + additional_head_dims,conv_out=dim_head)
+                self.prev_state_attn = NystromAttention(dim=dim,dim_head=dim_head,context=True,heads=self.heads,num_landmarks=nystromer_landmarks)
             else:
                 self.mem_attn = FastAttention(dim_head + additional_head_dims, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
                 self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
@@ -1207,9 +1202,6 @@ class Attention(nn.Module):
                 nn.Linear(dim_head,dim_head*mult),
                 nn.Linear(dim_head*mult,dim_head),
                 )
-            #self.zero_0 = nn.Parameter(torch.ones(dim_head))
-            #self.zero_1 = nn.Parameter(torch.zeros(dim_head))
-            #self.norm = ScaleNorm(dim_head)
 
             if pos_scales>0:
                 self.q_rel_pos_emb_mem = ConstrainedLinear(
@@ -1329,12 +1321,6 @@ class Attention(nn.Module):
 
             out_k = self.out_k(out)
             out_v = self.out_v(out)
-            """
-            tmp = out[:,:,-prev_state.size(-2):]
-            tmp = F.pad(tmp,(0,0,0,max(0,prev_state.size(-2)-tmp.size(-2))),value=0)
-            prev_state = torch.cat((prev_state,tmp),dim=1)
-            prev_state = ckpt(self.p_s_conv,prev_state)
-            """
             prev_state = ckpt(self.prev_state_attn,prev_state,out_k,out_v)
             self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape)
 
