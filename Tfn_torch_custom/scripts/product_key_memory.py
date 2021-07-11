@@ -65,7 +65,7 @@ class ScaleNorm(nn.Module):
         return x / norm.clamp(min = self.eps) * self.g
 
 class PKM(nn.Module):
-    def __init__(self, dim, heads = 4, num_keys = 128, topk = 32, dim_head = None, input_dropout = 0., query_dropout = 0., value_dropout = 0.):
+    def __init__(self, dim, heads = 4, num_keys = 128, topk = 64, dim_head = None, input_dropout = 0., query_dropout = 0., value_dropout = 0.):
         super().__init__()
         assert (dim % heads == 0), 'dimension must be divisible by number of heads'
         self.topk = topk
@@ -76,8 +76,7 @@ class PKM(nn.Module):
 
         dim_query = dim_head * heads
         self.to_queries = nn.Linear(dim, dim_query, bias = False)
-        #self.norm = MaskedBatchNorm1D(nn.BatchNorm1d(dim_query))
-        self.norm = ScaleNorm(dim_query)
+        self.norm = MaskedBatchNorm1D(nn.BatchNorm1d(dim_query))
 
         self.keys = nn.Parameter(torch.zeros(heads, num_keys, 2, dim_head // 2))
         self.values = nn.EmbeddingBag(num_keys ** 2, dim, mode='sum')
@@ -93,7 +92,7 @@ class PKM(nn.Module):
         x = self.input_dropout(x)
 
         queries = self.to_queries(x)
-        queries = self.norm(queries)
+        queries = self.norm(queries, mask = input_mask)
         queries = self.query_dropout(queries)
 
         queries = queries.chunk(2, dim=-1)

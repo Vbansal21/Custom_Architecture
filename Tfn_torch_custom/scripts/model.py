@@ -26,7 +26,7 @@ from mogrifier import Mogrifier
 from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block, GLU
 from .product_key_memory import PKM
 from .hopfield_modules import HopfieldLayer
-from .attention_layer_s import Attention,ProjectionUpdater,find_modules
+from .attention_layer_s import Attention,ProjectionUpdater,find_modules, RotaryEmbedding
 from .conformer import ConformerConvModule
 
 from .fourier_1d import FNO1d
@@ -70,7 +70,19 @@ def _get_activation_fn(activation):
     elif activation == "sigmoid":
         return nn.Sigmoid()
 
-    raise RuntimeError("activation should be relu/gelu/silu, not {}".format(activation))
+    raise RuntimeError("activation should be relu/gelu/silu/sigmoid, not {}".format(activation))
+
+def list_subtract(l, r):
+    return [el for el in l if el not in set(r)]
+
+def fetch_rotary_parameters(module,module_to_find=nn.Linear):
+    params = []
+    for m in module.modules():
+        if isinstance(m, module_to_find):
+            for p in m.parameters():
+                params.append(p)
+    rest = list_subtract(module.parameters(), params)
+    return params, rest
 
 def Positional_Encoding(x: Tensor) -> Tensor :
     max_len = x.size(1)
@@ -81,7 +93,7 @@ def Positional_Encoding(x: Tensor) -> Tensor :
     pe[:, 0::2] = torch.sin(position * div_term)
     pe[:, 1::2] = torch.cos(position * div_term)
     pe = pe.unsqueeze(0).to(x.device)
-    return x + pe
+    return (x + pe).contiguous()
 
 class RMSNorm(Module):
     def __init__(self, dim, eps = 1e-8):
@@ -106,10 +118,8 @@ class ScaleNorm(Module):
         return x / norm.clamp(min = self.eps) * self.g
 
 class Identity(Module):
-
     def __init__(self):
         super(Identity,self).__init__()
-    
     def forward(self,x,*args):
         return x
 
@@ -186,39 +196,34 @@ class GRUGating(nn.Module):
 
 class ET_ffd(Module):
 
-    def __init__(self,dim,activation="relu",layers=1,kernal_size=3,mult=4,fn=None,sequential=False):
+    def __init__(self,dim,activation="sigmoid",layers=1,kernal_size=3,mult=4,fn=None,):
         super(ET_ffd,self).__init__()
+        kernal_size = (kernal_size//2)*2 + 1
         self.l_1 = nn.Sequential(
-            nn.Conv1d(dim,dim*mult,kernal_size,1,padding=kernal_size//2,groups=1),
+            nn.Conv1d(dim,dim*mult,kernal_size,1,padding=0,groups=1),
             _get_activation_fn(activation),
         )
+        self.padding = kernal_size - 1
         self.l_2 = GEGLU(dim*mult,dim,layers)
 
         self.fn = fn if isinstance(fn,nn.ModuleList) else ((nn.ModuleList(fn) if isinstance(fn,Iterable) else nn.ModuleList([i for i in fn if i != None])) if fn !=None else None)
-        self.seq = sequential
+        self.lin = nn.Linear((len(fn)+1)*dim,dim) if exists(self.fn) else None
 
     def forward(self,x,*args):
-        out = ckpt(self.l_1,x.transpose(1,2)).transpose(1,2)
+        out = ckpt(self.l_1,F.pad(x.transpose(1,2),(self.padding,0),value=0)).transpose(1,2)
         out = ckpt(self.l_2,out)
         if self.fn != None:
             for fn in self.fn:
-                if self.seq:
-                    inp = out
-                else:
-                    inp = x
-                out = out + ckpt(fn,inp)
-        return out
+                tmp = ckpt(fn,x)
+                out = torch.cat((out,tmp),dim=-1)
+            out = ckpt(self.lin,out)
+        return out.contiguous()
 
 class AbsolutePositionalEmbedding(Module):
     def __init__(self, dim, max_seq_len):
         super().__init__()
         self.emb = nn.Embedding(max_seq_len, dim)
         self.max_seq_len = max_seq_len
-        self.init_()
-
-    def init_(self):
-        for w in self.parameters():
-            w.data.uniform_(-1/4,1/4)
 
     def forward(self, x):
         if x.size(1) < self.max_seq_len:
@@ -251,7 +256,7 @@ class TransformerBlock(Module):
                      nhead=4, 
                      dim_feedforward=512, 
                      dropout=0.1, 
-                     activation="relu",
+                     activation="sigmoid",
                      mem_kv=1024,
                      pkm_dims=None,
                      pkm_keys=64,
@@ -282,7 +287,7 @@ class TransformerBlock(Module):
         if hop_dim==None:
             hop_dim = d_model//1
 
-        pkm_heads = max((nhead * pkm_dims) // d_model,1)
+        #pkm_heads = max((nhead * pkm_dims) // d_model,1)
         hop_heads = max((nhead * hop_dim) // d_model,1)
 
         modes = nhead if modes == None else modes
@@ -290,7 +295,7 @@ class TransformerBlock(Module):
 
         pkm1 = nn.Sequential(
             nn.Linear(d_model,pkm_dims),
-            PKM(pkm_dims,heads=pkm_heads,num_keys=pkm_keys),
+            PKM(pkm_dims,num_keys=pkm_keys),
             nn.Linear(pkm_dims,d_model),
             ) if pkm_dims!=0 else None
 
@@ -506,7 +511,6 @@ class TransformerModule(ModuleList):
                     local_heads=2,
                     attend_to_self=True,
                     prev_state_self_num=32,
-                    attend_to_inp=True,
                     mlp_layers=1,
                     encoder_n_decoder=True,
                     ):
@@ -539,20 +543,7 @@ class TransformerModule(ModuleList):
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
         block = TransformerBlock(d_model, nhead, nhid, dropout,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
-        self.deb_attn_0 = Attention(d_model,
-                                            heads=nhead,
-                                            dim_head=d_model//nhead,
-                                            num_mem_kv=0,
-                                            rotary_pos_emb=True,
-                                            nystrom=nystrom,)
         
-        self.attend_to_inp = Attention(d_model,
-                                            heads=nhead,
-                                            dim_head=d_model//nhead,
-                                            num_mem_kv=0,
-                                            rotary_pos_emb=True,
-                                            nystrom=nystrom,)
-
         self.prev_state_exists = False
 
         if prev_state_len > 0 and prev_state_self_num > 0:
@@ -568,13 +559,8 @@ class TransformerModule(ModuleList):
                                                 num_mem_kv=0,
                                                 rotary_pos_emb=True,
                                                 nystrom=nystrom,)
-
-            self.prev_state_attend = Attention(d_model,
-                                                heads=nhead,
-                                                dim_head=d_model//nhead,
-                                                num_mem_kv=0,
-                                                rotary_pos_emb=True,
-                                                nystrom=nystrom,)
+        else:
+            self.prev_state = None
 
         self.d_model = d_model
         self.num_layers = num_layers
@@ -622,14 +608,6 @@ class TransformerModule(ModuleList):
         ctxt = context
 
         src_mask = None#torch.triu(torch.ones((src.size(1),src.size(1))),diagonal=1)
-
-        if self.prev_state_exists:
-            prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
-            prev_state = ckpt(self.prev_state_update,prev_state,output)
-            if ctxt != None:
-                prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
-            for _ in range(self.prev_state_self_num):
-                prev_state = ckpt(self.prev_state_update,prev_state)
             
         if self.enable_encoder:
             for enc in self.encoder:
@@ -641,21 +619,12 @@ class TransformerModule(ModuleList):
             for dec in self.decoder_self:
                 output = ckpt(dec,output,None,src_mask)
         
-        if self.prev_state_exists:
-            prev_state = ckpt(self.prev_state_update,prev_state,output)
-            if ctxt != None:
-                prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
-            for _ in range(self.prev_state_self_num):
-                prev_state = ckpt(self.prev_state_update,prev_state)
-
         if self.deberta_layers!=None:
             out = Positional_Encoding(self.absolutepositionalembedding(output))
-            out = ckpt(self.deb_attn_0,out,output)
             if self.full_block_repeat:
                 for _ in range(self.repeated_deberta_layers+1):
                     for enc in self.deberta_layers:
                         out = ckpt(enc,out,output,src_mask)
-                        out = ckpt(enc,out,prev_state)
                         if exists(context):
                             out = ckpt(enc,out,context)
                 else:
@@ -665,30 +634,26 @@ class TransformerModule(ModuleList):
                 for enc in self.deberta_layers:
                     for _ in range(self.repeated_deberta_layers+1):
                         out = ckpt(enc,out,output,src_mask)
-                        out = ckpt(enc,out,prev_state)
                         if exists(context):
                             out = ckpt(enc,out,context)
                 else:
                     if self.deberta_layers!=None:
                         output = out
 
-        if self.attend_to_inp != None:
-            output = ckpt(self.attend_to_inp,output,src)
-            if exists(context):
-                output = ckpt(self.attend_to_inp,output,context)
-
         if self.prev_state_exists:
-            for _ in range(self.prev_state_self_num):
-                prev_state = ckpt(self.prev_state_update,prev_state)
-                
-            output = ckpt(self.prev_state_attend,output,prev_state)
+            prev_state = repeat(self.prev_state,'1 n d -> b n d',b=output.size(0))
 
-        if self.prev_state_exists:
             prev_state = ckpt(self.prev_state_update,prev_state,output)
-            if ctxt != None:
+            if exists(ctxt):
                 prev_state = ckpt(self.prev_state_update,prev_state,ctxt)
 
-            self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
+            for _ in range(self.prev_state_self_num):
+                prev_state = ckpt(self.prev_state_update,prev_state)
+
+            output = ckpt(self.prev_state_update,output,prev_state)
+
+            prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape) / output.size(0)
+            self.prev_state = prev_state.clone().detach()
 
         if context != None:
             return output,ctxt
@@ -727,7 +692,6 @@ class TransformerModel(Module):
                     fno_layers=4,
                     modes=None,
                     width=None,
-                    attend_to_inp=True,
                     mlp_layers=1,
                     encoder_n_decoder=True,
                     device: torch.DeviceObjType = device
@@ -757,7 +721,6 @@ class TransformerModel(Module):
                                                         modes=modes,
                                                         width=width,
                                                         prev_state_self_num=prev_state_self_num,
-                                                        attend_to_inp=attend_to_inp,
                                                         mlp_layers=mlp_layers,
                                                         encoder_n_decoder=encoder_n_decoder,
                                                         )
@@ -1136,14 +1099,12 @@ class TransformerModel(Module):
                 trainable_output_targets = output_targets
                 
             loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
-            #loss = loss * min(2,max(1,torch.logical_and(torch.argmax(trainable_output,dim=-1) != trainable_output_targets, torch.argmax(trainable_output,dim=-1) == torch.full(trainable_output_targets.shape,1192,device=trainable_output.device,dtype=trainable_output.dtype)).sum().item()*(10/trainable_output_targets.view(-1).size(-1))))
             
-            loss.backward()
+            loss.backward(retain_graph=True)
             torch.cuda.empty_cache()
-            if mini_batch_size != None and batch != None:
-                if batch%mini_batch_size == 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
+            if mini_batch_size != None and batch != None and batch%mini_batch_size == 0:
+                optimizer.step()
+                optimizer.zero_grad()
             outputs['output'] = output
 
             losses['loss'] = loss.item()
@@ -1217,50 +1178,49 @@ class TransformerModel(Module):
         if self.auto_check_redraw:
             self.proj_updater.redraw_projections()
 
-        src = self.embedding_encoder(src)
-        src = src * math.sqrt(self.ninp)
-        src = ckpt(self.ffd1,src)
+        output = self.embedding_encoder(src)
+        output = output * math.sqrt(self.ninp)
+        output = ckpt(self.ffd1,output)
 
         if self.encoder_decoder:
             context = self.embedding_encoder(context)
             context = context * math.sqrt(self.ninp)
             context = ckpt(self.ffd1,context)
 
+        output = Positional_Encoding(output)
+        if self.encoder_decoder:
+            context = Positional_Encoding(context)
+
         if seq_scale_down:
-            src = ckpt(self.scale_down_conv,src.transpose(-1,-2)).transpose(-1,-2)
+            output = ckpt(self.scale_down_conv,output.transpose(-1,-2)).transpose(-1,-2)
             if self.encoder_decoder:
                 context = ckpt(self.scale_down_conv,context.transpose(-1,-2)).transpose(-1,-2)
                 
         mem = default(mem,self.mem)
         if exists(mem):
-            if (mem.size(-1) == src.size(-1) and len(mem.shape) == 2): 
-                src = torch.cat((repeat(mem, 'n d -> b n d', b = src.size(0)),src),dim=-2)
+            if (mem.size(-1) == output.size(-1) and len(mem.shape) == 2): 
+                output = torch.cat((Positional_Encoding(repeat(mem, 'n d -> b n d', b = output.size(0))),output),dim=-2)
         if self.encoder_decoder:
             context_mem = default(context_mem,self.mem)
             if exists(context_mem):
                 if (context_mem.size(-1) == context.size(-1) and len(context_mem.shape) == 2): 
-                    context = torch.cat((repeat(context_mem, 'n d -> b n d', b = context.size(0)),context),dim=-2)
+                    context = torch.cat((Positional_Encoding(repeat(context_mem, 'n d -> b n d', b = context.size(0))),context),dim=-2)
 
-
-        output = Positional_Encoding(src).contiguous()
-        if self.encoder_decoder:
-            context = Positional_Encoding(context).contiguous()
-
-        output = ckpt(self.transformer_block,output,context)
+        output = self.transformer_block(output,context)
         if isinstance(output,tuple):
             context = output[1]
             output = output[0]
 
         if exists(mem):
             mem = output[:,:mem.size(0)]
-            mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.mem.shape) / b
+            mem = torch.sum(mem,dim=0,keepdim=True).reshape(-1,output.size(-1)) / b
             mem = mem.detach()
             output = output[:,mem.size(0):]
 
         if exists(context):
             if exists(context_mem):
                 context_mem = context[:,:context_mem.size(0)]
-                context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(self.context_mem.shape) / b
+                context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(-1,output.size(-1)) / b
                 context_mem = context_mem.detach()
                 context = context[:,context_mem.size(0):]
         

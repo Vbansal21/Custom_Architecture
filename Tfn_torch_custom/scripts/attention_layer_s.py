@@ -454,16 +454,20 @@ class NystromAttention(nn.Module):
                 conv_in = conv_in if conv_in != None else heads
                 conv_out = conv_out if conv_out != None else heads
                 groups = math.gcd(conv_out,conv_in)
-                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = 1, bias = True)
+                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = 1, bias = False)
             else:
                 conv_in = conv_in if conv_in != None else dim_head
                 conv_out = conv_out if conv_out != None else dim_head
                 groups = math.gcd(conv_out,conv_in)
-                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = 1, bias = True)
+                self.res_conv = nn.Conv2d(conv_in, conv_out, (kernel_size, 1), padding = (padding, 0), groups = 1, bias = False)
 
         if self.talking_head_attn:
-            self.talking_head_conv_pre = nn.Conv2d(self.heads,self.heads,kernel_size=1)
-            self.talking_head_conv_post = nn.Conv2d(self.heads,self.heads,kernel_size=1)
+            self.talking_head_sim1 = nn.Parameter(torch.rand((self.heads, self.heads)))
+            self.talking_head_sim2 = nn.Parameter(torch.rand((self.heads, self.heads)))
+            self.talking_head_sim3 = nn.Parameter(torch.rand((self.heads, self.heads)))
+            self.talking_head_attn1 = nn.Parameter(torch.rand((self.heads, self.heads)))
+            self.talking_head_attn2 = nn.Parameter(torch.rand((self.heads, self.heads)))
+            self.talking_head_attn3 = nn.Parameter(torch.rand((self.heads, self.heads)))
 
     def forward(self, q, k, v, src_mask = None, mask = None, return_attn = False):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
@@ -525,9 +529,9 @@ class NystromAttention(nn.Module):
         sim3 = einsum(einops_eq, q_landmarks, k)
 
         if self.talking_head_attn:
-           sim1 = ckpt(self.talking_head_conv_pre,sim1)
-           sim2 = ckpt(self.talking_head_conv_pre,sim2)
-           sim3 = ckpt(self.talking_head_conv_pre,sim3)
+           sim1 = einsum('b h i j, h k -> b k i j',sim1,self.talking_head_sim1)
+           sim2 = einsum('b h i j, h k -> b k i j',sim2,self.talking_head_sim2)
+           sim3 = einsum('b h i j, h k -> b k i j',sim3,self.talking_head_sim3)
 
         # masking
 
@@ -557,11 +561,12 @@ class NystromAttention(nn.Module):
 
         attn1, attn2, attn3 = map(lambda t: t.softmax(dim = -1), (sim1, sim2, sim3))
 
-        if self.talking_head_attn:
-           attn1 = ckpt(self.talking_head_conv_post,attn1)
-           attn2 = ckpt(self.talking_head_conv_post,attn2)
-           attn3 = ckpt(self.talking_head_conv_post,attn3)
         attn2_inv = moore_penrose_iter_pinv(attn2, iters)
+
+        if self.talking_head_attn:
+           attn1 = einsum('b h i j, h k -> b k i j',attn1,self.talking_head_attn1)
+           attn2_inv = einsum('b h i j, h k -> b k i j',attn2_inv,self.talking_head_attn2)
+           attn3 = einsum('b h i j, h k -> b k i j',attn3,self.talking_head_attn3)
 
         out = (attn1 @ attn2_inv) @ (attn3 @ v)
 
@@ -784,7 +789,7 @@ class FeedForward(nn.Module):
         x = self.w2(x)
         return x
 
-# positional embeddings
+# positional embeddings/biases
 class LearnableSinusoidEncoding(nn.Module):
     """Layer converts scalar input to Sinusoid Encoding with learnt scaling."""
 
@@ -809,7 +814,6 @@ class LearnableSinusoidEncoding(nn.Module):
         # of [sin(w_1 * x), sin(w_2 *x), cos(w_1 * x), cos(w_2 * x)].
         emb = torch.stack((sinusoid_inp.sin(), sinusoid_inp.cos()), dim=-1)
         return emb.view(*emb.shape[:-2], -1)
-
 
 class ConstrainedLinear(nn.Module):
     """A linear layer with constraints for positional dimensions.
@@ -931,7 +935,6 @@ class ConstrainedLinear(nn.Module):
                 axis=-1
             )
 
-
 class IdentityLinear(nn.Module):
     """A linear layer with identity for positional dimensions.
     This linear layer behaves the same as a regular linear layer for dimensions
@@ -982,17 +985,11 @@ class IdentityLinear(nn.Module):
             pos_encodings = pos_encodings.repeat(1, 1, 1, 2)
         return torch.cat([content_based, pos_encodings], axis=-1)
 
-
 class AbsolutePositionalEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len):
         super().__init__()
         self.emb = nn.Embedding(max_seq_len, dim)
         self.max_seq_len = max_seq_len
-        self.init_()
-
-    def init_(self):
-        for w in self.parameters():
-            w.data.uniform_(-1/4,1/4)
 
     def forward(self, x):
         if x.size(1) < self.max_seq_len:
@@ -1015,23 +1012,7 @@ class AbsolutePositionalEmbedding(nn.Module):
             assert tmp.size(1) == s
             return tmp
 
-# rotary positional embedding helpers
-
-def rotate_every_two(x):
-    x = rearrange(x, '... (d j) -> ... d j', j = 2)
-    x1, x2 = x.unbind(dim = -1)
-    x = torch.stack((-x2, x1), dim = -1)
-    return rearrange(x, '... d j -> ... (d j)')
-
-def apply_rotary_pos_emb(q, sinu_pos):
-    sinu_pos = rearrange(sinu_pos, '() n (j d) -> n j d', j = 2)
-    sin, cos = sinu_pos.unbind(dim = -2)
-    sin, cos = map(lambda t: repeat(t, 'b n -> b (n j)', j = 2), (sin, cos))
-    q = (q * cos) + (rotate_every_two(q) * sin)#map(lambda t: (t * cos) + (rotate_every_two(t) * sin), (q, k))
-    return q
-
 # sinusoidal positional embeddings
-
 class FixedPositionalEmbedding(nn.Module):
     def __init__(self):
         super().__init__()
@@ -1050,16 +1031,62 @@ class FixedPositionalEmbedding(nn.Module):
 
 # rotary embedding, independent of max len
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim):
+    def __init__(
+        self,
+        dim,
+        freqs_for = 'lang',
+        theta = 10000,
+        max_freq = 16,
+        custom_freqs = None,
+        learned_freq = False
+    ):
         super().__init__()
-        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
+        if exists(custom_freqs):
+            freqs = custom_freqs
+        elif freqs_for == 'lang':
+            freqs = 1. / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        elif freqs_for == 'pixel':
+            freqs = torch.logspace(0., log(max_freq / 2) / log(2), dim // 2, base = 2) * pi
+        else:
+            raise ValueError(f'unknown modality {freqs_for}')
 
-    def forward(self, x, seq_dim = 1):
-        t = torch.arange(x.shape[seq_dim], device = x.device).type_as(self.inv_freq)
-        freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
-        emb = torch.cat((freqs, freqs), dim=-1)
-        return emb[None, :, :]
+        self.cache = dict()
+
+        if learned_freq:
+            self.freqs = nn.Parameter(freqs)
+        else:
+            self.register_buffer('freqs', freqs)
+
+    def forward(self, x, cache_key = None,len_dim=-2):
+        if exists(cache_key) and cache_key in self.cache:
+            return self.cache[cache_key]
+            
+        t = torch.arange(x.size(len_dim),dtype=self.freqs.dtype,device=x.device)
+
+        freqs = self.freqs
+
+        freqs = torch.einsum('i, j -> i j', t.type(freqs.dtype), freqs)
+        freqs = torch.stack((freqs, freqs), dim = -1)
+        freqs = rearrange(freqs, '... n r -> ... (n r)')
+
+        if exists(cache_key):
+            self.cache[cache_key] = freqs
+
+        return freqs
+
+# rotary positional embedding helpers
+
+def rotate_half(x):
+    x = rearrange(x, 'b n (d r) -> b n d r', r = 2)
+    x1, x2 = x.unbind(dim = -1)
+    return torch.cat((-x2, x1), dim = -1)
+
+def apply_rotary_emb(t, freqs, start_index = 0):
+    rot_dim = freqs.shape[-1]
+    assert rot_dim <= t.shape[-1], f'feature dimension {t.shape[-1]} is not of sufficient size to rotate in all the positions {rot_dim}'
+    t_left, t, t_right = t[..., :start_index], t[..., start_index:rot_dim], t[..., rot_dim:]
+    t = (t * freqs.cos()) + (rotate_half(t) * freqs.sin())
+    return torch.cat((t_left, t, t_right), dim = -1)
 
 class Attention(nn.Module):
     def __init__(
@@ -1077,7 +1104,7 @@ class Attention(nn.Module):
         kernel_fn = nn.Sigmoid(),
         dropout = 0.25,
         no_projection = False,
-        qkv_bias = True,
+        qkv_bias = False,
         attn_out_bias = True,
         max_seq_len = 2**17,
         pos_scales = 0,
@@ -1122,7 +1149,7 @@ class Attention(nn.Module):
         self.fixed_emb = fixed_emb
         if rotary_pos_emb:
             self.pos_emb = None
-            self.layer_pos_emb = FixedPositionalEmbedding(dim, max_seq_len) if fixed_emb else RotaryEmbedding(dim)
+            self.layer_pos_emb = FixedPositionalEmbedding() if fixed_emb else RotaryEmbedding(dim)
         elif axial_position_emb:
             axial_position_shape = default(axial_position_shape, (math.ceil(max_seq_len / 64), 64))
             self.pos_emb = AxialPositionalEmbedding(dim, axial_position_shape)
@@ -1192,16 +1219,8 @@ class Attention(nn.Module):
                 self.mem_attn = FastAttention(dim_head + additional_head_dims, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
                 self.prev_state_attn = FastAttention(dim_head, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
-            mult = 4
-            
-            self.out_k = nn.Sequential(
-                nn.Linear(dim_head,dim_head*mult),
-                nn.Linear(dim_head*mult,dim_head),
-                )
-            self.out_v = nn.Sequential(
-                nn.Linear(dim_head,dim_head*mult),
-                nn.Linear(dim_head*mult,dim_head),
-                )
+            self.out_k = nn.Linear(dim_head,dim_head)
+            self.out_v = nn.Linear(dim_head,dim_head)
 
             if pos_scales>0:
                 self.q_rel_pos_emb_mem = ConstrainedLinear(
@@ -1250,8 +1269,8 @@ class Attention(nn.Module):
             del(self_q)
 
         if exists(pos_emb_q):
-            q = apply_rotary_pos_emb(q, pos_emb_q)
-            k = apply_rotary_pos_emb(k, pos_emb_k)
+            q = apply_rotary_emb(q, pos_emb_q)
+            k = apply_rotary_emb(k, pos_emb_k)
 
         tmp_k,tmp_v = k,v
 
@@ -1307,7 +1326,7 @@ class Attention(nn.Module):
                 mem_pos_emb_mem_k = None
 
             if exists(mem_pos_emb_mem_k):
-                mem_k = apply_rotary_pos_emb(mem_k.reshape(b,-1,d), mem_pos_emb_mem_k).reshape(b,h,-1,d//h)
+                mem_k = apply_rotary_emb(mem_k.reshape(b,-1,d), mem_pos_emb_mem_k).reshape(b,h,-1,d//h)
 
             if self.pos_scales>0:
                 mem_pos_q = rearrange(self.rel_pos_emb_q_mem(torch.arange(out.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')

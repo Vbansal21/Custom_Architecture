@@ -71,8 +71,8 @@ class SpectralConv1d(nn.Module):
             weights = weights[:,:input.size(-2),:]
         """
         #return torch.einsum("bix,iox->box", input, weights)
-        mat = torch.einsum("bix,bin->bxn",inputs,repeat(self.weights1,"c m -> b c m",b=inputs.size(0)))
-        return torch.einsum("bxn,bon->box",torch.view_as_complex(torch.sigmoid(torch.view_as_real(mat))),repeat(self.weights2,"c m -> b c m",b=inputs.size(0)))
+        mat = torch.einsum("bix,...in->bxn",inputs,self.weights1)
+        return torch.einsum("bxn,...on->box",torch.view_as_complex(torch.sigmoid(torch.view_as_real(mat))),self.weights2)
 
     def forward(self, x):
         batchsize = x.shape[0]

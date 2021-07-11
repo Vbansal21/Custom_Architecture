@@ -27,14 +27,15 @@ class Swish(nn.Module):
 class GatedConvolution(nn.Module):
     def __init__(self,d_model,patch_size=3,padding=1,dim=-1):
         super(GatedConvolution,self).__init__()
-        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=padding,groups=1,bias=True)
+        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=0,groups=1,bias=True)
+        self.padding = padding*2
         self.dim = dim
         #init.xavier_uniform_(self.conv.weight, gain=1)
 
     def forward(self,x):
-        convoluted = self.conv(x)
+        convoluted = self.conv(F.pad(x,(self.padding,0),value=0))
         out, gate = convoluted.chunk(2, dim=self.dim)
-        out = out * torch.sigmoid(gate)
+        out = out * F.gelu(gate)
         return out
 
 class GLU(nn.Module):
@@ -48,7 +49,7 @@ class GLU(nn.Module):
             for convolution in self.gated_convs:
                 x = convolution(x)
         out, gate = x.chunk(2, dim=self.dim)
-        x = out * gate.sigmoid()
+        x = out * F.gelu(gate)
         return x
         
 class DepthWiseConv1d(nn.Module):
@@ -58,7 +59,7 @@ class DepthWiseConv1d(nn.Module):
         self.conv = nn.Conv1d(chan_in, chan_out, kernel_size, groups = math.gcd(chan_out,chan_in))
 
     def forward(self, x):
-        x = F.pad(x, self.padding)
+        x = F.pad(x, self.padding,value=0)
         return self.conv(x)
 
 # attention, feedforward, and conv module
@@ -137,14 +138,14 @@ class ConformerConvModule(nn.Module):
         padding = calc_same_padding(kernel_size) if not causal else (kernel_size - 1, 0)
 
         self.net = nn.Sequential(
-            ScaleNorm(dim),
+            RMSNorm(dim),
             Rearrange('b n c -> b c n'),
-            nn.Conv1d(dim, inner_dim * 2, 1,groups=1),
+            nn.Conv1d(dim, inner_dim * 2, 1,groups=dim),
             GLU(dim=1,d_model=inner_dim*2,gated_conv=False),
             DepthWiseConv1d(inner_dim, inner_dim, kernel_size = kernel_size, padding = padding),
             nn.BatchNorm1d(inner_dim) if not causal else nn.Identity(),
             Swish(),
-            nn.Conv1d(inner_dim, dim, 1,groups=1),
+            nn.Conv1d(inner_dim, dim, 1,groups=dim),
             Rearrange('b c n -> b n c'),
             nn.Dropout(dropout)
         )

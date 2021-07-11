@@ -162,16 +162,16 @@ eval_batch_size: int = batch_size
 mini_batch_size: int = 1
 
 ntokens: int = tokenizer.vocab_size # None
-emsize: int = 128
+emsize: int = 128*4
 nhid: int = emsize * 4
-nlayers: int = 1
-deberta_layers: int = 1
+nlayers: int = 3
+deberta_layers: int = 0
 repeated_deberta_layers: int = 0
 full_block_repeat: bool = True
 nhead: int = 8
 dropout = (math.pi/10)
-mem_tokens: int = emsize*8
-bptt: int = (1024*12) #- mem_tokens
+mem_tokens: int = 1024
+bptt: int = (1024*2) #- mem_tokens
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
 mlp_layers: int = 1
@@ -181,9 +181,8 @@ width: int = 32
 causal: bool = True
 nystrom: bool = True
 attend_to_self: bool = True
-attend_to_inp: bool = True
 feature_redraw_interval: int = 1024
-prev_state_len: int = 4096
+prev_state_len: int = 1024
 prev_state_self_num: int = 1
 local_heads: int = 2
 local_heads: int = min(local_heads,nhead)
@@ -578,7 +577,6 @@ if use_deepspeed:
                                 prev_state_len=prev_state_len,
                                 prev_state_self_num=prev_state_self_num,
                                 local_heads=local_heads,
-                                attend_to_inp=attend_to_inp,
                                 mlp_layers=mlp_layers,
                                 encoder_n_decoder=encoder_n_decoder,
                         ).half()
@@ -608,7 +606,6 @@ else:
                             prev_state_len=prev_state_len,
                             prev_state_self_num=prev_state_self_num,
                             local_heads=local_heads,
-                            attend_to_inp=attend_to_inp,
                             mlp_layers=mlp_layers,
                             encoder_n_decoder=encoder_n_decoder,
                     ).to(device)
@@ -633,7 +630,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1
+lr = 0.1
 
 if not use_deepspeed:
     if use_sgd:
@@ -747,7 +744,6 @@ def wandb_init():
         "feature_redraw_intervel":feature_redraw_interval,
         "prev_state_len":prev_state_len,
         "local_heads":local_heads,
-        "attend_to_inp":attend_to_inp,
         "prev_state_self_num":prev_state_self_num,
         "mlp_layers":mlp_layers,
     },
@@ -846,11 +842,14 @@ model.to(device)
 
 # TODO: Setup 'curses' module to print colored text for inference output
 #import curses
-def inference(text,size=128,eval_model = model,reccurent_mem=None,reccurent_mem_ctxt=None,return_mem=True):
+def inference(text,size=128,eval_model = model,reccurent_mem=None,reccurent_mem_ctxt=None,return_mem=True,append_eos_at_start=False):
     eval_model.eval()
     eval_model = eval_model.to(device)
     torch.cuda.empty_cache()
-    text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device)
+    if append_eos_at_start:
+        text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device)
+    else:
+        text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device)
     if use_deepspeed:
         with autocast():
             out,mem,mem_ctxt = eval_model(text_input,mem=reccurent_mem,context_mem=reccurent_mem_ctxt)
@@ -1143,7 +1142,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                             if i == 0:
                                 break
                             print("\ninput text for inference(type in multi line text then press CTRL-d/ ^D (press twice if no newline character is type i.e. \\n -> enter/return key) when complete ):\v")
-                            inp = ''
+                            inp = '' if i==1 else inp
                             while True:
                                 inp += sys.stdin.read()
                                 try:

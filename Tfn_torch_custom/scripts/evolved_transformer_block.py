@@ -19,14 +19,16 @@ def ckpt(f,*arg,checkpointed = checkpointed):
         f(*arg)
             
 class GatedConvolution(nn.Module):
-    def __init__(self,d_model,patch_size=3,padding=1):
+    def __init__(self,d_model,patch_size=3,padding=1,dim=-1):
         super(GatedConvolution,self).__init__()
-        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=padding,groups=1,bias=True)
+        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=0,groups=1,bias=True)
+        self.padding = padding*2
+        self.dim = dim
         #init.xavier_uniform_(self.conv.weight, gain=1)
 
     def forward(self,x):
-        convoluted = self.conv(x.transpose(1,2)).transpose(1,2)
-        out, gate = convoluted.split(int(convoluted.size(-1) / 2), -1)
+        convoluted = self.conv(F.pad(x.transpose(-1,-2),(self.padding,0),value=0)).transpose(-1,-2)
+        out, gate = convoluted.chunk(2, dim=self.dim)
         out = out * torch.sigmoid(gate)
         return out
 
@@ -47,12 +49,13 @@ class SeparableConv1D(nn.Module):
     def __init__(self, in_channels, inner_channels, out_channel, kernel_size=1, padding=0):
         super().__init__()
         self.pre_point_wise = nn.Conv1d(in_channels, inner_channels, kernel_size=1,groups=1)
-        self.deep_wise = nn.Conv1d(inner_channels, inner_channels, kernel_size=kernel_size, padding=padding, groups=inner_channels)
+        self.deep_wise = nn.Conv1d(inner_channels, inner_channels, kernel_size=kernel_size, padding=0, groups=inner_channels)
         self.post_point_wise = nn.Conv1d(inner_channels, out_channel, kernel_size=1,groups=1)
+        self.padding = padding*2
 
     def forward(self, x):
         x = self.pre_point_wise(x)
-        x = self.deep_wise(x)
+        x = self.deep_wise(F.pad(x,(self.padding,0),value=0))
         x = self.post_point_wise(x)
         return x
 
@@ -86,7 +89,7 @@ class ET_Encoder_Block(nn.Module):
             self.attention = nn.MultiheadAttention(d_model, num_heads) 
         else:
             self.attention = attn
-        self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(5)])
+        self.layer_norms = nn.ModuleList([RMSNorm(d_model) for _ in range(5)])
         if ffd == None:
             self.feed_forward = nn.Sequential(
             Rearrange("... n d -> ... d n"),
@@ -152,7 +155,7 @@ class ET_Decoder_Block(nn.Module):
             self.attention_cross_1 = attn['cross_1'] 
             self.attention_cross_2 = attn['cross_2'] 
 
-        self.layer_norms = nn.ModuleList([ScaleNorm(d_model) for _ in range(6)])
+        self.layer_norms = nn.ModuleList([RMSNorm(d_model) for _ in range(6)])
 
         if ffd == None:
             self.feed_forward = nn.Sequential(
@@ -165,9 +168,9 @@ class ET_Decoder_Block(nn.Module):
         else:
             self.feed_forward = ffd
 
-        self.sep_conv_l = SeparableConv1D(d_model,d_model*2,d_model,kernel_size=11,padding=0)
-        self.sep_conv_r = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=7,padding=0)
-        self.sep_mid = SeparableConv1D(d_model,d_model,d_model,kernel_size=7,padding=0)
+        self.sep_conv_l = SeparableConv1D(d_model,d_model*2,d_model,kernel_size=11,padding=5)
+        self.sep_conv_r = SeparableConv1D(d_model,d_model//2,d_model,kernel_size=7,padding=3)
+        self.sep_mid = SeparableConv1D(d_model,d_model,d_model,kernel_size=7,padding=3)
 
     def forward(self, x: Tensor, context: Tensor = None, src_mask: Tensor = None) -> Tensor:
             
@@ -183,15 +186,15 @@ class ET_Decoder_Block(nn.Module):
         attended = self_attn + cross_attn + x
         attended_normed = self.layer_norms[1](attended)
 
-        sep_l = ckpt(self.sep_conv_l,F.pad(attended_normed,(0,0,10,0),value=0).transpose(1,2)).transpose(1,2)
+        sep_l = ckpt(self.sep_conv_l,attended_normed.transpose(1,2)).transpose(1,2)
         sep_l = F.relu(sep_l)
 
-        sep_r = ckpt(self.sep_conv_r,F.pad(attended_normed,(0,0,6,0),value=0).transpose(1,2)).transpose(1,2)
+        sep_r = ckpt(self.sep_conv_r,attended_normed.transpose(1,2)).transpose(1,2)
 
         sep_attended = sep_l + sep_r
         sep_normed = self.layer_norms[2](sep_attended)
 
-        sep_normed = ckpt(self.sep_mid,F.pad(sep_normed,(0,0,6,0),value=0).transpose(1,2)).transpose(1,2)
+        sep_normed = ckpt(self.sep_mid,sep_normed.transpose(1,2)).transpose(1,2)
         sep_attended = sep_normed + attended
 
         sep_attn_normed = self.layer_norms[3](sep_attended)
