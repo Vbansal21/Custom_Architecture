@@ -5,6 +5,7 @@ pytorch-nlp
 zstandard
 jsonlines
 einops 
+datasets
 local_attention 
 mogrifier 
 deepspeed 

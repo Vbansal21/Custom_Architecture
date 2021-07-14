@@ -2,6 +2,7 @@ import math
 import io, os
 import textract
 import random,wandb
+import datasets
 from torch import nn
 from torch import Tensor
 from einops import rearrange, repeat
@@ -24,8 +25,6 @@ autocast = torch.cuda.amp.autocast
 
 
 file = "all_files"
-files = []
-string_of_files = ""
 
 try:
     retrieve_tokenizer = inpt(prompt="retrieve tokenizer?(default: True):",timeout=15)
@@ -95,25 +94,53 @@ def file_to_str(file_name_with_path:str,files_not_to_be_included: List[str] = ["
     return file_text
 
 def initialize_tokenizer(target_vacab = 2**15):
-    global files, string_of_files
-    sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r\v\r "
+    files = []
+    string_of_files = ""
+    sample = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*() ``` `` ~-_+=[{]}\\|\"\' ''' '' \"\"    /*-+.:;/.>,<1234567890\t\n\f\r\v\r "
     sample += " ".join([i for i in sample])
-    tmp = "".join([i for i in io.open(train_filepath, encoding="utf8")]) + "".join([i for i in io.open(test_filepath, encoding="utf8")]) + "".join([i for i in io.open(valid_filepath, encoding="utf8")])
-    sample += " ".join([i for i in tmp]) + tmp
     path = "../"
     files += list_of_all_files(path)
+
+    lst = ['af', 'am', 'ar', 'arq', 'art-x-bork', 'as', 'ast', 'az', 'be', 'bg', 'bi', 'bn', 'bo', 'bs', 'ca', 'ceb', 'cnh', 'cs', 'da', 'de', 'el', 'en', 'eo', 'es', 'et', 'eu', 'fa', 'fi', 'fil', 'fr', 'fr-ca', 'ga', 'gl', 'gu', 'ha', 'he', 'hi', 'hr', 'ht', 'hu', 'hup', 'hy', 'id', 'ig', 'inh', 'is', 'it', 'ja', 'ka', 'kk', 'km', 'kn', 'ko', 'ku', 'ky', 'la', 'lb', 'lo', 'lt', 'ltg', 'lv', 'mg', 'mk', 'ml', 'mn', 'mr', 'ms', 'mt', 'my', 'nb', 'ne', 'nl', 'nn', 'oc', 'pa', 'pl', 'ps', 'pt', 'pt-br', 'ro', 'ru', 'rup', 'sh', 'si', 'sk', 'sl', 'so', 'sq', 'sr', 'srp', 'sv', 'sw', 'szl', 'ta', 'te', 'tg', 'th', 'tl', 'tlh', 'tr', 'tt', 'ug', 'uk', 'ur', 'uz', 'vi', 'zh', 'zh-cn', 'zh-tw']
+    years = ['2014','2015','2016']
+    for lang in lst:
+        for year in years:
+            try:
+                tmp = datasets.load_dataset("ted_talks_iwslt",language_pair=('en',lang),year=year,cache_dir="./.data/huggingface_datasets/")
+                for key in tmp.keys():
+                    for index in range(len(tmp[key])):
+                        for content in tmp[key][index]['translation']:
+                            keys = content.keys()
+                            string_of_files += "[sos]"+"path:"+i+"|data:[Instruct Mode]translation[Instruct Mode]"+"-->".join([key_+":"+(content[key_]) for key_ in keys])+"[eos]"
+            except:
+                pass
+    try:
+        tmp = datasets.load_dataset("pec",'all',cache_dir="./.data/huggingface_datasets/")
+        for key in tmp.keys:
+            for index in range(tmp[key]):
+                string_of_files += "[sos]"+"path:"+i+"|data:[Instruct Mode]dialog reply[Instruct Mode]"+"person 1:"+tmp[key][index]['context']+"responder's persona:"+tmp[key][index]['personas']+"responder"+tmp[key][index]['response']+"[eos]"
+    except:
+        pass
+
     for i in files:
-        if "jsonl.zst" not in i:
+        if i.find("jsonl.zst")==-1 and i.find("huggingface_datasets")==-1:
             string_of_files += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
+        elif i.find("huggingface_datasets")!=-1:
+            continue
         else:
-            string_of_files += "".join(["".join(list(set([k for k in "[sos]"+j+"[eos]"]))) for j in read_jsonl(i)])
+            print("Jsonl ZST:",i)
+            tmp = set()
+            for j in read_jsonl(i):
+                tmp.union(set([k for k in str(j)]))
+            string_of_files += "".join(list(tmp))
+            #string_of_files += "".join(["".join(list(set([k for k in "[sos]"+j+"[eos]"]))) for j in read_jsonl(i)])
     set_of_chars = "".join(list(set([i for i in string_of_files])))
     sample += " ".join([i for i in set_of_chars]) + set_of_chars
     sample = "".join(list(set([i for i in sample])))
     print("parsed all chars")
     ### Reserved Token Format => [content] <-- the square braces are required.
     tokenizer = SubwordEncoder(sample,target_vocab_size=target_vacab,reserved_tokens=[
-    '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]',"[Instruct Mode]"
+    '[pad]','[unk]','[sos]','[eos]','[copy]','[mask]','[segment_seperator]','[non_text_content]','[/non_text_content]',"[Instruct Mode]","[Null]"
     ],
     eos_index=3,unknown_index=1,padding_index=0)
     vocab_size = tokenizer.vocab_size
@@ -140,6 +167,9 @@ if retrieve_tokenizer:
             tokenizer_name = tokenizer_files[inp]
     tokenizer = torch.load("models/"+str(tokenizer_name))
     vocab_size = tokenizer.vocab_size
+    for i in range(vocab_size):
+        tmp = tokenizer.decode(torch.full((1,),i))
+        print(i,":-->",tmp,"<-->",repr(tmp),"<-->",repr(tokenizer.vocab[i]),"<--",sep="")
 else:
     try:
         inp = int(str(inpt(prompt="target vocabulary size (default=2**15):",timeout=15)))
@@ -198,6 +228,8 @@ use_sgd: bool = True
 def batchify(data, bsz,dim=0):
     if data.size(0) == 2 and len(data.size())==3:
         data = data[0]
+    if len(data.size())==2:
+        data = data.reshape(-1)
     nbatch = data.size(dim) // bsz
     data = data.narrow(dim, 0, nbatch * bsz)
     data = data.reshape(bsz, -1).contiguous()
@@ -227,6 +259,14 @@ for i in range(vocab_size):
     if len(tmp) > 0:
         if tmp[0] == "[" and tmp[-1] == "]":
             reserved_tokens[i] = tmp
+
+null_token = None
+for i in range(vocab_size):
+    tmp = tokenizer.decode(torch.tensor((i,),dtype=torch.long))
+    if tmp == '':
+        null_token = i
+if null_token != None:
+    print("Null charachter:",repr(tokenizer.decode(torch.tensor((null_token,),dtype=torch.long))),"<--",sep='')
 
 def data_retrieve(data=None,path=None):
     if data != None:
@@ -321,30 +361,6 @@ def random_mask_shuffle_encoder(
     return out,index_to_be_trained_on
 
 def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch_size,generator=None,prefer_source_over_generator=True,j_0 = -1,replace_all_with_possible_reserved_tokens=False):
-    """
-    if not prefer_string_over_path:
-        data = None
-        if "jsonl.zst" in path:
-            tmp = ""
-            for i in data_retrieve(path=path):
-                tmp += i
-                if len(tmp) >= bptt*batch_size_:
-                    data = data_process(tmp)
-                    if data.size(0) >= bptt*batch_size_:
-                        break
-            source = data
-    else:
-        #"[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
-        tmp = "[sos]"+"path:"+i+"|data:"
-        for i in data_retrieve(data=file_to_str(path)):
-            tmp += i
-            if len(tmp) >= bptt*batch_size_:
-                data = data_process(tmp)
-                if data.size(0) >= bptt*batch_size_:
-                    break
-        source = data
-    """
-
     if type(source) == str:
         source = data_process(source)
 
@@ -354,39 +370,35 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
         source = replace_with_reserved_tokens(source,tok_num=i)
     data = None
     data_stream_ended = False
-    if ((not prefer_source_over_generator and generator != None) or (generator!=None and j>= source.size(1)) and j_0==-1):
-        
+    if ((not prefer_source_over_generator and generator != None) or (generator!=None and j>= source.size(1))):
+        data = None
         step = 0
-        tmp = ""
+        tmp = ''
         for i in generator:
             tmp += i
             step += 1 
             if len(tmp) >= bptt*batch_size_ and step >= batch_size_*(bptt/2048):
                 step = 0
-                data = data_process(tmp)
-                """
-                i = 0
-                while True:
-                    if i>=data.size(0) - sos_tok.size(0):
-                        break
-                    if (data[i:i+sos_tok.size(0)]==sos_tok).sum().item():
-                        data = torch.cat((data[:i],torch.full((1,),2,dtype=data.dtype,device=data.device),data[i+sos_tok.size(0):]),dim=-1)
-                    i+=1
-                i = 0
-                while True:
-                    if i>=data.size(0) - eos_tok.size(0):
-                        break
-                    if (data[i:i+sos_tok.size(0)]==eos_tok).sum().item():
-                        data = torch.cat((data[:i],torch.full((1,),3,dtype=data.dtype,device=data.device),data[i+eos_tok.size(0):]),dim=-1)
-                    i+=1
-                """
+                data = data_process(str(tmp))
                 if data.size(0) >= bptt*batch_size_:
                     for i in reserved_tokens.keys():
                         if not replace_all_with_possible_reserved_tokens and i!=2 and i!=3:
                             continue
                         data = replace_with_reserved_tokens(data,tok_num=i)
-                    data = batchify(data,batch_size_,-1)
+                    if not (data.size(0) >= bptt*batch_size_):
+                        continue
+                    data = (batchify(data,batch_size_,-1)).contiguous()
                     break
+        if data == None:
+            data = data_process(str(tmp))
+            for i in reserved_tokens.keys():
+                if not replace_all_with_possible_reserved_tokens and i!=2 and i!=3:
+                    continue
+                data = replace_with_reserved_tokens(data,tok_num=i)
+            data = (batchify(data,batch_size_,-1)).contiguous()
+        elif isinstance(data,torch.Tensor) and len(data.size())==1:
+            data = (batchify(data,batch_size_,-1)).contiguous()
+
     j_0 = j if (j_0 == -1 and (not prefer_source_over_generator and generator != None)) else j_0
     j -= j_0 if j_0!=-1 else 0
     if data!= None:
@@ -394,7 +406,6 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
             source = data.contiguous()
             j=0
             j_0 = -1
-
 
     seq_len = min(bptt, source.size(1) - j)
     rnd_shuffle = random.randint(0,1000000)/1000000 if shuffle else 0
@@ -434,26 +445,62 @@ try:
     processed_test_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_test.tar",map_location=torch.device('cpu'))
     processed_val_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_val.tar",map_location=torch.device('cpu'))
 
+    if 10*processed_test_data.size(1) > processed_train_data.size(1):
+        extra_portion = int(((processed_test_data.size(1)/processed_train_data.size(1))*0.66)*processed_test_data.size(1))
+        processed_train_data = processed_train_data[:,:extra_portion]
+        processed_test_data = processed_test_data[:,extra_portion:]
+
     processed_train_data = batchify(processed_train_data,batch_size,-1)
     processed_test_data = batchify(processed_test_data,eval_batch_size,-1)
     processed_val_data = batchify(processed_val_data,eval_batch_size,-1)
 except Exception as e:
     print(e)
-    if len(string_of_files) < 1:
-        path = "../"
-        files += list_of_all_files(path)
-        string_of_files = {"train":string_of_files,"test":"","val":""}
-        for i in files:
-            txt_type = "train"
-            if "test" in i:
-                txt_type = "test"
-            elif "val" in i or "valid" in i:
-                txt_type = "val"
-            if "jsonl.zst" not in i:
-                string_of_files[txt_type] += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
-            else:
-                continue
-                #string_of_files["zst"] = {txt_type:i} #"".join(["[sos]"+i+"[eos]" for i in read_jsonl(i)])
+    path = "../"
+    files = list_of_all_files(path)
+    string_of_files = {"train":"","test":"","val":""}
+    txt_type = "train"
+    use_huggingface = False
+
+    lst = ['af', 'am', 'ar', 'arq', 'art-x-bork', 'as', 'ast', 'az', 'be', 'bg', 'bi', 'bn', 'bo', 'bs', 'ca', 'ceb', 'cnh', 'cs', 'da', 'de', 'el', 'en', 'eo', 'es', 'et', 'eu', 'fa', 'fi', 'fil', 'fr', 'fr-ca', 'ga', 'gl', 'gu', 'ha', 'he', 'hi', 'hr', 'ht', 'hu', 'hup', 'hy', 'id', 'ig', 'inh', 'is', 'it', 'ja', 'ka', 'kk', 'km', 'kn', 'ko', 'ku', 'ky', 'la', 'lb', 'lo', 'lt', 'ltg', 'lv', 'mg', 'mk', 'ml', 'mn', 'mr', 'ms', 'mt', 'my', 'nb', 'ne', 'nl', 'nn', 'oc', 'pa', 'pl', 'ps', 'pt', 'pt-br', 'ro', 'ru', 'rup', 'sh', 'si', 'sk', 'sl', 'so', 'sq', 'sr', 'srp', 'sv', 'sw', 'szl', 'ta', 'te', 'tg', 'th', 'tl', 'tlh', 'tr', 'tt', 'ug', 'uk', 'ur', 'uz', 'vi', 'zh', 'zh-cn', 'zh-tw']
+    years = ['2014','2015','2016']
+    if use_huggingface:
+        for lang in lst:
+            for year in years:
+                try:
+                    tmp = datasets.load_dataset("ted_talks_iwslt",language_pair=('en',lang),year=year,cache_dir="./.data/huggingface_datasets/")
+                    for key in tmp.keys():
+                        for index in range(len(tmp[key])):
+                            for content in tmp[key][index]['translation']:
+                                keys = content.keys()
+                                string_of_files[txt_type] += "[sos][Instruct Mode]translation[Instruct Mode]"+"-->".join([key_+":"+content[key_] for key_ in keys])+"[eos]"
+                except:
+                    pass
+        try:
+            tmp = datasets.load_dataset("pec",'all',cache_dir="./.data/huggingface_datasets/")
+            for key in tmp.keys:
+                for index in range(tmp[key]):
+                    txt_type = "train"
+                    if key.find('test')!=-1:
+                        txt_type = "test"
+                    elif key.find('val')!=-1:
+                        txt_type = "val"
+                    string_of_files[txt_type] += "[sos][Instruct Mode]dialog reply[Instruct Mode] person 1:"+tmp[key][index]['context']+"responder's persona:"+tmp[key][index]['personas']+"responder"+tmp[key][index]['response']+"[eos]"
+        except:
+            pass
+
+    for i in files:
+        txt_type = "train"
+        if i.find('test')!=-1:
+            txt_type = "test"
+        elif i.find("val")!=-1:
+            txt_type = "val"
+        if i.find("jsonl.zst")==-1 and i.find("huggingface_datasets")==-1:
+            string_of_files[txt_type] += "[sos]"+"path:"+i+"|data:"+file_to_str(i)+"[eos]"
+        elif i.find("huggingface_datasets")!=-1:
+            continue
+        else:
+            continue
+            #string_of_files["zst"] = {txt_type:i} #"".join(["[sos]"+i+"[eos]" for i in read_jsonl(i)])
 
     train_portion = int(len(string_of_files["train"]) * 0.8)
     test_portion = int(len(string_of_files["train"]) * 0.0625)
@@ -842,14 +889,23 @@ model.to(device)
 
 # TODO: Setup 'curses' module to print colored text for inference output
 #import curses
-def inference(text,size=128,eval_model = model,reccurent_mem=None,reccurent_mem_ctxt=None,return_mem=True,append_eos_at_start=False):
+def inference(text,size=128,eval_model = model,reccurent_mem=None,reccurent_mem_ctxt=None,return_mem=True,append_eos_at_end=False,append_sos_at_start=True):
     eval_model.eval()
     eval_model = eval_model.to(device)
     torch.cuda.empty_cache()
-    if append_eos_at_start:
-        text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device)
+    if append_eos_at_end:
+        if append_sos_at_start:
+            text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device)
+        else:
+            text_input = torch.cat((data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5),torch.full(tuple([1,1]),3)),dim=1).to(device)
     else:
-        text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device)
+        if append_sos_at_start:
+            text_input = torch.cat((torch.full(tuple([1,1]),2),data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device)
+        else:
+            text_input = torch.cat((data_process(text).unsqueeze(0),torch.full(tuple([1,size]),5)),dim=1).to(device)
+
+    for i in reserved_tokens.keys():
+        text_input = replace_with_reserved_tokens(text_input,tok_num=i)
     if use_deepspeed:
         with autocast():
             out,mem,mem_ctxt = eval_model(text_input,mem=reccurent_mem,context_mem=reccurent_mem_ctxt)
@@ -862,7 +918,7 @@ def inference(text,size=128,eval_model = model,reccurent_mem=None,reccurent_mem_
     print('')
     torch.cuda.empty_cache()
     if return_mem:
-        return mem,mem_ctxt
+        return str(result),mem,mem_ctxt
 
 
 inference("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new",return_mem=False)
@@ -1133,6 +1189,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                         inp = "0"
                     if inp.lower() in ['yes','1']:
                         tmp_mem = tmp_mem_ctxt = None
+                        result = ''
                         while True:
                             try:
                                 i = int(inpt("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:",timeout=30))
@@ -1141,10 +1198,11 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                             print("")
                             if i == 0:
                                 break
-                            print("\ninput text for inference(type in multi line text then press CTRL-d/ ^D (press twice if no newline character is type i.e. \\n -> enter/return key) when complete ):\v")
-                            inp = '' if i==1 else inp
+                            print("\ninput text for inference,type:-->[eos]<-- at start to end previous result if reccurent (type in multi line text then press CTRL-d/ ^D (press twice if no newline character is type i.e. \\n -> enter/return key) when complete ):\v")
+                            inp = '' if i==1 else result
+                            tmp = ''
                             while True:
-                                inp += sys.stdin.read()
+                                tmp += sys.stdin.read()
                                 try:
                                     print("\nend?(0/1):\v")
                                     _i = inpt(prompt="",timeout=15)
@@ -1154,9 +1212,10 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                                         break
                                 except:
                                     continue
+                            inp += tmp
                             tmp_mem = None if i==1 else tmp_mem
                             tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
-                            tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt)
+                            result,tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt,append_sos_at_start=bool(tmp_mem==None))
                     
 
         total_loss += loss
@@ -1228,9 +1287,9 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                             "Total Loss Generator":tmp_loss,
                             "Loss Discriminator":loss_d,
                             "step":step,
-                            "Accuracy Generator(%)":acc*100/2,
-                            "Total Accuracy Generator(%)":tmp_acc*100/2,
-                            "Accuracy Discriminator(%)":acc_d*100/2,
+                            "Accuracy Generator(Percentage)":acc*100/2,
+                            "Total Accuracy Generator(Percentage)":tmp_acc*100/2,
+                            "Accuracy Discriminator(Percentage)":acc_d*100/2,
                             "epoch":epoch,
                             "batch":batch,
                             "Perplexity of Generator":ppl,
@@ -1247,7 +1306,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                         {
                             "Loss Generator":loss,
                             "step":step,
-                            "Accuracy Generator(%)":acc*100/2,
+                            "Accuracy Generator(Percentage)":acc*100/2,
                             "epoch":epoch,
                             "batch":batch,
                             "Perplexity of Generator":ppl,
@@ -1270,9 +1329,9 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                             "Total Loss Generator":tmp_loss,
                             "Loss Discriminator":loss_d,
                             "step":step,
-                            "Accuracy Generator(%)":acc*100/2,
-                            "Total Accuracy Generator(%)":tmp_acc*100/2,
-                            "Accuracy Discriminator(%)":acc_d*100/2,
+                            "Accuracy Generator(Percentage)":acc*100/2,
+                            "Total Accuracy Generator(Percentage)":tmp_acc*100/2,
+                            "Accuracy Discriminator(Percentage)":acc_d*100/2,
                             "epoch":epoch,
                             "batch":batch,
                             "Perplexity of Generator":ppl,
@@ -1289,7 +1348,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                         {
                             "Loss Generator":loss,
                             "step":step,
-                            "Accuracy Generator(%)":acc*100/2,
+                            "Accuracy Generator(Percentage)":acc*100/2,
                             "epoch":epoch,
                             "batch":batch,
                             "Perplexity of Generator":ppl,
@@ -1335,11 +1394,12 @@ print('=' * 110)
 
 inference("Hello World!!! This is inference function on the currently trained model",return_mem=False)
 mem = mem_ctxt = None
+result = ""
 while True:
     i = int(input("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:"))
     if i == 0:
         break
-    inp = input("input text, 1 string at a time, for inference:")
+    inp = input("input text, 1 string at a time, for inference:") + result
     mem = None if i==1 else mem
     mem_ctxt = None if i==1 else mem_ctxt
-    mem, mem_ctxt = inference(inp,reccurent_mem=mem,reccurent_mem_ctxt=mem_ctxt)
+    result,mem, mem_ctxt = inference(inp,reccurent_mem=mem,reccurent_mem_ctxt=mem_ctxt)

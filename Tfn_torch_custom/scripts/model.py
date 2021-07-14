@@ -294,9 +294,9 @@ class TransformerBlock(Module):
         width = nhead if width == None else width
 
         pkm1 = nn.Sequential(
-            nn.Linear(d_model,pkm_dims),
+            nn.Linear(d_model,pkm_dims,bias=False),
             PKM(pkm_dims,num_keys=pkm_keys),
-            nn.Linear(pkm_dims,d_model),
+            nn.Linear(pkm_dims,d_model,bias=False),
             ) if pkm_dims!=0 else None
 
         conformer = ConformerConvModule(d_model,causal=True,dropout=dropout)
@@ -317,7 +317,7 @@ class TransformerBlock(Module):
 
         if hopfield:
             hop_attn = nn.Sequential(
-                                    nn.Linear(d_model,hop_dim),
+                                    nn.Linear(d_model,hop_dim,bias=False),
                                     HopfieldLayer(
                                                 input_size=hop_dim,
                                                 num_heads=hop_heads,
@@ -325,7 +325,7 @@ class TransformerBlock(Module):
                                                 dropout=dropout,
                                                 quantity=2**7,
                                             ),
-                                    nn.Linear(hop_dim,d_model)
+                                    nn.Linear(hop_dim,d_model,bias=False)
                                     )
         else:
             hop_attn = None

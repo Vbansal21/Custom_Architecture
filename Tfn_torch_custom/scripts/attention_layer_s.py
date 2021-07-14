@@ -1035,10 +1035,10 @@ class RotaryEmbedding(nn.Module):
         self,
         dim,
         freqs_for = 'lang',
-        theta = 10000,
-        max_freq = 16,
+        theta = 2**17,
+        max_freq = 2**5,
         custom_freqs = None,
-        learned_freq = False
+        learned_freq = True
     ):
         super().__init__()
         if exists(custom_freqs):
@@ -1046,7 +1046,7 @@ class RotaryEmbedding(nn.Module):
         elif freqs_for == 'lang':
             freqs = 1. / (theta ** (torch.arange(0, dim, 2).float() / dim))
         elif freqs_for == 'pixel':
-            freqs = torch.logspace(0., log(max_freq / 2) / log(2), dim // 2, base = 2) * pi
+            freqs = torch.logspace(0., math.log(max_freq / 2) / math.log(2), dim // 2, base = 2) * math.pi
         else:
             raise ValueError(f'unknown modality {freqs_for}')
 
@@ -1140,7 +1140,9 @@ class Attention(nn.Module):
 
         nystromer_landmarks = default(nystromer_landmarks,512)
         if nystrom:
-            self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,heads=global_heads,num_landmarks=nystromer_landmarks,context=context,transpose_heads_n_dims=True,conv_in=dim_head + additional_head_dims,conv_out=dim_head,use_mask=use_mask)
+            conv_in = dim_head + additional_head_dims if pos_scales and pos_scales!=None else global_heads
+            conv_out = dim_headif if pos_scales and pos_scales!=None else global_heads
+            self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,heads=global_heads,num_landmarks=nystromer_landmarks,context=context,transpose_heads_n_dims=bool(pos_scales and pos_scales!=None),conv_in=conv_in,conv_out=conv_out,use_mask=use_mask)
         else:
             self.fast_attention = FastAttention(dim_head + additional_head_dims, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
 
@@ -1207,13 +1209,17 @@ class Attention(nn.Module):
                                 name='prev_state',
                                 tensor=torch.zeros((self.heads, num_prev_state, dim_head))
                                 )
+            #self.register_buffer(name='prev_state_supplementary',tensor=torch.eye(dim_head*self.heads))
+            #self.prev_state_parameter = nn.Parameter(torch.randn((dim_head*self.heads,dim_head*self.heads)))
             self.hop_attn = hop_attn
             self.mem_lin_k = nn.Linear(dim_head,dim_head)
             self.mem_lin_v = nn.Linear(dim_head,dim_head)
             self.out_mem = nn.Linear(dim_head,dim_head)
             
             if nystrom:
-                self.mem_attn = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,context=True,heads=self.heads,num_landmarks=nystromer_landmarks,transpose_heads_n_dims=True,conv_in=dim_head + additional_head_dims,conv_out=dim_head)
+                conv_in = dim_head + additional_head_dims if pos_scales and pos_scales!=None else global_heads
+                conv_out = dim_headif if pos_scales and pos_scales!=None else global_heads
+                self.mem_attn = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,context=True,heads=self.heads,num_landmarks=nystromer_landmarks,transpose_heads_n_dims=bool(pos_scales and pos_scales!=None),conv_in=conv_in,conv_out=conv_out)
                 self.prev_state_attn = NystromAttention(dim=dim,dim_head=dim_head,context=True,heads=self.heads,num_landmarks=nystromer_landmarks)
             else:
                 self.mem_attn = FastAttention(dim_head + additional_head_dims, nb_features, causal = False, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
@@ -1340,8 +1346,12 @@ class Attention(nn.Module):
 
             out_k = self.out_k(out)
             out_v = self.out_v(out)
+            #mat = torch.einsum("b n d, b n e -> b d e",rearrange(out_k,"b h n d -> b n (h d)"),rearrange(out_v,"b h n d -> b n (h d)"))
+            #mat = torch.einsum("... i j, ... j k, b ... k l -> b i l",self.prev_state_supplementary,self.prev_state_parameter,mat)
+            #prev_state = rearrange(torch.einsum("b n d, b d k -> b n k",rearrange(prev_state,"b h n d -> b n (h d)"),mat),"b n (h d) -> b h n d",h=h,d=d//h)
             prev_state = ckpt(self.prev_state_attn,prev_state,out_k,out_v)
-            self.prev_state = torch.sum(prev_state,dim=0,keepdim=True).reshape(self.prev_state.shape)
+            self.prev_state = reduce(prev_state,"b h n d -> h n d",'mean').reshape(self.prev_state.shape)
+            #self.prev_state_supplementary = reduce(mat,"b x y -> x y",'mean')
 
 
         out = rearrange(out, 'b h n d -> b n (h d)')
