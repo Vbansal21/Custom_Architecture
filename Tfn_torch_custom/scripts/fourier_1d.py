@@ -19,27 +19,14 @@ from einops import rearrange, repeat
 from .utilities3 import *
 from copy import deepcopy as dcpy
 
-torch.manual_seed(0)
-np.random.seed(0)
-
 from torch.utils.checkpoint import checkpoint
 checkpointed = True
 
-def ckpt(f,arg1,arg2=None,arg3=None,checkpointed = checkpointed):
+def ckpt(f,*arg,checkpointed = checkpointed):
     if checkpointed:
-        if arg2 == None and arg3 == None:
-            return checkpoint(f,arg1)
-        elif arg3 == None:
-            return checkpoint(f,arg1,arg2)
-        else:
-            return checkpoint(f,arg1,arg2,arg3)
+        return checkpoint(f,*arg)
     else:
-        if arg2 == None and arg3 == None:
-            return f(arg1)
-        elif arg3 == None:
-            return f(arg1,arg2)
-        else:
-            return f(arg1,arg2,arg3)
+        return f(*arg)
 
 ################################################################
 #  1d fourier layer
@@ -75,7 +62,7 @@ class SpectralConv1d(nn.Module):
         return torch.einsum("bxn,...on->box",torch.view_as_complex(torch.sigmoid(torch.view_as_real(mat))),self.weights2)
 
     def forward(self, x):
-        batchsize = x.shape[0]
+        #batchsize = x.size(0)
         #Compute Fourier coeffcients up to factor of e^(- something constant)
         x_ft = ckpt(torch.fft.rfft,x)
 
@@ -123,24 +110,24 @@ class FNO1d(nn.Module):
     def forward(self, x):
         
         if not self.transpose_req:
-            x = self.fc0(x.transpose(-1,-2))
+            x = ckpt(self.fc0,x.transpose(-1,-2))
         else:
-            x = self.fc0(x)
+            x = ckpt(self.fc0,x)
 
         x = x.transpose(-1,-2)
 
         for i in range(self.num_layers):
             x = ckpt(self.conv_layers[i],x) + ckpt(self.w_layers[i],x)
-            x = F.relu(x)
+            x = ckpt(F.relu,x)
             
         x = x.transpose(-1,-2)
-        x = self.fc1(x)
-        x = F.relu(x)
+        x = ckpt(self.fc1,x)
+        x = ckpt(F.relu,x)
 
 
         if not self.transpose_req:
-            x = self.fc2(x).transpose(-1,-2)
+            x = ckpt(self.fc2,x).transpose(-1,-2)
         else:
-            x = self.fc2(x)
+            x = ckpt(self.fc2,x)
 
         return x

@@ -16,7 +16,7 @@ def ckpt(f,*arg,checkpointed = checkpointed):
     if checkpointed:
         return checkpoint(f,*arg)
     else:
-        f(*arg)
+        return f(*arg)
             
 class GatedConvolution(nn.Module):
     def __init__(self,d_model,patch_size=3,padding=1,dim=-1):

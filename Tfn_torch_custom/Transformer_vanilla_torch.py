@@ -183,7 +183,6 @@ else:
 vocab = tokenizer.vocab
 
 import sys,select
-
 def isdata():
     return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
 
@@ -191,15 +190,18 @@ batch_size: int = 1
 eval_batch_size: int = batch_size
 mini_batch_size: int = 1
 
+ET: bool = True
 ntokens: int = tokenizer.vocab_size # None
-emsize: int = 128*4
+emsize: int = 128*3
 nhid: int = emsize * 4
-nlayers: int = 3
-deberta_layers: int = 0
-repeated_deberta_layers: int = 0
-full_block_repeat: bool = True
-nhead: int = 8
-dropout = (math.pi/10)
+nlayers: int = 2
+repeated_main_layers: int = 24//nlayers
+deberta_layers: int = 1
+repeated_deberta_layers: int = 24//deberta_layers
+full_block_repeat: bool = False
+nhead: int = 8 if ET else 16
+dropout: float = (math.pi/10) # 0 <= dropout < ; pi/10 --> 0.3141592653589 : recommended
+mem_kv: int = None
 mem_tokens: int = 1024
 bptt: int = (1024*2) #- mem_tokens
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
@@ -213,14 +215,14 @@ nystrom: bool = True
 attend_to_self: bool = True
 feature_redraw_interval: int = 1024
 prev_state_len: int = 1024
-prev_state_self_num: int = 1
+prev_state_self_num: int = 128
 local_heads: int = 2
 local_heads: int = min(local_heads,nhead)
 
 discriminator: bool = False #INTEGRATED DISCRIMINATOR: DISABLED
 progressive_generation: bool = True
 use_deepspeed: bool = False
-encoder_n_decoder: bool = False
+encoder_n_decoder: bool = True
 
 use_sgd: bool = True
 
@@ -377,7 +379,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
         for i in generator:
             tmp += i
             step += 1 
-            if len(tmp) >= bptt*batch_size_ and step >= batch_size_*(bptt/2048):
+            if len(tmp) >= bptt*batch_size_ and step >= batch_size_*16:
                 step = 0
                 data = data_process(str(tmp))
                 if data.size(0) >= bptt*batch_size_:
@@ -387,7 +389,6 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
                         data = replace_with_reserved_tokens(data,tok_num=i)
                     if not (data.size(0) >= bptt*batch_size_):
                         continue
-                    data = (batchify(data,batch_size_,-1)).contiguous()
                     break
         if data == None:
             data = data_process(str(tmp))
@@ -395,9 +396,8 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
                 if not replace_all_with_possible_reserved_tokens and i!=2 and i!=3:
                     continue
                 data = replace_with_reserved_tokens(data,tok_num=i)
-            data = (batchify(data,batch_size_,-1)).contiguous()
-        elif isinstance(data,torch.Tensor) and len(data.size())==1:
-            data = (batchify(data,batch_size_,-1)).contiguous()
+        data = data[data!=null_token] if null_token!=None else data
+        data = (batchify(data,batch_size_,-1)).contiguous()
 
     j_0 = j if (j_0 == -1 and (not prefer_source_over_generator and generator != None)) else j_0
     j -= j_0 if j_0!=-1 else 0
@@ -413,7 +413,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
     rnd_mask_together = random.randint(0,min(min(4,seq_scale_down)**2 // 2,rnd_mask))
     rnd = random.randint(0,min((seq_len-1),(bptt//8),(min(8,seq_scale_down)*2)**2))
 
-    if (j+bptt) > source.size(1):
+    if (j+bptt) > source.size(1) and (j_0 != -1 and (not prefer_source_over_generator and generator != None)):
         data_stream_ended = True
 
     """
@@ -441,6 +441,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
     return data.to(device),targets.to(device),index_to_be_trained_on,data_stream_ended,j_0
 
 try:
+    """
     processed_train_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_train.tar",map_location=torch.device('cpu'))
     processed_test_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_test.tar",map_location=torch.device('cpu'))
     processed_val_data = torch.load("models/data_"+str(vocab_size)+"/"+file+"_val.tar",map_location=torch.device('cpu'))
@@ -449,6 +450,10 @@ try:
         extra_portion = int(((processed_test_data.size(1)/processed_train_data.size(1))*0.66)*processed_test_data.size(1))
         processed_train_data = processed_train_data[:,:extra_portion]
         processed_test_data = processed_test_data[:,extra_portion:]
+    """
+    processed_train_data = data_process("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new")
+    processed_test_data = data_process("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new")
+    processed_val_data = data_process("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new")
 
     processed_train_data = batchify(processed_train_data,batch_size,-1)
     processed_test_data = batchify(processed_test_data,eval_batch_size,-1)
@@ -626,6 +631,9 @@ if use_deepspeed:
                                 local_heads=local_heads,
                                 mlp_layers=mlp_layers,
                                 encoder_n_decoder=encoder_n_decoder,
+                                repeated_main_layers=repeated_main_layers,
+                                ET=ET,
+                                mem_kv=mem_kv,
                         ).half()
 else:
     model = TransformerModel(
@@ -655,6 +663,9 @@ else:
                             local_heads=local_heads,
                             mlp_layers=mlp_layers,
                             encoder_n_decoder=encoder_n_decoder,
+                            repeated_main_layers=repeated_main_layers,
+                            ET=ET,
+                            mem_kv=mem_kv,
                     ).to(device)
 
 print("Model Parameters: ",len(model),"\n")
@@ -668,8 +679,8 @@ if use_deepspeed:
         out,mem,mem_ctxt = model(inp)
 else:
     out,mem,mem_ctxt = model(inp)
-print("raw out:",torch.argmax((out.reshape(-1,ntokens)),dim=-1),"\nraw in:",inp,"\nout size:",out.size(),"\nin size:",inp.size())
-print(model.get_avg_inference_time()," seconds")
+print("raw in:",inp,"\vin size:",inp.size(),"\nraw out:",torch.argmax((out.reshape(-1,ntokens)),dim=-1),"\vout size:",out.size())
+print(model.get_avg_inference_time()," seconds.\n")
 del(out,mem,mem_ctxt,inp)
 
 #print(sum(p.numel() for p in model.parameters()))
@@ -677,7 +688,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.1
+lr = 1
 
 if not use_deepspeed:
     if use_sgd:
@@ -710,14 +721,14 @@ def lambda_lr(step_):
     def sub_func(step):
         return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 
-    #return sub_func(step_)
+    return sub_func(step_)
 
     if step_<(1024*(1/lr)/(lr*multiplier**(math.pi*2/10))):
         return sub_func(step_)
     elif step_<(2048*(1/lr)/(lr*multiplier**(math.pi*2/10))):
         return sub_func(step_) / (scale * (lr**0.125))
     else:
-        return sub_func(step_) / (scale**2 * (lr**0.25))
+        return sub_func(step_) / ((scale**2) * (lr**0.25))
 #    pseudo_lambda = lambda step: (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 #    lambda_1 = lambda step: (pseudo_lambda(step) if step<(1024/(multiplier**(math.pi*2/10))) else (pseudo_lambda(step)/25 if step<(2048/(multiplier**(math.pi*2/10))) else pseudo_lambda(step)/625))
 
@@ -746,7 +757,7 @@ epochs = 2
 
 import matplotlib.pyplot as plt
 plt.ion()
-plt.plot([lambda_lr(i)*lr for i in range(int((processed_train_data.size(1)*epochs) / (bptt*batch_size)))])
+plt.plot([lambda_lr(i)*lr for i in range(max(100000,int((processed_train_data.size(1)*epochs) / (bptt*batch_size))))])
 #plt.show(block=False)
 plt.draw()
 plt.pause(15.0)
@@ -794,8 +805,8 @@ def wandb_init():
         "prev_state_self_num":prev_state_self_num,
         "mlp_layers":mlp_layers,
     },
-    resume=False,
-    force=True,
+    resume=True,
+    force=False,
     save_code=True
     )
 

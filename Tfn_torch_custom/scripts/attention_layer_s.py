@@ -27,11 +27,11 @@ except:
 from torch.utils.checkpoint import checkpoint
 checkpointed = True
 
-def ckpt(f,*args,checkpointed = checkpointed):
+def ckpt(f,*arg,checkpointed = checkpointed):
     if checkpointed:
-        return checkpoint(f,*args)
+        return checkpoint(f,*arg)
     else:
-        return f(*args)
+        return f(*arg)
         
 def exists(val):
     return val is not None
@@ -473,7 +473,7 @@ class NystromAttention(nn.Module):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
 
         factor = 2
-        m = min(self.num_landmarks,int((k.size(-2)**(1/factor) + q.size(-2)**(1/factor))//2))
+        m = max(12,min(self.num_landmarks,int((k.size(-2)**(1/factor) + q.size(-2)**(1/factor))//2)))
 
         q_shape = q.shape
 
@@ -1035,7 +1035,7 @@ class RotaryEmbedding(nn.Module):
         self,
         dim,
         freqs_for = 'lang',
-        theta = 2**17,
+        theta = 2**14,
         max_freq = 2**5,
         custom_freqs = None,
         learned_freq = True
@@ -1217,8 +1217,8 @@ class Attention(nn.Module):
             self.out_mem = nn.Linear(dim_head,dim_head)
             
             if nystrom:
-                conv_in = dim_head + additional_head_dims if pos_scales and pos_scales!=None else global_heads
-                conv_out = dim_headif if pos_scales and pos_scales!=None else global_heads
+                conv_in = dim_head + additional_head_dims if pos_scales and pos_scales!=None else heads
+                conv_out = dim_headif if pos_scales and pos_scales!=None else heads
                 self.mem_attn = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,context=True,heads=self.heads,num_landmarks=nystromer_landmarks,transpose_heads_n_dims=bool(pos_scales and pos_scales!=None),conv_in=conv_in,conv_out=conv_out)
                 self.prev_state_attn = NystromAttention(dim=dim,dim_head=dim_head,context=True,heads=self.heads,num_landmarks=nystromer_landmarks)
             else:

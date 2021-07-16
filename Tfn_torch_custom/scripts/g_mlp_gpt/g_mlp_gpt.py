@@ -286,7 +286,7 @@ class gMLPBlock(nn.Module):
         causal = False,
         window = None,
         attn_dim = None,
-        act = nn.Identity()
+        act = nn.GELU()
     ):
         super().__init__()
         is_windowed = exists(window) and window < seq_len
