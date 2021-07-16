@@ -235,7 +235,8 @@ def batchify(data, bsz,dim=0):
         data = data.reshape(-1)
     nbatch = data.size(dim) // bsz
     if nbatch*bsz != data.size(0):
-        data = torch.nn.functional.pad(data,(0,data.size(0)%((nbatch+1)*bsz)))
+        nbatch += 1
+        data = torch.nn.functional.pad(data,(0,(nbatch*bsz)-data.size(0)))
     data = data.narrow(dim, 0, nbatch * bsz)
     data = data.reshape(bsz, -1).contiguous()
     return data
