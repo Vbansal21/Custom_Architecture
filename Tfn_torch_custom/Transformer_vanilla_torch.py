@@ -204,6 +204,7 @@ dropout: float = (math.pi/10) # 0 <= dropout < ; pi/10 --> 0.3141592653589 : rec
 mem_kv: int = None
 mem_tokens: int = 1024
 bptt: int = (1024*2) #- mem_tokens
+bptt_deviation: int = 64
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
 mlp_layers: int = 1
@@ -233,6 +234,8 @@ def batchify(data, bsz,dim=0):
     if len(data.size())==2:
         data = data.reshape(-1)
     nbatch = data.size(dim) // bsz
+    if nbatch*bsz != data.size(0):
+        data = torch.nn.functional.pad(data,(0,data.size(0)%((nbatch+1)*bsz)))
     data = data.narrow(dim, 0, nbatch * bsz)
     data = data.reshape(bsz, -1).contiguous()
     return data
@@ -268,7 +271,7 @@ for i in range(vocab_size):
     if tmp == '':
         null_token = i
 if null_token != None:
-    print("Null charachter:",repr(tokenizer.decode(torch.tensor((null_token,),dtype=torch.long))),"<--",sep='')
+    print("Null charachter:",repr(tokenizer.decode(torch.tensor((null_token,),dtype=torch.long))),"<-->",null_token,sep='')
 
 def data_retrieve(data=None,path=None):
     if data != None:
@@ -379,7 +382,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
         for i in generator:
             tmp += i
             step += 1 
-            if len(tmp) >= bptt*batch_size_ and step >= batch_size_*16:
+            if len(tmp) >= bptt*batch_size_ and step >= batch_size_*bptt_deviation:
                 step = 0
                 data = data_process(str(tmp))
                 if data.size(0) >= bptt*batch_size_:
@@ -396,7 +399,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
                 if not replace_all_with_possible_reserved_tokens and i!=2 and i!=3:
                     continue
                 data = replace_with_reserved_tokens(data,tok_num=i)
-        data = data[data!=null_token] if null_token!=None else data
+        # data = data[data!=null_token] if null_token!=None else data ### problem with whitespace
         data = (batchify(data,batch_size_,-1)).contiguous()
 
     j_0 = j if (j_0 == -1 and (not prefer_source_over_generator and generator != None)) else j_0
