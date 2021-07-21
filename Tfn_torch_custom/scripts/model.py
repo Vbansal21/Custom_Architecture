@@ -1,14 +1,9 @@
 from json import decoder
-import math
-import time
+import math, time, torch, random, warnings, copy, typing, torchnlp, numpy
 #import profile
-import torch
 from torch import tensor
 import torch.nn as nn
-import random
 import torch.nn.functional as F
-import time
-import warnings
 
 from memory_profiler import profile
 
@@ -22,7 +17,7 @@ from torch.nn.modules.dropout import Dropout
 
 from einops import repeat,rearrange
 from mogrifier import Mogrifier
-from functools import partial
+#from functools import partial
 
 from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block, GLU
 from .product_key_memory import PKM
@@ -35,7 +30,6 @@ from .fourier_1d import FNO1d
 from .g_mlp_gpt import gMLPGPT
 
 from torchnlp.encoders.text import SubwordEncoder
-import torchnlp
 
 from torch.utils.checkpoint import checkpoint
 
@@ -96,11 +90,30 @@ def Positional_Encoding(x: Tensor) -> Tensor :
     d_model = x.size(2)
     pe = torch.zeros(max_len, d_model)
     position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-    div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+    div_term = torch.exp(torch.arange(0, d_model, 2).to(x.dtype) * (-math.log(10000.0) / d_model))
     pe[:, 0::2] = torch.sin(position * div_term)
     pe[:, 1::2] = torch.cos(position * div_term)
     pe = pe.unsqueeze(0).to(x.device)
     return (x + pe).contiguous()
+
+def _gen_timing_signal(length, channels, min_timescale=1.0, max_timescale=1.0e4):
+    """
+    Generates a [1, length, channels] timing signal consisting of sinusoids
+    Adapted from:
+    https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py
+    """
+    position = np.arange(length)
+    num_timescales = channels // 2
+    log_timescale_increment = ( math.log(float(max_timescale) / float(min_timescale)) / (float(num_timescales) - 1))
+    inv_timescales = min_timescale * np.exp(np.arange(num_timescales).astype(np.float) * -log_timescale_increment)
+    scaled_time = np.expand_dims(position, 1) * np.expand_dims(inv_timescales, 0)
+
+    signal = np.concatenate([np.sin(scaled_time), np.cos(scaled_time)], axis=1)
+    signal = np.pad(signal, [[0, 0], [0, channels % 2]], 
+                    'constant', constant_values=[0.0, 0.0])
+    signal =  signal.reshape([1, length, channels])
+
+    return torch.from_numpy(signal).type(torch.FloatTensor)
 
 class RMSNorm(Module):
     def __init__(self, dim, eps = 1e-8):
@@ -254,6 +267,86 @@ class AbsolutePositionalEmbedding(Module):
             assert tmp.size(1) == s
             return tmp
 
+class ACT_basic(nn.Module):
+    def __init__(self,hidden_size,function,threshold=0.1,factor=3):
+        super(ACT_basic, self).__init__()
+        self.sigma = nn.Sigmoid()
+        self.p = nn.Linear(hidden_size,1)
+        self.fn = function
+        self.p.bias.data.fill_(1) 
+        self.threshold = 1 - threshold
+        self.factor = factor
+
+    def forward(self, state, time_enc=None, pos_enc=None, max_hop=None, encoder_output=None):
+        # init_hdd
+        b,l,d = *state.size()
+        dtype = state.dtype
+        device = state.device
+        ## [B, S]
+        halting_probability = torch.zeros(b,l).to(device)
+        ## [B, S]
+        remainders = torch.zeros(b,l).to(device)
+        ## [B, S]
+        n_updates = torch.zeros(b,l).to(device)
+        ## [B, S, HDD]
+        previous_state = torch.zeros_like(state).to(device)
+        step = 0
+        # set time_enc, pos_enc and max_hop if None
+        time_enc = default(time_enc,_gen_timing_signal(l,d)).to(dtype).to(device)
+        max_hop = default(max_hop,max(2,int((l**(1/self.factor) + default(encoder_output,state).size(-2)**(1/self.factor))/2) + 1))
+        pos_enc = default(pos_enc,_gen_timing_signal(max_hop,d)).to(dtype).to(device)
+        # for l in range(self.num_layers):
+        while( ((halting_probability<self.threshold) & (n_updates < max_hop)).byte().any()):
+            # Add timing signal
+            state = state + time_enc[:, :l, :].type(dtype).to(device)
+            state = state + pos_enc[:, step, :].unsqueeze(1).repeat(1,l,1).type(dtype).to(device)
+
+            p = self.sigma(self.p(state)).squeeze(-1)
+            # Mask for inputs which have not halted yet
+            still_running = (halting_probability < 1.0).type(dtype).to(device)
+
+            # Mask of inputs which halted at this step
+            new_halted = (halting_probability + p * still_running > self.threshold).type(dtype).to(device) * still_running
+
+            # Mask of inputs which haven't halted, and didn't halt this step
+            still_running = (halting_probability + p * still_running <= self.threshold).type(dtype).to(device) * still_running
+
+            # Add the halting probability for this step to the halting
+            # probabilities for those input which haven't halted yet
+            halting_probability = halting_probability + p * still_running
+
+            # Compute remainders for the inputs which halted at this step
+            remainders = remainders + new_halted * (1 - halting_probability)
+
+            # Add the remainders to those inputs which halted at this step
+            halting_probability = halting_probability + new_halted * remainders
+
+            # Increment n_updates for all inputs which are still running
+            n_updates = n_updates + still_running + new_halted
+
+            # Compute the weight to be applied to the new state and output
+            # 0 when the input has already halted
+            # p when the input hasn't halted yet
+            # the remainders when it halted this step
+            update_weights = p * still_running + new_halted * remainders
+
+            if(encoder_output):
+                state, _ = self.fn(state,encoder_output)
+            else:
+                # apply transformation on the state
+                state = self.fn(state)
+
+            # update running part in the weighted state and keep the rest
+            previous_state = ((state * update_weights.unsqueeze(-1)) + (previous_state * (1 - update_weights.unsqueeze(-1))))
+            ## previous_state is actually the new_state at end of hte loop 
+            ## to save a line I assigned to previous_state so in the next 
+            ## iteration is correct. Notice that indeed we return previous_state
+            step+=1
+        return previous_state, (remainders,n_updates)
+        #
+        #    p_t = remainders + n_updates
+        #    avg_p_t = torch.sum(torch.sum(p_t,dim=1)/p_t.size(1))/p_t.size(0)
+        #    loss += default(act_loss_weight,0.001) * avg_p_t.item()
 
 class TransformerBlock(Module):
 
@@ -1278,6 +1371,608 @@ class TransformerModel(Module):
             return out, mem, context_mem
         else:
             return out
+
+
+class MultiModalTransformer(Module):
+
+    @profile
+    def __init__(self, 
+                    ninp: int, 
+                    nhead: int, 
+                    nhid: int, 
+                    nlayers: int,
+                    ntoken: Optional[int] = None, 
+                    padding_idx: int = 0,
+                    dropout: float = 0.5,
+                    activation: str = 'Lrelu',
+                    mem_token: int = 00,
+                    context_mem_token: Optional[int] = None,
+                    encoder_decoder: bool = False,
+                    deberta_layers: int = 1,
+                    repeated_deberta_layers: int = 2,
+                    max_seq_len=2**17,
+                    discriminator: bool = False,
+                    seq_scale_down: int = 8,
+                    auto_check_redraw: bool = True,
+                    feature_redraw_interval: int = 256,
+                    full_block_repeat: bool = False,
+                    causal: bool = True,
+                    prev_state_len: int = 8192,
+                    prev_state_self_num=32,
+                    nystrom: bool = True,
+                    local_heads: int = 1,
+                    attend_to_self=True,
+                    fno_layers=4,
+                    modes=None,
+                    width=None,
+                    mlp_layers=1,
+                    encoder_n_decoder=True,
+                    repeated_main_layers=None,
+                    ET=True,
+                    mem_kv=None,
+                    device: torch.DeviceObjType = device
+                ) -> NoReturn :
+        super(TransformerModel, self).__init__()
+        self.model_type = 'Transformer'
+
+        self.time_ = [0,0]
+
+        self.encoder_decoder = encoder_decoder
+        self.transformer_block = TransformerModule(nhead, 
+                                                        nhid, 
+                                                        nlayers, 
+                                                        ninp,
+                                                        dropout,
+                                                        enable_encoder=encoder_decoder,
+                                                        deberta_layers=deberta_layers,
+                                                        repeated_deberta_layers=repeated_deberta_layers,
+                                                        max_len=max_seq_len,
+                                                        full_block_repeat=full_block_repeat,
+                                                        causal=causal,
+                                                        prev_state_len=prev_state_len,
+                                                        nystrom=nystrom,
+                                                        local_heads=local_heads,
+                                                        attend_to_self=attend_to_self,
+                                                        fno_layers=fno_layers,
+                                                        modes=modes,
+                                                        width=width,
+                                                        prev_state_self_num=prev_state_self_num,
+                                                        mlp_layers=mlp_layers,
+                                                        encoder_n_decoder=encoder_n_decoder,
+                                                        repeated_main_layers=repeated_main_layers,
+                                                        ET=ET,
+                                                        mem_kv=mem_kv,
+                                                        )
+
+        self.attender = nn.ModuleList([None])
+
+        self.thinker = None
+
+        self.doer = None
+        
+
+        # byte_list = [i for i in str.encode("utf-32")]
+        # max(byte_list) == 255
+        # min(byte_list) == 0
+        # str_from_bytes = bytes([ try: int_byte_list[i:i+4] for i in range(int_byte_list,4)]).decode("utf-32")
+        # str == str_from_bytes --> True
+        self.embedding_encoder = nn.Embedding(256, ninp,padding_idx=padding_idx) if ntoken != None else Identity()
+
+        
+        self.ninp = ninp
+        self.ntokens = 256
+        
+        self.decoder = nn.Sequential(
+            nn.Linear(ninp,ntoken),
+            #nn.Sigmoid(),
+            ) if ntoken != None else Identity()
+
+        self.decoder = nn.Sequential(
+                nn.Linear(ninp,2),
+                #nn.LeakyReLU(0.05),
+            ) if discriminator else self.decoder
+
+        self.ffd1 = FFd(dim=ninp,activation=activation)
+        self.ffd2 = copy.deepcopy(self.ffd1)
+
+        self.mem_exist = True if mem_token else False
+        if self.mem_exist:
+            if type(mem_token)==int:
+                self.mem = nn.Parameter(torch.randn(mem_token,ninp))
+            elif type(mem_token) == Tensor:
+                assert mem_token.size(-1)==ninp
+                self.mem = nn.Parameter(mem_token)
+        else:
+            self.mem = None
+            
+        self.seq_scale_down = max(4,(seq_scale_down//4)*4)
+        self.attn_len = (self.seq_scale_down*3 // 2)*2 + 1
+
+        self.scale_down_conv = nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,padding=(self.seq_scale_down*3 - 1)//2,groups=1)
+
+        self.scale_up_conv = nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=1)
+
+        self.device = device
+
+        self.auto_check_redraw = auto_check_redraw
+        self.feature_redraw_interval = feature_redraw_interval
+        self.proj_updater = ProjectionUpdater(self.transformer_block, feature_redraw_interval)
+
+        self.tokenizer = None
+        self.vocab = None
+        self.optimizer = None
+        self.scheduler = None
+        self.scheduler_lambda = None
+
+        self.prev_states = []
+        self.max_prev_states = 1
+
+        self.init_weights()
+
+    def get_avg_inference_time(self) -> int:
+        if self.time_[1] != 0:
+            return self.time_[0] / self.time_[1]
+        else:
+            return 0
+
+    def fix_projection_matrices_(self) -> NoReturn :
+        self.proj_updater.feature_redraw_interval = None
+
+    def defix_projection_matrices_(self) -> NoReturn :
+        self.proj_updater.feature_redraw_interval = self.feature_redraw_interval
+
+    def init_weights(self) -> NoReturn :
+        for w in self.parameters():
+            w.data.uniform_(-0.01,0.01)
+            
+    def __len__(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+            
+    def multiply_pretrained_transformer_layers(self,num: int = 1,deb_num: int = 1) -> NoReturn :
+        self.transformer_block.pretrained_layer_multiplier(num,deb_num)
+
+    def convert_decoder_only_to_encoder_decoder(self) -> NoReturn:
+        self.transformer_block.convert_decoder_only_to_encoder_decoder()
+        if self.discriminator_enabled:
+            self.discriminator.convert_decoder_only_to_encoder_decoder()
+
+    def init_tokenizer(self,
+                        sample:str = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r",
+                        append_eos: Optional[bool] = False,
+                        target_vocab_size: Optional[int] = 2**17,
+                        min_occ: Optional[int] = 1,
+                        max_occ: Optional[int] = 1000,
+                        reserved_tokens: Optional[list] = [
+                                                            '[pad]','[unk]',
+                                                            '[sos]','[eos]',
+                                                            '[copy]',
+                                                            '[mask]',
+                                                            '[segment_seperator]',
+                                                            '[non_text_content]','[/non_text_content]'
+                                                            ],
+                        eos_index: Optional[int] = 3,
+                        unk_index: Optional[int] = 1,
+                        pad_idx: Optional[int] = 0,
+                        return_tokenizer: Optional[bool] = False
+                        ) -> Union[NoReturn,torchnlp.encoders.text.text_encoder.TextEncoder] :
+        sample += " ".join(sample.split(""))
+        self.tokenizer = SubwordEncoder(sample,
+                                        append_eos=append_eos,
+                                        target_vocab_size=target_vocab_size,
+                                        min_occurrences=min_occ,
+                                        max_occurrences=max_occ,
+                                        reserved_tokens=reserved_tokens,
+                                        eos_index=eos_index,
+                                        unknown_index=unk_index,
+                                        padding_index=pad_idx)
+        self.vocab = self.tokenizer.vocab
+        if return_tokenizer:
+            return self.tokenizer
+
+    def random_mask_shuffle_encoder(self,
+                                    inp: Tensor,
+                                    mask: bool = True,
+                                    mask_percentage: float = 15.0,
+                                    mask_together_nos: int = 3,
+                                    mask_continuous_pos: float = -101.0,
+                                    shuffle: bool = True,
+                                    shuffle_percentage: float = 15,
+                                    shuffle_together_nos: int = 3,
+                                    shuffle_continuous_pos: float = -101
+                                ) -> Tensor:
+        inp_2: Tensor = inp.clone().detach()
+        index_to_be_trained_on = []
+
+        count: int = 0
+        together_count: int = 0
+        for j in range(inp.size(1)):
+            if not shuffle:
+                break
+            rnd: float = -1
+            if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
+                rnd: float = random.randint(0,100000)/1000
+            elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
+                shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
+                if shuffle_continuous_pos < 0:
+                    if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                        rnd: float = shuffle_percentage/2
+                else:
+                    if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
+                        rnd: float = shuffle_percentage/2
+            if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
+                while True:
+                    r = random.randint(0,inp.size(1)-1)
+                    if r!=j:
+                        break
+                if j not in index_to_be_trained_on:
+                    index_to_be_trained_on.append(j)
+                if r not in index_to_be_trained_on:
+                    index_to_be_trained_on.append(r)
+                inp_2[:,j],inp_2[:,r] = inp[:,r],inp[:,j]
+                count += 1
+                together_count += 1
+            elif together_count>=shuffle_together_nos:
+                together_count = 0
+
+        count: int = 0
+        together_count: int = 0
+        for j in range(inp.size(1)):
+            rnd: float = -1
+            if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
+                rnd: float = random.randint(0,100000)/1000
+            elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
+                mask_together_nos = mask_percentage * (inp.size(1)/100)
+                if mask_continuous_pos < 0:
+                    if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
+                        rnd: float = mask_percentage/2
+                else:
+                    if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
+                        rnd: float = mask_percentage/2
+            if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
+                for i in range(inp.size(0)):
+                    inp_2[i,j] = 5
+                if j not in index_to_be_trained_on:
+                    index_to_be_trained_on.append(j)
+                count += 1
+                together_count += 1
+            elif together_count>=mask_together_nos:
+                together_count = 0
+        for _ in range(inp_2.size(1)//20):
+            rnd = random.randint(0,inp_2.size(1)-1)
+            if rnd not in index_to_be_trained_on:
+                index_to_be_trained_on.append(rnd)
+        index_to_be_trained_on = list(set(index_to_be_trained_on))
+        index_to_be_trained_on = list(set(index_to_be_trained_on.extend(rnd)))
+        del(inp_2,inp)
+        torch.cuda.empty_cache()
+        return out,index_to_be_trained_on
+
+    def encode_text(self,
+                        *args: Union[str,Tensor],
+                        append_pad_at_start: Union[bool,int] = False,
+                        append_pad_at_end: Union[bool,int] = False,
+                        padding: Union[int,bool] = 0,
+                        pad_idx: int = 0,
+                        append_sos: bool = True,
+                        sos_idx: int = 2,
+                        append_eos: bool = True,
+                        eos_idx: int = 3,
+                        concatenate_all: bool = False,
+                        concatenate_dim: int = 1,
+                        append_segment_seperator: bool = True,
+                        segment_idx: int = 6,
+                        mask_at_random: bool = True,
+                        mask_percentage: float = 15.,
+                        mask_together_nos: int = 3,
+                        mask_continuous_pos: float = -101.,
+                        shuffle_at_random: bool = True,
+                        shuffle_percentage: float = 15.,
+                        shuffle_together_nos: int = 3,
+                        shuffle_continuous_pos: float = -101.
+                    ) -> List[Tensor] :
+        encoded_text = []
+        trainable_index = []
+        for txt in args:
+            if type(txt) == str:
+                tmp = self.tokenizer.encode(txt)
+            else:
+                assert type(tmp) == Tensor
+            if mask_at_random or shuffle_at_random:
+                tmp,index_to_be_trained_on =   self.random_mask_shuffle_encoder(tmp,
+                                                            mask=mask_at_random,
+                                                            mask_percentage=mask_percentage,
+                                                            mask_together_nos=mask_together_nos,
+                                                            mask_continuous_pos=mask_continuous_pos,
+                                                            shuffle=shuffle_at_random,
+                                                            shuffle_percentage=shuffle_percentage,
+                                                            shuffle_together_nos=shuffle_together_nos,
+                                                            shuffle_continuous_pos=shuffle_continuous_pos
+                                                        )
+
+            trainable_index.append(index_to_be_trained_on)
+
+            if append_sos:
+                tmp = torch.cat((torch.full((tmp.size(0),1),sos_idx,dtype=torch.long,device=device),tmp),dim=1).contiguous()
+
+            if append_eos:
+                tmp = torch.cat((tmp,torch.full((tmp.size(0),1),eos_idx,dtype=torch.long,device=device)),dim=1).contiguous()
+
+            if append_pad_at_end or append_pad_at_end:
+                if type(append_pad_at_start) == int:
+                    tmp = torch.cat((torch.full((tmp.size(0),append_pad_at_start),pad_idx,dtype=torch.long,device=self.device),tmp),dim=1)
+                if type(append_pad_at_end) == int:
+                    tmp = torch.cat((tmp,torch.full((tmp.size(0),append_pad_at_end),pad_idx,dtype=torch.long,device=self.device)),dim=1)
+                if type(append_pad_at_start) == bool and type(append_pad_at_end) == bool:
+                    if padding%2==0:
+                        pad_l = pad_r = padding//2
+                    else:
+                        pad_l = padding//2
+                        pad_r = (padding//2) + 1
+                    tmp = torch.cat((torch.full((tmp.size(0),pad_l),pad_idx,dtype=torch.long,device=self.device),tmp,torch.full((tmp.size(0),pad_r),pad_idx,dtype=torch.long,device=self.device)),dim=1)
+                elif not (type(append_pad_at_end) == bool and type(append_pad_at_start) == bool):
+                    tmp = torch.cat((torch.full((tmp.size(0),padding),pad_idx,dtype=torch.long,device=self.device),tmp),dim=1)
+
+            if append_segment_seperator:
+                tmp = torch.cat((tmp,torch.tensor([[segment_idx]])),dim=1)
+            encoded_text.append(tmp)
+        
+        if concatenate_all:
+            encoded_text = [torch.cat(encoded_text,dim=concatenate_dim)]
+        return encoded_text,trainable_index
+
+    def decode_text(self,
+                        *args: Tensor,
+                        to_text: bool = True
+                        ) -> list:
+        decoded_text = []
+        for txt in args:
+            if type(txt) != Tensor:
+                txt = torch.tensor(txt)
+
+            if txt.size(-1) == self.ntokens and len(txt.size()) == 3:
+                txt = torch.argmax(txt,dim=-1)
+
+            if to_text:
+                if txt.size(0)>1:
+                    tmp = []
+                    for i in txt:
+                        tmp.append(self.tokenizer.decode(i))
+                    txt = tmp
+                else:
+                    txt = self.tokenizer.decode(txt)
+            decoded_text.append(txt)
+        return decoded_text
+
+    def init_optimizer(self,
+                            opt: Optional[torch.optim.Optimizer] = None,
+                            lr: Union[None,float,dict] = None,
+                            scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+                            lambdaLR: Optional[typing.Callable] = None,
+                            return_opt_schd: bool = False
+                        ) -> Union[NoReturn,Tuple[torch.optim.Optimizer,torch.optim.lr_scheduler._LRScheduler]]:
+        if opt != None:
+            self.optimizer = opt
+        else:
+            lr = 1 if lr==None else lr
+            self.optimizer = torch.optim.SGD(self.parameters(), lr=lr)
+        if scheduler != None:
+            self.scheduler = scheduler
+        else:
+            if (lambdaLR == None or lambdaLR_disc == None) and self.scheduler_lambda == None:
+
+                def lambda_lr(step_):
+                    a = 5000000
+                    b = 1000
+                    c = 0.0
+                    step = 1
+                    multiplier = (bptt/512)*batch_size
+
+                    def sub_func(step):
+                        return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
+
+                    if step_<(1024/(multiplier**(math.pi*2/10))):
+                        return sub_func(step_)
+                    elif step_<(2048/(multiplier**(math.pi*2/10))):
+                        return sub_func(step_) / 25
+                    else:
+                        return sub_func(step_) / 625
+
+                lambdaLR = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
+            else:
+                lambdaLR = self.scheduler_lambda if type(self.scheduler_lambda)==list else self.scheduler_lambda[-1]
+
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=self.optimizer,lr_lambda=lambdaLR)
+            self.scheduler_lambda = lambda_LR
+
+        if return_opt_schd:
+            return self.optimizer,self.scheduler
+
+    def training_step(self,
+                    data,
+                    targets,
+                    loss_criterion,
+                    mem_tokens=None,
+                    opt=None,
+                    grad_clip=0.5,
+                    deepspeed_enabled=False,
+                    autocast_enabled=False,
+                    trainable_index=None,
+                    mem_ctxt=None,
+                    mini_batch_size=None,
+                    batch=None,
+                ):
+
+        self.train()
+        step_start_time = time.time()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+
+        if opt == None:
+            optimizer = self.optimizer
+        else:
+            optimizer = opt
+
+        torch.cuda.empty_cache()
+
+        def step_optimizer(input_data=data,output_targets=targets):
+            outputs = {}
+            losses = {}
+            labels = {}
+            output,single_pass_mem,single_pass_mem_ctxt = self.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
+            torch.cuda.empty_cache()
+            if trainable_index != None:
+                trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
+                trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
+            else:
+                trainable_output = output
+                trainable_output_targets = output_targets
+                
+            loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
+            
+            loss.backward(retain_graph=True)
+            torch.cuda.empty_cache()
+            if mini_batch_size != None and batch != None and batch%mini_batch_size == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+            outputs['output'] = output
+
+            losses['loss'] = loss.item()
+            return outputs,losses,labels,single_pass_mem,single_pass_mem_ctxt
+        
+        if deepspeed_enabled or autocast_enabled:
+            with autocast():
+                outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
+        else:
+            outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
+
+        acc = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
+        loss = losses['loss']
+
+        if mem_ != None:
+            pass
+            mem_ = mem_.clone().detach()
+        if mem_ctxt_ != None:
+            pass
+            mem_ctxt_ = mem_ctxt_.clone().detach()
+
+        return outputs,losses,loss,acc,(step_start_time-time.time()),mem_,mem_ctxt_
+        
+    def get_prev_state(self) -> List[Tensor]:
+        prev_states = {0:self.transformer_block.prev_state}
+        modules = find_modules(self.transformer_block,Attention)
+        for i,attn in enumerate(modules):
+            prev_states[i+1] = attn.prev_state
+        return prev_states
+
+    def set_prev_state(self,prev_state:List[Tensor]):
+        self.transformer_block.prev_state = prev_state[0]
+        modules = find_modules(self.transformer_block,Attention)
+        for i,attn in enumerate(modules):
+            attn.prev_state = prev_states[i+1]
+
+    #@autocast()
+    def forward(self,
+                    src:Union[Tensor,Dict[str,Tensor]],
+                    context: Optional[Tensor] = None,
+                    mem: Union[Tensor,None,Dict[str,Tensor]] = None, 
+                    context_mem: Optional[Tensor] = None,
+                    return_mem: bool = True,
+                    return_logits: bool = False,
+                    seq_scale_down: bool = True,
+                ) -> Union[Tensor,Tuple[Tensor,Optional[Tensor],Optional[Tensor]]]:
+
+        start_time = time.time()
+
+        if type(src)==dict:
+            try:
+                context = src["context"]
+            except:
+                pass
+            src = src["src"]
+        
+        if type(mem)==dict:
+            try:
+                context_mem = mem["context_mem"]
+            except:
+                pass
+            mem = mem["mem"]
+
+        self.prev_states.append(self.get_prev_state())
+        while len(self.prev_states) > self.max_prev_states:
+            tmp = self.prev_states.pop(0)
+            del(tmp)
+
+        (b,s) = src.shape
+        
+        if self.auto_check_redraw:
+            self.proj_updater.redraw_projections()
+
+        output = self.embedding_encoder(src)
+        output = output * math.sqrt(self.ninp)
+        output = ckpt(self.ffd1,output)
+
+        if self.encoder_decoder:
+            context = self.embedding_encoder(context)
+            context = context * math.sqrt(self.ninp)
+            context = ckpt(self.ffd1,context)
+
+        output = Positional_Encoding(output)
+        if self.encoder_decoder:
+            context = Positional_Encoding(context)
+
+        if seq_scale_down:
+            output = ckpt(self.scale_down_conv,output.transpose(-1,-2)).transpose(-1,-2)
+            if self.encoder_decoder:
+                context = ckpt(self.scale_down_conv,context.transpose(-1,-2)).transpose(-1,-2)
+                
+        mem = default(mem,self.mem)
+        if exists(mem):
+            if (mem.size(-1) == output.size(-1) and len(mem.shape) == 2): 
+                output = torch.cat((Positional_Encoding(repeat(mem, 'n d -> b n d', b = output.size(0))),output),dim=-2)
+        if self.encoder_decoder:
+            context_mem = default(context_mem,self.mem)
+            if exists(context_mem):
+                if (context_mem.size(-1) == context.size(-1) and len(context_mem.shape) == 2): 
+                    context = torch.cat((Positional_Encoding(repeat(context_mem, 'n d -> b n d', b = context.size(0))),context),dim=-2)
+
+        output = self.transformer_block(output,context)
+        if isinstance(output,tuple):
+            context = output[1]
+            output = output[0]
+
+        if exists(mem):
+            mem = output[:,:mem.size(0)]
+            mem = torch.sum(mem,dim=0,keepdim=True).reshape(-1,output.size(-1)) / b
+            mem = mem.detach()
+            output = output[:,mem.size(0):]
+
+        if exists(context):
+            if exists(context_mem):
+                context_mem = context[:,:context_mem.size(0)]
+                context_mem = torch.sum(mem,dim=0,keepdim=True).reshape(-1,output.size(-1)) / b
+                context_mem = context_mem.detach()
+                context = context[:,context_mem.size(0):]
+        
+        if seq_scale_down:
+            output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
+            output = output[:,:-(self.seq_scale_down*3 -1)]
+
+            if context != None:
+                context = ckpt(self.scale_up_conv,context.transpose(-1,-2)).transpose(-1,-2)
+                context = context[:,:-(self.seq_scale_down*3 -1)]
+                
+        output = ckpt(self.ffd2,output)
+        out = ckpt(self.decoder,output)
+        
+        self.time_[0] += time.time()-start_time
+        self.time_[1] += 1
+
+        out = out if not return_logits else [out,output]
+
+        if return_mem:
+            return out, mem, context_mem
+        else:
+            return out
+
 
 
 
