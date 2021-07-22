@@ -15,9 +15,9 @@ from torch import Tensor
 from torch.nn.modules.container import ModuleList, Module
 from torch.nn.modules.dropout import Dropout
 
-from einops import repeat,rearrange
+from einops import repeat,rearrange,reduce
 from mogrifier import Mogrifier
-#from functools import partial
+from functools import partial
 
 from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block, GLU
 from .product_key_memory import PKM
@@ -44,17 +44,19 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if torch.cuda.is_available():
     torch.backends.cudnn.deterministic = True
 
-def ckpt(f,*args,checkpointed = checkpointed):
-    if checkpointed:
-        return checkpoint(f,*args)
-    else:
-        return f(*args)
-        
 def exists(val):
     return val is not None
 
 def default(val, d):
     return val if exists(val) else d
+
+def ckpt(f,*args,checkpointed = checkpointed):
+    if not exist(checkpointed):
+        global checkpointed
+    if checkpointed:
+        return checkpoint(f,*args)
+    else:
+        return f(*args)
 
 def _get_activation_fn(activation):
     if isinstance(activation,nn.Module):
@@ -268,18 +270,24 @@ class AbsolutePositionalEmbedding(Module):
             return tmp
 
 class ACT_basic(nn.Module):
-    def __init__(self,hidden_size,function,threshold=0.1,factor=3):
+    def __init__(self,hidden_size,function,threshold=0.1,factor=3,checkpointed=None):
         super(ACT_basic, self).__init__()
         self.sigma = nn.Sigmoid()
-        self.p = nn.Linear(hidden_size,1)
+        self.num_layers = 2
+        self._p = nn.LSTM(hidden_size,hidden_size*4,self.num_layers,batch_first=True,bidirectional=True,proj_size=1)
+        self.p = nn.Linear(2,1)
         self.fn = function
-        self.p.bias.data.fill_(1) 
         self.threshold = 1 - threshold
         self.factor = factor
+        if exists(checkpointed):
+            pass
+        else:
+            global checkpointed
+        self.checkpointed = checkpointed
 
     def forward(self, state, time_enc=None, pos_enc=None, max_hop=None, encoder_output=None):
         # init_hdd
-        b,l,d = *state.size()
+        b,l,d = state.size()
         dtype = state.dtype
         device = state.device
         ## [B, S]
@@ -295,13 +303,18 @@ class ACT_basic(nn.Module):
         time_enc = default(time_enc,_gen_timing_signal(l,d)).to(dtype).to(device)
         max_hop = default(max_hop,max(2,int((l**(1/self.factor) + default(encoder_output,state).size(-2)**(1/self.factor))/2) + 1))
         pos_enc = default(pos_enc,_gen_timing_signal(max_hop,d)).to(dtype).to(device)
-        # for l in range(self.num_layers):
+        # initialise hidden state, cell state
+        h = torch.zeros(2*self.num_layers,state.size(0),1)
+        c = torch.zeros(2*self.num_layers,state.size(0),hidden_size*4)
+        # initiating adaptive computation:
         while( ((halting_probability<self.threshold) & (n_updates < max_hop)).byte().any()):
             # Add timing signal
             state = state + time_enc[:, :l, :].type(dtype).to(device)
             state = state + pos_enc[:, step, :].unsqueeze(1).repeat(1,l,1).type(dtype).to(device)
 
-            p = self.sigma(self.p(state)).squeeze(-1)
+            _p, (h,c) = self._p(state,(h,c))
+            p = self.sigma(self.p(_p)).squeeze(-1)
+
             # Mask for inputs which have not halted yet
             still_running = (halting_probability < 1.0).type(dtype).to(device)
 
@@ -330,11 +343,11 @@ class ACT_basic(nn.Module):
             # the remainders when it halted this step
             update_weights = p * still_running + new_halted * remainders
 
-            if(encoder_output):
-                state, _ = self.fn(state,encoder_output)
-            else:
-                # apply transformation on the state
-                state = self.fn(state)
+            if isinstance(self.fn,nn.Module):
+                state = ckpt(self.fn,state,encoder_output,checkpointed=self.checkpointed)
+            elif isinstance(self.fn,nn.ModuleList):
+                for layer in self.fn:
+                    state = ckpt(layer,state,encoder_output,checkpointed=self.checkpointed)
 
             # update running part in the weighted state and keep the rest
             previous_state = ((state * update_weights.unsqueeze(-1)) + (previous_state * (1 - update_weights.unsqueeze(-1))))
@@ -352,14 +365,14 @@ class TransformerBlock(Module):
 
     #@profile
     def __init__(self,
-                     d_model=128,
-                     nhead=4, 
-                     dim_feedforward=512, 
+                     d_model=256,
+                     nhead=8, 
+                     dim_ffd_mult=4, 
                      dropout=0.1, 
                      activation="sigmoid",
                      mem_kv=None,
-                     pkm_dims=None,
-                     pkm_keys=64,
+                     pkm_dim=None,
+                     pkm_keys=None,
                      decoder=False,
                      encoder_n_decoder=False,
                      hopfield=False,
@@ -377,40 +390,42 @@ class TransformerBlock(Module):
                      use_mask=False,
                      context=True,
                      ET = True,
+                     prev_state_kv = None
                 ):
         super(TransformerBlock, self).__init__()
         
         self.dropout1 = Dropout(dropout)
         self.dropout2 = Dropout(dropout)
 
-        pkm_dims = default(pkm_dims,d_model//1)
+        pkm_dim = default(pkm_dim,d_model//1)
+        pkm_keys = default(pkm_keys,64)
         hop_dim = default(hop_dim,d_model//1)
 
         mem_kv = default(mem_kv,1024)
 
-        #pkm_heads = max((nhead * pkm_dims) // d_model,1)
+        #pkm_heads = max((nhead * pkm_dim) // d_model,1)
         hop_heads = max((nhead * hop_dim) // d_model,1)
 
         modes = default(modes,nhead)
         width = default(width,nhead)
 
         pkm1 = nn.Sequential(
-            nn.Linear(d_model,pkm_dims,bias=False),
-            PKM(pkm_dims,num_keys=pkm_keys),
-            nn.Linear(pkm_dims,d_model,bias=False),
-            ) if pkm_dims!=0 else None
+            nn.Linear(d_model,pkm_dim,bias=False),
+            PKM(pkm_dim,num_keys=pkm_keys),
+            nn.Linear(pkm_dim,d_model,bias=False),
+            ) if pkm_dim!=0 else None
 
-        conformer = ConformerConvModule(d_model,expansion_factor=dim_feedforward//(d_model*2),causal=True,dropout=dropout)
+        conformer = ConformerConvModule(d_model,expansion_factor=dim_ffd_mult//2,causal=True,dropout=dropout)
 
         fno = FNO1d(modes,
                         width,
                         inp_dim=d_model,
                         out_dim=d_model,
-                        ffd_dim=dim_feedforward,
+                        ffd_dim=dim_ffd_mult*d_model,
                         num_layers=fno_layers
                     )
 
-        ffd1 = nn.Sequential(FFd(dim=d_model,activation=activation,mult=dim_feedforward//d_model,fn=[pkm1,conformer,fno]),Dropout(dropout))
+        ffd1 = nn.Sequential(FFd(dim=d_model,activation=activation,mult=dim_ffd_mult,fn=[pkm1,conformer,fno]),Dropout(dropout))
 
         self.feed_forward = GRUGating(d_model,ffd1)
 
@@ -437,6 +452,7 @@ class TransformerBlock(Module):
                                     heads=nhead,
                                     dim_head=d_model//nhead,
                                     num_mem_kv=mem_kv,
+                                    num_prev_state=prev_state_kv,
                                     local_heads=local_heads,
                                     hop_attn=hop_attn,
                                     rotary_pos_emb=rotary_pos_emb,
@@ -451,7 +467,7 @@ class TransformerBlock(Module):
             attn_block = ET_Encoder_Block(d_model,
                                 num_heads=nhead,
                                 attn=attn,
-                                ff_hidden=dim_feedforward//d_model,
+                                ff_hidden=dim_ffd_mult,
                                 ) if ET else attn
         else:
                 
@@ -461,6 +477,7 @@ class TransformerBlock(Module):
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=mem_kv,
+                                            num_prev_state=prev_state_kv,
                                             local_heads=local_heads,
                                             hop_attn=copy.deepcopy(hop_attn),
                                             rotary_pos_emb=rotary_pos_emb,
@@ -476,7 +493,7 @@ class TransformerBlock(Module):
                                             ET_Encoder_Block(d_model,
                                                         num_heads=nhead,
                                                         attn=attn_self,
-                                                        ff_hidden=dim_feedforward//d_model,
+                                                        ff_hidden=dim_ffd_mult,
                                                         ),norm=False) if ET else GRUGating(d_model,attn_self,norm=False)) if encoder_n_decoder else Identity()
 
             self.self_ctxt_enc = (GRUGating(
@@ -484,7 +501,7 @@ class TransformerBlock(Module):
                                             ET_Encoder_Block(d_model,
                                                         num_heads=nhead,
                                                         attn=copy.deepcopy(attn_self),
-                                                        ff_hidden=dim_feedforward//d_model,
+                                                        ff_hidden=dim_ffd_mult,
                                                         ),norm=False) if ET else GRUGating(d_model,copy.deepcopy(attn_self),norm=False)) if encoder_n_decoder else Identity()
 
             attn = {
@@ -492,6 +509,7 @@ class TransformerBlock(Module):
                                         heads=nhead*2,
                                         dim_head=d_model//(nhead*2),
                                         num_mem_kv=mem_kv,
+                                        num_prev_state=prev_state_kv,
                                         hop_attn=hop_attn,
                                         local_heads=local_heads,
                                         rotary_pos_emb=rotary_pos_emb,
@@ -504,6 +522,7 @@ class TransformerBlock(Module):
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
+                                        num_prev_state=prev_state_kv,
                                         hop_attn=copy.deepcopy(hop_attn),
                                         local_heads=local_heads,
                                         rotary_pos_emb=rotary_pos_emb,
@@ -516,6 +535,7 @@ class TransformerBlock(Module):
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
+                                        num_prev_state=prev_state_kv,
                                         hop_attn=copy.deepcopy(hop_attn),
                                         rotary_pos_emb=rotary_pos_emb,
                                         nystrom=nystrom,
@@ -527,6 +547,7 @@ class TransformerBlock(Module):
                                         heads=nhead,
                                         dim_head=d_model//nhead,
                                         num_mem_kv=mem_kv,
+                                        num_prev_state=prev_state_kv,
                                         hop_attn=copy.deepcopy(hop_attn),
                                         nystrom=nystrom,
                                         rotary_pos_emb=rotary_pos_emb,
@@ -539,11 +560,12 @@ class TransformerBlock(Module):
             attn_block = ET_Decoder_Block(d_model,
                                 num_heads=nhead,
                                 attn=attn,
-                                ff_hidden=dim_feedforward//d_model,
+                                ff_hidden=dim_ffd_mult,
                                 ) if ET else Attention(d_model,
                                                             heads=nhead,
                                                             dim_head=d_model//nhead,
                                                             num_mem_kv=mem_kv,
+                                                            num_prev_state=prev_state_kv,
                                                             hop_attn=hop_attn,
                                                             local_heads=0,
                                                             rotary_pos_emb=rotary_pos_emb,
@@ -556,7 +578,7 @@ class TransformerBlock(Module):
         
         self.attn = GRUGating(d_model,attn_block,norm=False)
 
-        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=dim_feedforward//(d_model*2),seq_len=2**16,window=d_model//2,attn_dim=d_model,prob_survival=1-dropout),norm=False)
+        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=dim_ffd_mult//2,seq_len=2**16,window=d_model//2,attn_dim=d_model,prob_survival=1-dropout),norm=False)
 
         self.decoder = decoder
 
@@ -602,7 +624,7 @@ class TransformerModule(ModuleList):
                     max_len=2**17,
                     prev_state_len=8192,
                     hop_dim=None,
-                    pkm_dims=None,
+                    pkm_dim=None,
                     fno_layers=4,
                     modes=None,
                     width=None,
@@ -621,7 +643,7 @@ class TransformerModule(ModuleList):
         super(TransformerModule, self).__init__()
 
         # deprecated cross attention config saveing
-        self.config = dict(d_model=d_model, nhead=nhead, dim_feedforward=nhid, dropout=dropout,decoder=True,mem_kv=mem_kv,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,ET=ET)
+        self.config = dict(d_model=d_model, nhead=nhead, dim_ffd_mult=nhid//d_model, dropout=dropout,decoder=True,mem_kv=mem_kv,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dim=pkm_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,ET=ET)
 
         self.full_block_repeat = full_block_repeat
         self.enable_encoder=enable_encoder
@@ -630,15 +652,15 @@ class TransformerModule(ModuleList):
 
         if num_layers != 0:
             if not enable_encoder:
-                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET)
+                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dim=pkm_dim,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET)
                 self.decoder_self = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
                 self.decoder_cross = Identity()
                 self.encoder = Identity()
             else:
-                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET)
+                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dim=pkm_dim,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET)
                 self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
                 self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dims=pkm_dims,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,ET=ET)
+                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dim=pkm_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,ET=ET)
                 self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         else:
             self.encoder = nn.ModuleList([Identity()])
@@ -646,7 +668,7 @@ class TransformerModule(ModuleList):
             self.decoder_cross = nn.ModuleList([Identity()])
             
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
-        block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dims=pkm_dims,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dim=pkm_dim,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
         self.prev_state_exists = False
@@ -1376,79 +1398,95 @@ class TransformerModel(Module):
 class MultiModalTransformer(Module):
 
     @profile
-    def __init__(self, 
-                    ninp: int, 
-                    nhead: int, 
-                    nhid: int, 
-                    nlayers: int,
-                    ntoken: Optional[int] = None, 
-                    padding_idx: int = 0,
-                    dropout: float = 0.5,
-                    activation: str = 'Lrelu',
-                    mem_token: int = 00,
-                    context_mem_token: Optional[int] = None,
-                    encoder_decoder: bool = False,
-                    deberta_layers: int = 1,
-                    repeated_deberta_layers: int = 2,
-                    max_seq_len=2**17,
-                    discriminator: bool = False,
-                    seq_scale_down: int = 8,
-                    auto_check_redraw: bool = True,
-                    feature_redraw_interval: int = 256,
-                    full_block_repeat: bool = False,
-                    causal: bool = True,
-                    prev_state_len: int = 8192,
-                    prev_state_self_num=32,
-                    nystrom: bool = True,
-                    local_heads: int = 1,
-                    attend_to_self=True,
-                    fno_layers=4,
-                    modes=None,
-                    width=None,
-                    mlp_layers=1,
-                    encoder_n_decoder=True,
-                    repeated_main_layers=None,
-                    ET=True,
-                    mem_kv=None,
-                    device: torch.DeviceObjType = device
-                ) -> NoReturn :
+    def __init__(self, **config: dict) -> NoReturn :
         super(TransformerModel, self).__init__()
-        self.model_type = 'Transformer'
 
-        self.time_ = [0,0]
+        self.time_: Union[float,int] =                              [0,0]
+        self.model_type: str =                                      config.get("Project Name", "Multi Modal Transformer-X")
+        self.dim_hidden: int =                                      config.get('dim_hidden')
+        self.dim_ffd_mult: int =                                    config.get('dim_ffd_mult',4)
+        self.num_heads: int =                                       config.get('num_heads',8)
+        self.num_local_heads: int =                                 config.get('num_local_heads',2)
+        self.dropout: Union[float,int] =                            config.get('dropout',math.pi/10)
+        self.max_seq_len: int =                                     config.get('max_seq_len',2**17)
+        self.activation: str =                                      config.get('activation','Lrelu')
+        self.discriminator: bool =                                  config.get('discriminator',False)
+        self.discriminator_classes: int =                           config.get('discriminator_classes',2)
+        self.attend_in_patches: bool =                              config.get('attend_in_patches',True)
+        self.project_to_new_sequence: bool =                        config.get('project_to_new_sequnce',True)
+        self.trunk_width: Optional[int] =                           config.get('trunk_width',None)
+        self.seperate_attender_exists: bool =                       config.get('seperate_attender_exists',True)
+        self.decoder_type_attender: bool =                          config.get('decoder_type_attender',False)
+        self.seperate_doer_exists: bool =                           config.get('seperate_doer_exists',True)
+        self.decoder_type_doer: bool =                              config.get('decoder_type_doer',False)
+        self.num_attender_layers: int =                             config.get('num_attender_layers',1)
+        self.attender_layers_max_hop: Optional[int] =               config.get('attender_layers_max_hop',None)
+        self.num_thinker_layers: int =                              config.get('num_thinker_layers',1)
+        self.thinker_layers_max_hop: Optional[int] =                config.get('thinker_layers_max_hop',None)
+        self.num_doer_layers: int =                                 config.get('num_doer_layers',1)
+        self.doer_layers_max_hop: Optional[int] =                   config.get('doer_layers_max_hop',None)
+        self.exists_embedding: bool =                               config.get('embedding_encoder',True)
+        self.fno_layers: int =                                      config.get("fno_layers",4)
+        self.modes: Optional[int] =                                 config.get("modes",None)
+        self.width: Optional[int] =                                 config.get("width",None)
+        self.exists_head: bool =                                    config.get('logits_head',True)
+        self.final_logits_activation: Optional[str] =               config.get('final_logits_activation',None)
+        self.seq_scale_down: int =                                  config.get('seq_scale_down',4)
+        self.mem_parameters: int =                                  config.get('mem_parameters',128)
+        self.prev_state_len: int =                                  config.get("prev_state_len",8192)
+        self.prev_state_self_attend: int =                          config.get("prev_state_self_attend",32)
+        self.max_prev_states: int =                                 config.get('max_prev_states_storage',3)
+        self.ET: bool =                                             config.get('ET',True)
+        self.nystrom: bool =                                        config.get('nystrom',True)
+        self.feature_redraw_interval: int =                         config.get('feature_redraw_interval',256)
+        self.auto_check_redraw: bool =                              config.get('auto_check_redraw',True)
+        self.encoder_decoder: bool =                                config.get('encoder_decoder',False)
+        self.causal: bool =                                         config.get('causal',False)
+        self.attend_to_self =                                       config.get("attend_to_self",True)
+        self.mlp_layers: int =                                      config.get("mlp_layers",1)
+        self.pkm_dim: Optional[int] =                               config.get("pkm_dim",None)
+        self.pkm_keys: Optional[int] =                              config.get("pkm_keys",None)
+        self.enable_hopfield: bool =                                config.get("enable_hopfield",True)
+        self.hop_dim: Optional[int] =                               config.get("hop_dim",None)
+        self.encoder_in_decoder: bool =                             config.get("encoder_in_decoder",True)
+        self.mem_kv: Optional[int] =                                config.get("mem_kv",None)
+        self.prev_state_kv: Optional[int] =                         config.get("prev_state_kv",None)
 
-        self.encoder_decoder = encoder_decoder
-        self.transformer_block = TransformerModule(nhead, 
-                                                        nhid, 
-                                                        nlayers, 
-                                                        ninp,
-                                                        dropout,
-                                                        enable_encoder=encoder_decoder,
-                                                        deberta_layers=deberta_layers,
-                                                        repeated_deberta_layers=repeated_deberta_layers,
-                                                        max_len=max_seq_len,
-                                                        full_block_repeat=full_block_repeat,
-                                                        causal=causal,
-                                                        prev_state_len=prev_state_len,
-                                                        nystrom=nystrom,
-                                                        local_heads=local_heads,
-                                                        attend_to_self=attend_to_self,
-                                                        fno_layers=fno_layers,
-                                                        modes=modes,
-                                                        width=width,
-                                                        prev_state_self_num=prev_state_self_num,
-                                                        mlp_layers=mlp_layers,
-                                                        encoder_n_decoder=encoder_n_decoder,
-                                                        repeated_main_layers=repeated_main_layers,
-                                                        ET=ET,
-                                                        mem_kv=mem_kv,
-                                                        )
+        if not self.attend_in_patches:
+            warnings.warn("attend_in_patches is set to False, for very large sequence lengths, the memory requirements will be too large.")
 
-        self.attender = nn.ModuleList([None])
+        Tfn_part = partial(TransformerBlock,
+                        d_model = self.dim_hidden,
+                        nhead = self.num_heads,
+                        dim_ffd_mult = self.dim_ffd_mult,
+                        dropout = self.dropout,
+                        activation = self.activation,
+                        mem_kv = self.mem_kv,
+                        encoder_n_decoder = self.encoder_in_decoder,
+                        fno_layers = self.fno_layers,
+                        pkm_dim = self.pkm_dim,
+                        pkm_keys = self.pkm_keys,
+                        hopfield = self.enable_hopfield,
+                        hop_dim = self.hop_dim,
+                        modes = self.modes,
+                        width = self.width,
+                        causal = self.causal,
+                        local_heads = self.num_local_heads,
+                        nystrom = self.nystrom,
+                        attend_to_self = self.attend_to_self,
+                        mlp_layers = self.mlp_layers,
+                        ET = self.ET,
+                        prev_state_kv = self.prev_state_kv,
+                        )
 
-        self.thinker = None
+        self.trunk_sequence = nn.Parameter(torch.zeros((1,self.trunk_width,self.dim_hidden))) if exist(self.trunk_width) else torch.zeros((1,self.max_seq_len,self.dim_hidden))
+        self.trunk_pos_embedding = Positional_Encoding if exists(self.trunk_width) else AbsolutePositionalEmbedding(self.dim_hidden,self.max_seq_len)
 
-        self.doer = None
+        self.thinker = nn.ModuleList([ACT_basic(dim_hidden,Tfn_part(context=True,decoder=True)) for _ in range(num_thinker_layers)])
+
+        self.attender = nn.ModuleList([ACT_basic(dim_hidden,Tfn_part(context=self.project_to_new_sequence,decoder=self.decoder_type_attender)) for _ in range(num_attender_layers)])
+
+        self.doer = nn.ModuleList([ACT_basic(dim_hidden,Tfn_part(context=self.project_to_new_sequence,decoder=self.decoder_type_doer)) for _ in range(num_doer_layers)])
         
 
         # byte_list = [i for i in str.encode("utf-32")]
@@ -1456,64 +1494,46 @@ class MultiModalTransformer(Module):
         # min(byte_list) == 0
         # str_from_bytes = bytes([ try: int_byte_list[i:i+4] for i in range(int_byte_list,4)]).decode("utf-32")
         # str == str_from_bytes --> True
-        self.embedding_encoder = nn.Embedding(256, ninp,padding_idx=padding_idx) if ntoken != None else Identity()
-
-        
-        self.ninp = ninp
-        self.ntokens = 256
+        self.embedding_encoder = nn.Embedding(256, self.dim_hidden) if self.exists_embedding else Identity()
         
         self.decoder = nn.Sequential(
-            nn.Linear(ninp,ntoken),
-            #nn.Sigmoid(),
-            ) if ntoken != None else Identity()
+            nn.Linear(self.dim_hidden,256) if not self.discriminator else nn.Linear(self.dim_hidden,self.discriminator_classes),
+            _get_activation_fn(self.final_logits_activation) if exists(self.final_logits_activation) else Identity(),
+            ) if self.exists_head else Identity()
 
-        self.decoder = nn.Sequential(
-                nn.Linear(ninp,2),
-                #nn.LeakyReLU(0.05),
-            ) if discriminator else self.decoder
+        self.ffd1 = FFd(dim=self.dim_hidden,mult=self.dim_ffd_mult,activation=self.activation)
+        self.ffd2 = FFd(dim=self.dim_hidden,mult=self.dim_ffd_mult,activation=self.activation)
 
-        self.ffd1 = FFd(dim=ninp,activation=activation)
-        self.ffd2 = copy.deepcopy(self.ffd1)
-
-        self.mem_exist = True if mem_token else False
-        if self.mem_exist:
-            if type(mem_token)==int:
-                self.mem = nn.Parameter(torch.randn(mem_token,ninp))
-            elif type(mem_token) == Tensor:
-                assert mem_token.size(-1)==ninp
-                self.mem = nn.Parameter(mem_token)
-        else:
-            self.mem = None
+        self.mem_exist = True if self.mem_parameters else False
+        self.mem = nn.Parameter(torch.randn(self.mem_parameters,self.dim_hidden)) if self.mem_exist else None
+        
             
-        self.seq_scale_down = max(4,(seq_scale_down//4)*4)
+        self.seq_scale_down = max(4,(self.seq_scale_down//4)*4)
         self.attn_len = (self.seq_scale_down*3 // 2)*2 + 1
 
-        self.scale_down_conv = nn.Conv1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,padding=(self.seq_scale_down*3 - 1)//2,groups=1)
+        self.scale_down_conv = nn.Conv1d(self.dim_hidden,self.dim_hidden,self.seq_scale_down*3,self.seq_scale_down,padding=(self.seq_scale_down*3 - 1)//2,groups=1)
 
-        self.scale_up_conv = nn.ConvTranspose1d(ninp,ninp,self.seq_scale_down*3,self.seq_scale_down,groups=1)
+        self.scale_up_conv = nn.ConvTranspose1d(self.dim_hidden,self.dim_hidden,self.seq_scale_down*3,self.seq_scale_down,groups=1)
 
-        self.device = device
+        self.proj_updater = ProjectionUpdater(nn.ModuleList([self.attender,self.thinker,self.doer]), self.feature_redraw_interval)
 
-        self.auto_check_redraw = auto_check_redraw
-        self.feature_redraw_interval = feature_redraw_interval
-        self.proj_updater = ProjectionUpdater(self.transformer_block, feature_redraw_interval)
-
-        self.tokenizer = None
-        self.vocab = None
         self.optimizer = None
         self.scheduler = None
         self.scheduler_lambda = None
 
         self.prev_states = []
-        self.max_prev_states = 1
 
+        _ = self.forward(torch.randint(0,255,(1,self.max_seq_len//8),device=self.device))
         self.init_weights()
 
+    def __len__(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
+    def __repr__(self,*args: any,**kwargs: any) -> any:
+        return self.forward(*args,**kwargs)
+
     def get_avg_inference_time(self) -> int:
-        if self.time_[1] != 0:
-            return self.time_[0] / self.time_[1]
-        else:
-            return 0
+        return self.time_[0] / self.time_[1]
 
     def fix_projection_matrices_(self) -> NoReturn :
         self.proj_updater.feature_redraw_interval = None
@@ -1524,275 +1544,13 @@ class MultiModalTransformer(Module):
     def init_weights(self) -> NoReturn :
         for w in self.parameters():
             w.data.uniform_(-0.01,0.01)
-            
-    def __len__(self) -> int:
-        return sum(p.numel() for p in self.parameters())
-            
-    def multiply_pretrained_transformer_layers(self,num: int = 1,deb_num: int = 1) -> NoReturn :
-        self.transformer_block.pretrained_layer_multiplier(num,deb_num)
-
-    def convert_decoder_only_to_encoder_decoder(self) -> NoReturn:
-        self.transformer_block.convert_decoder_only_to_encoder_decoder()
-        if self.discriminator_enabled:
-            self.discriminator.convert_decoder_only_to_encoder_decoder()
-
-    def init_tokenizer(self,
-                        sample:str = "the quick brown fox jumps over the lazy dog.THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG?!@#$%^&*()`~-_+=[{]}\\|\"':;/.>,<1234567890\t\n\f\r",
-                        append_eos: Optional[bool] = False,
-                        target_vocab_size: Optional[int] = 2**17,
-                        min_occ: Optional[int] = 1,
-                        max_occ: Optional[int] = 1000,
-                        reserved_tokens: Optional[list] = [
-                                                            '[pad]','[unk]',
-                                                            '[sos]','[eos]',
-                                                            '[copy]',
-                                                            '[mask]',
-                                                            '[segment_seperator]',
-                                                            '[non_text_content]','[/non_text_content]'
-                                                            ],
-                        eos_index: Optional[int] = 3,
-                        unk_index: Optional[int] = 1,
-                        pad_idx: Optional[int] = 0,
-                        return_tokenizer: Optional[bool] = False
-                        ) -> Union[NoReturn,torchnlp.encoders.text.text_encoder.TextEncoder] :
-        sample += " ".join(sample.split(""))
-        self.tokenizer = SubwordEncoder(sample,
-                                        append_eos=append_eos,
-                                        target_vocab_size=target_vocab_size,
-                                        min_occurrences=min_occ,
-                                        max_occurrences=max_occ,
-                                        reserved_tokens=reserved_tokens,
-                                        eos_index=eos_index,
-                                        unknown_index=unk_index,
-                                        padding_index=pad_idx)
-        self.vocab = self.tokenizer.vocab
-        if return_tokenizer:
-            return self.tokenizer
-
-    def random_mask_shuffle_encoder(self,
-                                    inp: Tensor,
-                                    mask: bool = True,
-                                    mask_percentage: float = 15.0,
-                                    mask_together_nos: int = 3,
-                                    mask_continuous_pos: float = -101.0,
-                                    shuffle: bool = True,
-                                    shuffle_percentage: float = 15,
-                                    shuffle_together_nos: int = 3,
-                                    shuffle_continuous_pos: float = -101
-                                ) -> Tensor:
-        inp_2: Tensor = inp.clone().detach()
-        index_to_be_trained_on = []
-
-        count: int = 0
-        together_count: int = 0
-        for j in range(inp.size(1)):
-            if not shuffle:
-                break
-            rnd: float = -1
-            if shuffle_continuous_pos < -100 or shuffle_continuous_pos > 100:
-                rnd: float = random.randint(0,100000)/1000
-            elif shuffle_continuous_pos >= -100 and shuffle_continuous_pos <= 100:
-                shuffle_together_nos = shuffle_percentage * (inp.size(1)/100)
-                if shuffle_continuous_pos < 0:
-                    if (((j+1)/inp.size(1)) + (shuffle_percentage/100)) >= ((inp.size(1)+((shuffle_continuous_pos/100)*inp.size(1)))/inp.size(1)):
-                        rnd: float = shuffle_percentage/2
-                else:
-                    if (j+1)/inp.size(1) >= shuffle_continuous_pos/100:
-                        rnd: float = shuffle_percentage/2
-            if (((rnd>=0 and rnd<shuffle_percentage) or (together_count<shuffle_together_nos and together_count!=0)) and shuffle and (((count+1)/inp.size(1))<=shuffle_percentage/100)):
-                while True:
-                    r = random.randint(0,inp.size(1)-1)
-                    if r!=j:
-                        break
-                if j not in index_to_be_trained_on:
-                    index_to_be_trained_on.append(j)
-                if r not in index_to_be_trained_on:
-                    index_to_be_trained_on.append(r)
-                inp_2[:,j],inp_2[:,r] = inp[:,r],inp[:,j]
-                count += 1
-                together_count += 1
-            elif together_count>=shuffle_together_nos:
-                together_count = 0
-
-        count: int = 0
-        together_count: int = 0
-        for j in range(inp.size(1)):
-            rnd: float = -1
-            if mask_continuous_pos < -100 or mask_continuous_pos > 100 or mask_continuous_pos==None:
-                rnd: float = random.randint(0,100000)/1000
-            elif mask_continuous_pos >= -100 and mask_continuous_pos <= 100:
-                mask_together_nos = mask_percentage * (inp.size(1)/100)
-                if mask_continuous_pos < 0:
-                    if (((j+1)/inp.size(1)) + (mask_percentage/100)) >= ((inp.size(1)+((mask_continuous_pos/100)*inp.size(1)))/inp.size(1)):
-                        rnd: float = mask_percentage/2
-                else:
-                    if ((j+1)/inp.size(1)) >= mask_continuous_pos/100:
-                        rnd: float = mask_percentage/2
-            if (((rnd>=0 and rnd<mask_percentage) or (together_count<mask_together_nos and together_count!=0)) and mask and (((count+1)/inp.size(1))<=mask_percentage/100)):
-                for i in range(inp.size(0)):
-                    inp_2[i,j] = 5
-                if j not in index_to_be_trained_on:
-                    index_to_be_trained_on.append(j)
-                count += 1
-                together_count += 1
-            elif together_count>=mask_together_nos:
-                together_count = 0
-        for _ in range(inp_2.size(1)//20):
-            rnd = random.randint(0,inp_2.size(1)-1)
-            if rnd not in index_to_be_trained_on:
-                index_to_be_trained_on.append(rnd)
-        index_to_be_trained_on = list(set(index_to_be_trained_on))
-        index_to_be_trained_on = list(set(index_to_be_trained_on.extend(rnd)))
-        del(inp_2,inp)
-        torch.cuda.empty_cache()
-        return out,index_to_be_trained_on
-
-    def encode_text(self,
-                        *args: Union[str,Tensor],
-                        append_pad_at_start: Union[bool,int] = False,
-                        append_pad_at_end: Union[bool,int] = False,
-                        padding: Union[int,bool] = 0,
-                        pad_idx: int = 0,
-                        append_sos: bool = True,
-                        sos_idx: int = 2,
-                        append_eos: bool = True,
-                        eos_idx: int = 3,
-                        concatenate_all: bool = False,
-                        concatenate_dim: int = 1,
-                        append_segment_seperator: bool = True,
-                        segment_idx: int = 6,
-                        mask_at_random: bool = True,
-                        mask_percentage: float = 15.,
-                        mask_together_nos: int = 3,
-                        mask_continuous_pos: float = -101.,
-                        shuffle_at_random: bool = True,
-                        shuffle_percentage: float = 15.,
-                        shuffle_together_nos: int = 3,
-                        shuffle_continuous_pos: float = -101.
-                    ) -> List[Tensor] :
-        encoded_text = []
-        trainable_index = []
-        for txt in args:
-            if type(txt) == str:
-                tmp = self.tokenizer.encode(txt)
-            else:
-                assert type(tmp) == Tensor
-            if mask_at_random or shuffle_at_random:
-                tmp,index_to_be_trained_on =   self.random_mask_shuffle_encoder(tmp,
-                                                            mask=mask_at_random,
-                                                            mask_percentage=mask_percentage,
-                                                            mask_together_nos=mask_together_nos,
-                                                            mask_continuous_pos=mask_continuous_pos,
-                                                            shuffle=shuffle_at_random,
-                                                            shuffle_percentage=shuffle_percentage,
-                                                            shuffle_together_nos=shuffle_together_nos,
-                                                            shuffle_continuous_pos=shuffle_continuous_pos
-                                                        )
-
-            trainable_index.append(index_to_be_trained_on)
-
-            if append_sos:
-                tmp = torch.cat((torch.full((tmp.size(0),1),sos_idx,dtype=torch.long,device=device),tmp),dim=1).contiguous()
-
-            if append_eos:
-                tmp = torch.cat((tmp,torch.full((tmp.size(0),1),eos_idx,dtype=torch.long,device=device)),dim=1).contiguous()
-
-            if append_pad_at_end or append_pad_at_end:
-                if type(append_pad_at_start) == int:
-                    tmp = torch.cat((torch.full((tmp.size(0),append_pad_at_start),pad_idx,dtype=torch.long,device=self.device),tmp),dim=1)
-                if type(append_pad_at_end) == int:
-                    tmp = torch.cat((tmp,torch.full((tmp.size(0),append_pad_at_end),pad_idx,dtype=torch.long,device=self.device)),dim=1)
-                if type(append_pad_at_start) == bool and type(append_pad_at_end) == bool:
-                    if padding%2==0:
-                        pad_l = pad_r = padding//2
-                    else:
-                        pad_l = padding//2
-                        pad_r = (padding//2) + 1
-                    tmp = torch.cat((torch.full((tmp.size(0),pad_l),pad_idx,dtype=torch.long,device=self.device),tmp,torch.full((tmp.size(0),pad_r),pad_idx,dtype=torch.long,device=self.device)),dim=1)
-                elif not (type(append_pad_at_end) == bool and type(append_pad_at_start) == bool):
-                    tmp = torch.cat((torch.full((tmp.size(0),padding),pad_idx,dtype=torch.long,device=self.device),tmp),dim=1)
-
-            if append_segment_seperator:
-                tmp = torch.cat((tmp,torch.tensor([[segment_idx]])),dim=1)
-            encoded_text.append(tmp)
-        
-        if concatenate_all:
-            encoded_text = [torch.cat(encoded_text,dim=concatenate_dim)]
-        return encoded_text,trainable_index
-
-    def decode_text(self,
-                        *args: Tensor,
-                        to_text: bool = True
-                        ) -> list:
-        decoded_text = []
-        for txt in args:
-            if type(txt) != Tensor:
-                txt = torch.tensor(txt)
-
-            if txt.size(-1) == self.ntokens and len(txt.size()) == 3:
-                txt = torch.argmax(txt,dim=-1)
-
-            if to_text:
-                if txt.size(0)>1:
-                    tmp = []
-                    for i in txt:
-                        tmp.append(self.tokenizer.decode(i))
-                    txt = tmp
-                else:
-                    txt = self.tokenizer.decode(txt)
-            decoded_text.append(txt)
-        return decoded_text
-
-    def init_optimizer(self,
-                            opt: Optional[torch.optim.Optimizer] = None,
-                            lr: Union[None,float,dict] = None,
-                            scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
-                            lambdaLR: Optional[typing.Callable] = None,
-                            return_opt_schd: bool = False
-                        ) -> Union[NoReturn,Tuple[torch.optim.Optimizer,torch.optim.lr_scheduler._LRScheduler]]:
-        if opt != None:
-            self.optimizer = opt
-        else:
-            lr = 1 if lr==None else lr
-            self.optimizer = torch.optim.SGD(self.parameters(), lr=lr)
-        if scheduler != None:
-            self.scheduler = scheduler
-        else:
-            if (lambdaLR == None or lambdaLR_disc == None) and self.scheduler_lambda == None:
-
-                def lambda_lr(step_):
-                    a = 5000000
-                    b = 1000
-                    c = 0.0
-                    step = 1
-                    multiplier = (bptt/512)*batch_size
-
-                    def sub_func(step):
-                        return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
-
-                    if step_<(1024/(multiplier**(math.pi*2/10))):
-                        return sub_func(step_)
-                    elif step_<(2048/(multiplier**(math.pi*2/10))):
-                        return sub_func(step_) / 25
-                    else:
-                        return sub_func(step_) / 625
-
-                lambdaLR = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
-            else:
-                lambdaLR = self.scheduler_lambda if type(self.scheduler_lambda)==list else self.scheduler_lambda[-1]
-
-            self.scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=self.optimizer,lr_lambda=lambdaLR)
-            self.scheduler_lambda = lambda_LR
-
-        if return_opt_schd:
-            return self.optimizer,self.scheduler
-
+   
     def training_step(self,
                     data,
                     targets,
                     loss_criterion,
                     mem_tokens=None,
-                    opt=None,
+                    optimizer=None,
                     grad_clip=0.5,
                     deepspeed_enabled=False,
                     autocast_enabled=False,
@@ -1805,11 +1563,6 @@ class MultiModalTransformer(Module):
         self.train()
         step_start_time = time.time()
         torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
-
-        if opt == None:
-            optimizer = self.optimizer
-        else:
-            optimizer = opt
 
         torch.cuda.empty_cache()
 
@@ -1857,15 +1610,15 @@ class MultiModalTransformer(Module):
         return outputs,losses,loss,acc,(step_start_time-time.time()),mem_,mem_ctxt_
         
     def get_prev_state(self) -> List[Tensor]:
-        prev_states = {0:self.transformer_block.prev_state}
-        modules = find_modules(self.transformer_block,Attention)
+        prev_states = {0:self.prev_state}
+        modules = find_modules(self,Attention)
         for i,attn in enumerate(modules):
             prev_states[i+1] = attn.prev_state
         return prev_states
 
     def set_prev_state(self,prev_state:List[Tensor]):
-        self.transformer_block.prev_state = prev_state[0]
-        modules = find_modules(self.transformer_block,Attention)
+        self.prev_state = prev_state[0]
+        modules = find_modules(self,Attention)
         for i,attn in enumerate(modules):
             attn.prev_state = prev_states[i+1]
 
