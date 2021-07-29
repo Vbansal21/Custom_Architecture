@@ -1,13 +1,14 @@
 #from ..models.embedder import Embedder, PositionalEncoder
 import math
-from turtle import forward
 import torch
 from einops import rearrange,repeat
 from einops.layers.torch import Rearrange
-from typing import Optional
 from torch.functional import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
+from .attention_layer_s import Attention
+from copy import deepcopy as dcpy
+
 
 from torch.utils.checkpoint import checkpoint
 checkpointed = True
@@ -83,11 +84,25 @@ class ScaleNorm(nn.Module):
         return x / norm.clamp(min = self.eps) * self.g
 
 class ET_Encoder_Block(nn.Module):
-    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None,pkm=None):
+    def __init__(self,d_model,num_heads=8,ff_hidden=4,dim_heads=None,num_mem_kv=None,num_prev_state=None,num_prev_mem=None,hop_attn=None,local_heads=0,rotary_pos_emb=True,causal=False,nystrom=True,attend_to_self=True,context=False,use_mask=False,attn = None,ffd = None,pkm=None):
         super(ET_Encoder_Block,self).__init__()
         if attn == None:
-            self.attention = nn.MultiheadAttention(d_model, num_heads) 
-        else:
+            self.attention = Attention(d_model,
+                                    heads=num_head,
+                                    dim_head=dim_heads,
+                                    num_mem_kv=num_mem_kv,
+                                    num_prev_state=num_prev_state,
+                                    num_prev_mem=num_prev_mem,
+                                    local_heads=local_heads,
+                                    hop_attn=hop_attn,
+                                    rotary_pos_emb=rotary_pos_emb,
+                                    causal=causal,
+                                    nystrom=nystrom,
+                                    attend_to_self=attend_to_self,
+                                    context=context,
+                                    use_mask=use_mask,
+                                )
+        else:False
             self.attention = attn
         self.layer_norms = nn.ModuleList([RMSNorm(d_model) for _ in range(5)])
         if ffd == None:
@@ -141,14 +156,64 @@ class ET_Encoder_Block(nn.Module):
 
 
 class ET_Decoder_Block(nn.Module):
-    def __init__(self,d_model,num_heads=8,ff_hidden=4,attn = None,ffd = None):
+    def __init__(self,d_model,num_heads=8,ff_hidden=4,dim_heads=None,num_mem_kv=None,num_prev_state=None,num_prev_mem=None,hop_attn=None,local_heads=0,rotary_pos_emb=True,causal=False,nystrom=True,attend_to_self=True,context=True,use_mask=False,attn = None,ffd = None):
         super(ET_Decoder_Block,self).__init__()
 
         if attn == None:
-            self.attention_self_1 = nn.MultiheadAttention(d_model, num_heads*2) 
-            self.attention_self_2 = nn.MultiheadAttention(d_model, num_heads) 
-            self.attention_cross_1 = nn.MultiheadAttention(d_model, num_heads) 
-            self.attention_cross_2 = nn.MultiheadAttention(d_model, num_heads) 
+            self.attention_self_1 = Attention(d_model,
+                                        heads=num_head*2,
+                                        dim_head=dim_heads//2,
+                                        num_mem_kv=num_mem_kv,
+                                        num_prev_state=num_prev_state,
+                                        num_prev_mem=num_prev_mem,
+                                        hop_attn=hop_attn,
+                                        local_heads=local_heads,
+                                        rotary_pos_emb=rotary_pos_emb,
+                                        causal=causal,
+                                        nystrom=nystrom,
+                                        attend_to_self=attend_to_self,
+                                        context=False,
+                                        use_mask=use_mask)
+            self.attention_self_2 = Attention(d_model,
+                                        heads=num_head,
+                                        dim_head=dim_heads,
+                                        num_mem_kv=num_mem_kv,
+                                        num_prev_state=num_prev_state,
+                                        num_prev_mem=num_prev_mem,
+                                        hop_attn=dcpy(hop_attn),
+                                        local_heads=local_heads,
+                                        rotary_pos_emb=rotary_pos_emb,
+                                        causal=causal,
+                                        nystrom=nystrom,
+                                        attend_to_self=False,
+                                        context=False,
+                                        use_mask=use_mask)
+            self.attention_cross_1 = Attention(d_model,
+                                        heads=num_head,
+                                        dim_head=dim_heads,
+                                        num_mem_kv=num_mem_kv,
+                                        num_prev_state=num_prev_state,
+                                        num_prev_mem=num_prev_mem,
+                                        hop_attn=dcpy(hop_attn),
+                                        local_heads=0 if context else local_heads,
+                                        rotary_pos_emb=rotary_pos_emb,
+                                        nystrom=nystrom,
+                                        attend_to_self=False,
+                                        context=True,
+                                        use_mask=bool(not context and use_mask))
+            self.attention_cross_2 = Attention(d_model,
+                                        heads=num_head,
+                                        dim_head=dim_heads,
+                                        num_mem_kv=num_mem_kv,
+                                        num_prev_state=num_prev_state,
+                                        num_prev_mem=num_prev_mem,
+                                        hop_attn=dcpy(hop_attn),
+                                        local_heads=0 if context else local_heads,
+                                        rotary_pos_emb=rotary_pos_emb,
+                                        nystrom=nystrom,
+                                        attend_to_self=False,
+                                        context=True,
+                                        use_mask=bool(not context and use_mask))
         else:
             self.attention_self_1 = attn['self_1'] 
             self.attention_self_2 = attn['self_2'] 

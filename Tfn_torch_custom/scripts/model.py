@@ -269,15 +269,26 @@ class AbsolutePositionalEmbedding(Module):
             assert tmp.size(1) == s
             return tmp
 
+class Dynamic_Memory(nn.Module):
+    def __init__(self,*args, **kwargs):
+        super(Dynamic_Memory, self).__init__()
+        pass
+    
+    def forward(self,x):
+        pass
+
 class ACT_basic(nn.Module):
-    def __init__(self,hidden_size,function,threshold=0.1,factor=3,checkpointed=None):
+    def __init__(self,hidden_size,function,threshold=0.2,factor=3,checkpointed=checkpointed):
         super(ACT_basic, self).__init__()
         self.sigma = nn.Sigmoid()
         self.num_layers = 2
-        self._p = nn.LSTM(hidden_size,hidden_size*4,self.num_layers,batch_first=True,bidirectional=True,proj_size=1)
+        self.lstm_hs = hidden_size
+        self.bidirectional = True
+        self._p = nn.LSTM(hidden_size,self.lstm_hs,self.num_layers,batch_first=True,bidirectional=self.bidirectional,proj_size=1)
         self.p = nn.Linear(2,1)
         self.fn = function
-        self.threshold = 1 - threshold
+        self.threshold_num = 1 - threshold
+        self.threshold = nn.Parameter(torch.full((self.threshold_num,)))
         self.factor = factor
         if exists(checkpointed):
             pass
@@ -304,10 +315,10 @@ class ACT_basic(nn.Module):
         max_hop = default(max_hop,max(2,int((l**(1/self.factor) + default(encoder_output,state).size(-2)**(1/self.factor))/2) + 1))
         pos_enc = default(pos_enc,_gen_timing_signal(max_hop,d)).to(dtype).to(device)
         # initialise hidden state, cell state
-        h = torch.zeros(2*self.num_layers,state.size(0),1)
-        c = torch.zeros(2*self.num_layers,state.size(0),hidden_size*4)
+        h = torch.zeros( (1+int(self.bidirectional)) *self.num_layers, state.size(0), 1)
+        c = torch.zeros( (1+int(self.bidirectional)) *self.num_layers, state.size(0), self.lstm_hs)
         # initiating adaptive computation:
-        while( ((halting_probability<self.threshold) & (n_updates < max_hop)).byte().any()):
+        while( ((halting_probability<self.threshold.clamp(min=self.threshold_num,max=1.0)) & (n_updates < max_hop)).byte().any()):
             # Add timing signal
             state = state + time_enc[:, :l, :].type(dtype).to(device)
             state = state + pos_enc[:, step, :].unsqueeze(1).repeat(1,l,1).type(dtype).to(device)
@@ -319,10 +330,10 @@ class ACT_basic(nn.Module):
             still_running = (halting_probability < 1.0).type(dtype).to(device)
 
             # Mask of inputs which halted at this step
-            new_halted = (halting_probability + p * still_running > self.threshold).type(dtype).to(device) * still_running
+            new_halted = (halting_probability + p * still_running > self.threshold.clamp(min=self.threshold_num,max=1.0)).type(dtype).to(device) * still_running
 
             # Mask of inputs which haven't halted, and didn't halt this step
-            still_running = (halting_probability + p * still_running <= self.threshold).type(dtype).to(device) * still_running
+            still_running = (halting_probability + p * still_running <= self.threshold.clamp(min=self.threshold_num,max=1.0)).type(dtype).to(device) * still_running
 
             # Add the halting probability for this step to the halting
             # probabilities for those input which haven't halted yet
@@ -381,7 +392,6 @@ class TransformerBlock(Module):
                      modes=None,
                      width=None,
                      rotary_pos_emb=True,
-                     fixed_emb=False,
                      causal=False,
                      local_heads=0,
                      nystrom=False,
@@ -390,7 +400,8 @@ class TransformerBlock(Module):
                      use_mask=False,
                      context=True,
                      ET = True,
-                     prev_state_kv = None
+                     prev_state_kv = None,
+                     num_prev_mem = None,
                 ):
         super(TransformerBlock, self).__init__()
         
@@ -425,12 +436,6 @@ class TransformerBlock(Module):
                         num_layers=fno_layers
                     )
 
-        ffd1 = nn.Sequential(FFd(dim=d_model,activation=activation,mult=dim_ffd_mult,fn=[pkm1,conformer,fno]),Dropout(dropout))
-
-        self.feed_forward = GRUGating(d_model,ffd1)
-
-        self.to_out = copy.deepcopy(self.feed_forward)
-
         if hopfield:
             hop_attn = nn.Sequential(
                                     nn.Linear(d_model,hop_dim,bias=False),
@@ -445,131 +450,124 @@ class TransformerBlock(Module):
                                     )
         else:
             hop_attn = None
+            
+        ffd_list = [pkm1,hop_attn,conformer,fno]
+        ffd1 = nn.Sequential(FFd(dim=d_model,activation=activation,mult=dim_ffd_mult,fn=[i for i in ffd_list if exists(i)]),Dropout(dropout))
+
+        self.feed_forward = GRUGating(d_model,ffd1)
+
+        self.to_out = copy.deepcopy(self.feed_forward)
 
         if not decoder:
-                
-            attn = Attention(d_model,
-                                    heads=nhead,
-                                    dim_head=d_model//nhead,
-                                    num_mem_kv=mem_kv,
-                                    num_prev_state=prev_state_kv,
-                                    local_heads=local_heads,
-                                    hop_attn=hop_attn,
-                                    rotary_pos_emb=rotary_pos_emb,
-                                    fixed_emb=fixed_emb,
-                                    causal=causal,
-                                    nystrom=nystrom,
-                                    attend_to_self=attend_to_self,
-                                    context=context,
-                                    use_mask=use_mask,
-                                )
-
             attn_block = ET_Encoder_Block(d_model,
                                 num_heads=nhead,
-                                attn=attn,
+                                dim_heads=d_model//nhead,
+                                num_mem_kv=mem_kv,
+                                num_prev_state=prev_state_kv,
+                                num_prev_mem=num_prev_mem,
+                                local_heads=local_heads,
+                                #hop_attn=hop_attn,
+                                rotary_pos_emb=rotary_pos_emb,
+                                causal=causal,
+                                nystrom=nystrom,
+                                attend_to_self=attend_to_self,
+                                context=context,
+                                use_mask=use_mask,
                                 ff_hidden=dim_ffd_mult,
                                 ) if ET else attn
         else:
-                
-            self.ctxt_ffd = copy.deepcopy(self.feed_forward)
-
-            attn_self = Attention(d_model,
+            self.self_inp_enc = (GRUGating(
+                                            d_model,
+                                            ET_Encoder_Block(d_model,
+                                                                num_heads=nhead,
+                                                                dim_heads=d_model//nhead,
+                                                                num_mem_kv=mem_kv,
+                                                                num_prev_state=prev_state_kv,
+                                                                num_prev_mem=num_prev_mem,
+                                                                local_heads=local_heads,
+                                                                #hop_attn=hop_attn,
+                                                                rotary_pos_emb=rotary_pos_emb,
+                                                                causal=causal,
+                                                                nystrom=nystrom,
+                                                                attend_to_self=attend_to_self,
+                                                                context=context,
+                                                                use_mask=use_mask,
+                                                                ff_hidden=dim_ffd_mult,
+                                                                ),
+                                    norm=False) if ET else GRUGating(d_model,Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=mem_kv,
                                             num_prev_state=prev_state_kv,
+                                            num_prev_mem=num_prev_mem,
                                             local_heads=local_heads,
-                                            hop_attn=copy.deepcopy(hop_attn),
+                                            #hop_attn=copy.deepcopy(hop_attn),
                                             rotary_pos_emb=rotary_pos_emb,
                                             causal=causal,
                                             nystrom=nystrom,
                                             attend_to_self=False,
                                             context=False,
                                             use_mask=use_mask,
-                                        )  if encoder_n_decoder else None
-
-            self.self_inp_enc = (GRUGating(
-                                            d_model,
-                                            ET_Encoder_Block(d_model,
-                                                        num_heads=nhead,
-                                                        attn=attn_self,
-                                                        ff_hidden=dim_ffd_mult,
-                                                        ),norm=False) if ET else GRUGating(d_model,attn_self,norm=False)) if encoder_n_decoder else Identity()
+                                        ),norm=False)) if encoder_n_decoder else Identity()
 
             self.self_ctxt_enc = (GRUGating(
                                             d_model,
                                             ET_Encoder_Block(d_model,
-                                                        num_heads=nhead,
-                                                        attn=copy.deepcopy(attn_self),
-                                                        ff_hidden=dim_ffd_mult,
-                                                        ),norm=False) if ET else GRUGating(d_model,copy.deepcopy(attn_self),norm=False)) if encoder_n_decoder else Identity()
-
-            attn = {
-                'self_1':Attention(d_model,
-                                        heads=nhead*2,
-                                        dim_head=d_model//(nhead*2),
-                                        num_mem_kv=mem_kv,
-                                        num_prev_state=prev_state_kv,
-                                        hop_attn=hop_attn,
-                                        local_heads=local_heads,
-                                        rotary_pos_emb=rotary_pos_emb,
-                                        causal=causal,
-                                        nystrom=nystrom,
-                                        attend_to_self=attend_to_self,
-                                        context=False,
-                                        use_mask=use_mask,),
-                'self_2':Attention(d_model,
-                                        heads=nhead,
-                                        dim_head=d_model//nhead,
-                                        num_mem_kv=mem_kv,
-                                        num_prev_state=prev_state_kv,
-                                        hop_attn=copy.deepcopy(hop_attn),
-                                        local_heads=local_heads,
-                                        rotary_pos_emb=rotary_pos_emb,
-                                        causal=causal,
-                                        nystrom=nystrom,
-                                        attend_to_self=False,
-                                        context=False,
-                                        use_mask=use_mask,),
-                'cross_1':Attention(d_model,
-                                        heads=nhead,
-                                        dim_head=d_model//nhead,
-                                        num_mem_kv=mem_kv,
-                                        num_prev_state=prev_state_kv,
-                                        hop_attn=copy.deepcopy(hop_attn),
-                                        rotary_pos_emb=rotary_pos_emb,
-                                        nystrom=nystrom,
-                                        attend_to_self=False,
-                                        context=context,
-                                        use_mask=bool(not context and use_mask),
-                                        ),
-                'cross_2':Attention(d_model,
-                                        heads=nhead,
-                                        dim_head=d_model//nhead,
-                                        num_mem_kv=mem_kv,
-                                        num_prev_state=prev_state_kv,
-                                        hop_attn=copy.deepcopy(hop_attn),
-                                        nystrom=nystrom,
-                                        rotary_pos_emb=rotary_pos_emb,
-                                        attend_to_self=False,
-                                        context=context,
-                                        use_mask=bool(not context and use_mask),
-                                        )
-            } if ET else None
+                                                                num_heads=nhead,
+                                                                dim_heads=d_model//nhead,
+                                                                num_mem_kv=mem_kv,
+                                                                num_prev_state=prev_state_kv,
+                                                                num_prev_mem=num_prev_mem,
+                                                                local_heads=local_heads,
+                                                                #hop_attn=hop_attn,
+                                                                rotary_pos_emb=rotary_pos_emb,
+                                                                causal=causal,
+                                                                nystrom=nystrom,
+                                                                attend_to_self=attend_to_self,
+                                                                context=context,
+                                                                use_mask=use_mask,
+                                                                ff_hidden=dim_ffd_mult,
+                                                                ),
+                                    norm=False) if ET else GRUGating(d_model,Attention(d_model,
+                                            heads=nhead,
+                                            dim_head=d_model//nhead,
+                                            num_mem_kv=mem_kv,
+                                            num_prev_state=prev_state_kv,
+                                            num_prev_mem=num_prev_mem,
+                                            local_heads=local_heads,
+                                            #hop_attn=copy.deepcopy(hop_attn),
+                                            rotary_pos_emb=rotary_pos_emb,
+                                            causal=causal,
+                                            nystrom=nystrom,
+                                            attend_to_self=False,
+                                            context=False,
+                                            use_mask=use_mask,
+                                        ),norm=False)) if encoder_n_decoder else Identity()
 
             attn_block = ET_Decoder_Block(d_model,
                                 num_heads=nhead,
-                                attn=attn,
                                 ff_hidden=dim_ffd_mult,
+                                dim_heads=d_model//nhead,
+                                num_mem_kv=mem_kv,
+                                num_prev_state=prev_state_kv,
+                                num_prev_mem=num_prev_mem,
+                                #hop_attn=hop_attn,
+                                local_heads=local_heads,
+                                rotary_pos_emb=rotary_pos_emb,
+                                causal=causal,
+                                nystrom=nystrom,
+                                attend_to_self=attend_to_self,
+                                context=context,
+                                use_mask=use_mask,
                                 ) if ET else Attention(d_model,
                                                             heads=nhead,
                                                             dim_head=d_model//nhead,
                                                             num_mem_kv=mem_kv,
                                                             num_prev_state=prev_state_kv,
-                                                            hop_attn=hop_attn,
+                                                            num_prev_mem=num_prev_mem,
+                                                            #hop_attn=hop_attn,
                                                             local_heads=0,
                                                             rotary_pos_emb=rotary_pos_emb,
-                                                            fixed_emb=fixed_emb,
                                                             causal=causal,
                                                             nystrom=nystrom,
                                                             attend_to_self=attend_to_self,
@@ -592,10 +590,13 @@ class TransformerBlock(Module):
         if self.decoder:
             ctxt_mask = src_mask if context is None else None
             context = output if context == None else context
-            context = ckpt(self.ctxt_ffd,context)
+            context = ckpt(self.feed_forward,context)
 
             output = ckpt(self.self_inp_enc,output,None,src_mask)
             context = ckpt(self.self_ctxt_enc,context,None,ctxt_mask)
+
+        elif exists(context):
+            context = ckpt(self.feed_forward,context)
 
         output = ckpt(self.attn,output,output,context,src_mask)
 
@@ -1451,6 +1452,7 @@ class MultiModalTransformer(Module):
         self.encoder_in_decoder: bool =                             config.get("encoder_in_decoder",True)
         self.mem_kv: Optional[int] =                                config.get("mem_kv",None)
         self.prev_state_kv: Optional[int] =                         config.get("prev_state_kv",None)
+        self.num_prev_mem: Optional[int] =                          config.get("num_prev_mem",None)
 
         if not self.attend_in_patches:
             warnings.warn("attend_in_patches is set to False, for very large sequence lengths, the memory requirements will be too large.")
@@ -1477,6 +1479,7 @@ class MultiModalTransformer(Module):
                         mlp_layers = self.mlp_layers,
                         ET = self.ET,
                         prev_state_kv = self.prev_state_kv,
+                        num_prev_mem = self.num_prev_mem,
                         )
 
         self.trunk_sequence = nn.Parameter(torch.zeros((1,self.trunk_width,self.dim_hidden))) if exist(self.trunk_width) else torch.zeros((1,self.max_seq_len,self.dim_hidden))
@@ -1545,70 +1548,6 @@ class MultiModalTransformer(Module):
         for w in self.parameters():
             w.data.uniform_(-0.01,0.01)
    
-    def training_step(self,
-                    data,
-                    targets,
-                    loss_criterion,
-                    mem_tokens=None,
-                    optimizer=None,
-                    grad_clip=0.5,
-                    deepspeed_enabled=False,
-                    autocast_enabled=False,
-                    trainable_index=None,
-                    mem_ctxt=None,
-                    mini_batch_size=None,
-                    batch=None,
-                ):
-
-        self.train()
-        step_start_time = time.time()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
-
-        torch.cuda.empty_cache()
-
-        def step_optimizer(input_data=data,output_targets=targets):
-            outputs = {}
-            losses = {}
-            labels = {}
-            output,single_pass_mem,single_pass_mem_ctxt = self.forward(input_data,mem=mem_tokens,context_mem=mem_ctxt)
-            torch.cuda.empty_cache()
-            if trainable_index != None:
-                trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
-                trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
-            else:
-                trainable_output = output
-                trainable_output_targets = output_targets
-                
-            loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
-            
-            loss.backward(retain_graph=True)
-            torch.cuda.empty_cache()
-            if mini_batch_size != None and batch != None and batch%mini_batch_size == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-            outputs['output'] = output
-
-            losses['loss'] = loss.item()
-            return outputs,losses,labels,single_pass_mem,single_pass_mem_ctxt
-        
-        if deepspeed_enabled or autocast_enabled:
-            with autocast():
-                outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
-        else:
-            outputs,losses,labels,mem_,mem_ctxt_ = step_optimizer(data,targets)
-
-        acc = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
-        loss = losses['loss']
-
-        if mem_ != None:
-            pass
-            mem_ = mem_.clone().detach()
-        if mem_ctxt_ != None:
-            pass
-            mem_ctxt_ = mem_ctxt_.clone().detach()
-
-        return outputs,losses,loss,acc,(step_start_time-time.time()),mem_,mem_ctxt_
-        
     def get_prev_state(self) -> List[Tensor]:
         prev_states = {0:self.prev_state}
         modules = find_modules(self,Attention)

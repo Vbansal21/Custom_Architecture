@@ -1094,7 +1094,7 @@ class Attention(nn.Module):
         dim,
         causal = False,
         heads = 16,
-        dim_head = 32,
+        dim_head = None,
         local_heads = 0,
         local_window_size = 512,
         nystromer_landmarks = None,
@@ -1124,6 +1124,7 @@ class Attention(nn.Module):
         attend_to_self = False,
         context = True,
         use_mask = False,
+        num_prev_mem = None,
     ):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
@@ -1201,6 +1202,7 @@ class Attention(nn.Module):
             
         self.num_mem_kv = num_mem_kv
         num_prev_state = default(num_prev_state,num_mem_kv)
+        num_prev_mem = default(num_prev_mem,num_mem_kv)
         
         if num_mem_kv > 0:
             self.mem_k = nn.Parameter(torch.randn(self.heads, num_mem_kv, dim_head))
@@ -1208,6 +1210,11 @@ class Attention(nn.Module):
             self.register_buffer(
                                 name='prev_state',
                                 tensor=torch.zeros((self.heads, num_prev_state, dim_head))
+                                )
+            
+            self.register_buffer(
+                                name='prev_mem',
+                                tensor=torch.zeros((self.heads, num_prev_mem, dim_head))
                                 )
             #self.register_buffer(name='prev_state_supplementary',tensor=torch.eye(dim_head*self.heads))
             #self.prev_state_parameter = nn.Parameter(torch.randn((dim_head*self.heads,dim_head*self.heads)))
@@ -1310,7 +1317,7 @@ class Attention(nn.Module):
         out = torch.cat(attn_outs, dim = 1)
 
         if self.num_mem_kv > 0:
-            mem_k, mem_v, prev_state = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v, self.prev_state))
+            mem_k, mem_v, prev_state, prev_mem = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v, self.prev_state,self.prev_mem))
 
             if exists(self.hop_attn):
                 hop_k = ckpt(self.hop_attn,tmp_k).reshape(b,self.heads,-1,d//h)
@@ -1318,8 +1325,8 @@ class Attention(nn.Module):
                 mem_k = torch.cat((mem_k,hop_k),dim=-2)
                 mem_v = torch.cat((mem_v,hop_v),dim=-2)
 
-            mem_k = torch.cat((mem_k,prev_state),dim=-2).requires_grad_(True)
-            mem_v = torch.cat((mem_v,prev_state),dim=-2).requires_grad_(True)
+            mem_k = torch.cat((mem_k,prev_state,prev_mem),dim=-2).requires_grad_(True)
+            mem_v = torch.cat((mem_v,prev_state,prev_mem),dim=-2).requires_grad_(True)
             mem_k = self.mem_lin_k(mem_k)
             mem_v = self.mem_lin_v(mem_v) 
 
@@ -1343,6 +1350,7 @@ class Attention(nn.Module):
 
             out = ckpt(self.mem_attn,out,mem_k,mem_v)
             out = ckpt(self.out_mem,out)
+            self.prev_mem = reduce(torch.cat((prev_mem,out),dim=-2)[:,:,self.prev_mem.size(-2)],'b h n d -> h n d','mean').reshape(self.prev_mem.shape)
 
             out_k = self.out_k(out)
             out_v = self.out_v(out)
