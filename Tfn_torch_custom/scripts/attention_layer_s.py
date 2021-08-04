@@ -1088,6 +1088,122 @@ def apply_rotary_emb(t, freqs, start_index = 0):
     t = (t * freqs.cos()) + (rotate_half(t) * freqs.sin())
     return torch.cat((t_left, t, t_right), dim = -1)
 
+class Dynamic_Memory(nn.Module):
+    def __init__(self,dim,num_mem_static,num_mem_dyn,*args,min_len=None,max_len=None,num_mem_buffer=None,nystrom=True,nystromer_landmarks=None,heads=8,nb_features=1024,generalized_attention = True, kernel_fn = nn.Sigmoid(), no_projection = False, **kwargs):
+        super(Dynamic_Memory, self).__init__()
+        self.mem_static = nn.Parameter(torch.randn((num_mem_static,dim)))
+        self.mem_dyn_len = num_mem_dyn
+        self.register_buffer(
+                            name='mem_dyn',
+                            tensor=torch.zeros((num_mem_dyn, dim))
+                            )
+        num_mem_buffer = default(num_mem_buffer,min(num_mem_dyn,num_mem_static,64))
+        self.register_buffer(
+                            name='mem_buffer',
+                            tensor=torch.zeros((num_mem_buffer, dim))
+                            )
+        self.mem_to_kx = nn.Linear(dim, dim)
+        self.mem_to_vx = nn.Linear(dim, dim)
+        self.x_to_qx = nn.Linear(dim, dim)
+
+        self.min_mem_dyn_len = default(min_len,num_mem_dyn//4)
+        self.max_mem_dyn_len = default(max_len,num_mem_dyn*4)
+
+        nystromer_landmarks = default(nystromer_landmarks,512)
+        self.heads = heads
+        if nystrom:
+            self.attn = NystromAttention(dim=dim,dim_head=dim//heads,heads=heads,num_landmarks=nystromer_landmarks,context=True,transpose_heads_n_dims=False,conv_in=heads,conv_out=heads,use_mask=False)
+        else:
+            self.attn = FastAttention(dim//heads, nb_features, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+        
+        self.x_to_kmem = nn.Linear(dim, dim)
+        self.x_to_vmem = nn.Linear(dim, dim)
+
+        self.scale_down = nn.Sequential(
+            einops.layers.torch.Rearrange("... x y -> ... y x"),
+            nn.Conv1d(dim,dim,12,4,6),
+            nn.Conv1d(dim,dim,12,4,6),
+            nn.Conv1d(dim,dim,12,4,6),
+            nn.Conv1d(dim,dim,12,4,6),
+            einops.layers.torch.Rearrange("... x y -> ... y x"),
+        )
+
+        self.sigma = nn.Sigmoid()
+        self.num_layers = 2
+        self.lstm_hs = dim
+        self.bidirectional = True
+        self._p = nn.LSTM(dim,self.lstm_hs,self.num_layers,batch_first=True,bidirectional=self.bidirectional,proj_size=1)
+        self.p = nn.Linear(2,1)
+
+        if nystrom:
+            self.mem_attn = NystromAttention(dim=dim,dim_head=dim,heads=1,num_landmarks=nystromer_landmarks,context=True,transpose_heads_n_dims=False,conv_in=1,conv_out=1,use_mask=False)
+        else:
+            self.mem_attn = FastAttention(dim, nb_features, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
+
+        self.concentration_threshold = 0.8
+        self.barely_filled_threshold = 0.2
+
+        self.norm_over_batch = nn.LSTM(dim,dim,batch_first=True,bidirectional=True)
+        self.norm_over_batch_lin = nn.Linear(dim*2, dim)
+
+        self.norm = RMSNorm(dim)
+        self.gru = nn.GRUCell(dim,dim)
+        self.mogrifier = Mogrifier(dim, iters = 13, factorize_k = dim//4)
+    
+    def forward(self,x):
+            
+        src = x
+
+        x = self.x_to_qx(self.norm(x))
+        
+        kv = torch.cat((self.mem_static,self.mem_dyn,self.mem_buffer),dim=-2)
+        k,v = self.mem_to_kx(kv).unsqueeze(0).repeat(x.size(0),1,1),self.mem_to_vx(kv).unsqueeze(0).repeat(x.size(0),1,1)
+
+        x,k,v = map(lambda t: rearange(t,"b n (h d) -> b h n d", h = self.heads,d = x.size(-1)//self.heads),x,k,v)
+
+        x = ckpt(self.attn,x,k,v)
+
+        p,_ = ckpt(self._p,self.mem_dyn.unsqueeze(0))
+        p = self.sigma(ckpt(self.p,p)).squeeze(0)
+
+        min_prob = p > self.barely_filled_threshold
+        anti_min_prob = p <= self.barely_filled_threshold
+        prob_aggr = reduce(p,"n d -> d",'mean')
+        
+        rem_mem = self.mem_dyn[anti_min_prob].unsqueeze(0).unsqueeze(0)
+        mem_dyn = self.mem_dyn[min_prob].unsqueeze(0).unsqueeze(0)
+
+        if mem_dyn.size(-2) < self.min_mem_dyn_len:
+            mem_dyn = self.mem_dyn
+            rem_mem = None
+
+        x = rearange(x,"b h n d -> b n (h d)")
+
+        if int(prob_aggr) > self.concentration_threshold  and  mem_dyn.size(-2)+(x.size(-2)/256) <= self.max_mem_dyn_len:
+            tokens = ckpt(self.scale_down,x).reshape(1,-1,x.size(-1))
+            tokens, _ = ckpt(self.norm_over_batch,tokens)
+            tokens = self.norm_over_batch_lin(tokens)
+
+            tokens = tokens.reshape(x.size(0),-1,x.size(-1))
+            tokens = reduce(tokens,"b n d -> n d",'mean').unsqueeze(0).unsqueeze(0)
+            mem_dyn = torch.cat((mem_dyn,tokens),dim=-2)
+
+        x,src = self.mogrifier(x,src)
+
+        x_shape = x.shape
+
+        x = ckpt(self.gru,x.reshape(-1,x.size(-1)),src.reshape(-1,src.size(-1))).reshape(x_shape)
+
+        attn_tok = x.clone().unsqueeze(1)
+        if exists(rem_mem) and rem_mem.size(-2) > 0:
+            attn_tok = torch.cat((attn_tok,rem_mem),dim=-2)
+
+        self.mem_dyn = reduce(ckpt(self.mem_attn,mem_dyn.repeat(x.size(0),1,1,1),self.x_to_kmem(attn_tok),self.x_to_vmem(attn_tok)).squeeze(1),"b n d -> n d",'mean')
+
+        self.mem_buffer = torch.cat((self.mem_buffer,reduce(x,"b n d -> n d",'mean')),dim=-2)[-self.mem_buffer.size(-2):]
+
+        return x,p,self.mem_dyn.size(-2),(math.abs(self.mem_dyn.size(-2)**2 - self.mem_dyn_len**2)**0.5) / self.mem_dyn_len
+    
 class Attention(nn.Module):
     def __init__(
         self,
@@ -1202,7 +1318,7 @@ class Attention(nn.Module):
             
         self.num_mem_kv = num_mem_kv
         num_prev_state = default(num_prev_state,num_mem_kv)
-        num_prev_mem = default(num_prev_mem,num_mem_kv)
+        num_prev_mem = default(num_prev_mem,min(64,num_mem_kv))
         
         if num_mem_kv > 0:
             self.mem_k = nn.Parameter(torch.randn(self.heads, num_mem_kv, dim_head))

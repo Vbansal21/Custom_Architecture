@@ -157,53 +157,24 @@ class GEGLU(Module):
         x, gate = self.proj(x).chunk(2, dim = -1)
         return x * F.gelu(gate)   
 
-class nBRC(nn.Module):
-    def __init__(self, dims, hidden_dims):
-        super().__init__()
-        self.Ua = nn.Linear(dims, hidden_dims)
-        self.Wa = nn.Linear(dims, hidden_dims)
-        self.Uc = nn.Linear(dims, hidden_dims)
-        self.Wc = nn.Linear(dims, hidden_dims)
-        self.U  = nn.Linear(dims, hidden_dims)
-
-    def forward(self, x, h):
-        l = lambda linear, tensor: F.linear(tensor, linear.weight.clone(), linear.bias.clone())
-
-        a = 1 + torch.tanh(l(self.Ua, x) + l(self.Wa, h))
-        c = torch.sigmoid(l(self.Uc, x) + l(self.Wc, h))
-        return c * h + (1 - c) * torch.tanh(l(self.U, x) + a * h)
-
 class GRUGating(nn.Module):
-    def __init__(self, dim, fn=None, mogrify = True, norm = True, post_norm = False):
+    def __init__(self, dim, fn=None, mogrify = True, norm = True):
         super().__init__()
         self.dim = dim
-        self.fn = fn
+        self.fn = fn if exists(fn) else Identity()
         self.post_norm = post_norm
-        if norm:
-            self.norm = RMSNorm(dim)
-        else:
-            self.norm = None
-        self.gru = nBRC(dim, dim)
-        self.mogrify = Mogrifier(dim, factorize_k = dim // 4) if mogrify else None
+        self.norm = RMSNorm(dim) if norm else Identity()
+        self.gru = nn.GRUCell(dim, dim) #nBRC(dim, dim)
+        self.mogrify = Mogrifier(dim, iters = 13, factorize_k = dim // 4) if mogrify else None
 
     def forward(self, x, y=None,*args):
         shape = x.shape
         dim = self.dim
 
-        if y==None:
+        if not exists(y):
             y = x
 
-        if self.fn != None:
-            if self.post_norm:
-                y_ = ckpt(self.fn,y,*args)
-
-                y = self.norm(y_) if self.norm != None else y_
-            else:
-                inp = self.norm(y) if self.norm != None else y
-                y = ckpt(self.fn,inp,*args)
-
-        else:
-            y = self.norm(y) if self.norm!=None else y
+        y = ckpt(self.fn,self.norm(y),*args)
 
         if self.mogrify is not None:
             y, x = self.mogrify(y, x)
@@ -217,7 +188,6 @@ class GRUGating(nn.Module):
         return out
 
 class FFd(Module):
-
     def __init__(self,dim,activation="sigmoid",layers=1,kernal_size=3,mult=4,fn=None,):
         super(FFd,self).__init__()
         kernal_size = (kernal_size//2)*2 + 1
@@ -266,16 +236,7 @@ class AbsolutePositionalEmbedding(Module):
                 n.append(repeat(self.emb(tmp),'n d -> b n d',b=x.size(0)) * multiplier)
 
             tmp = torch.cat(n,dim=1)
-            assert tmp.size(1) == s
             return tmp
-
-class Dynamic_Memory(nn.Module):
-    def __init__(self,*args, **kwargs):
-        super(Dynamic_Memory, self).__init__()
-        pass
-    
-    def forward(self,x):
-        pass
 
 class ACT_basic(nn.Module):
     def __init__(self,hidden_size,function,threshold=0.2,factor=3,checkpointed=checkpointed):
@@ -288,7 +249,7 @@ class ACT_basic(nn.Module):
         self.p = nn.Linear(2,1)
         self.fn = function
         self.threshold_num = 1 - threshold
-        self.threshold = nn.Parameter(torch.full((self.threshold_num,)))
+        self.threshold = nn.Parameter(torch.tensor((self.threshold_num,)))
         self.factor = factor
         if exists(checkpointed):
             pass
@@ -318,7 +279,7 @@ class ACT_basic(nn.Module):
         h = torch.zeros( (1+int(self.bidirectional)) *self.num_layers, state.size(0), 1)
         c = torch.zeros( (1+int(self.bidirectional)) *self.num_layers, state.size(0), self.lstm_hs)
         # initiating adaptive computation:
-        while( ((halting_probability<self.threshold.clamp(min=self.threshold_num,max=1.0)) & (n_updates < max_hop)).byte().any()):
+        while( ((halting_probability<int(self.threshold.clamp(min=self.threshold_num,max=1.0))) & (n_updates < max_hop)).byte().any()):
             # Add timing signal
             state = state + time_enc[:, :l, :].type(dtype).to(device)
             state = state + pos_enc[:, step, :].unsqueeze(1).repeat(1,l,1).type(dtype).to(device)
@@ -330,10 +291,10 @@ class ACT_basic(nn.Module):
             still_running = (halting_probability < 1.0).type(dtype).to(device)
 
             # Mask of inputs which halted at this step
-            new_halted = (halting_probability + p * still_running > self.threshold.clamp(min=self.threshold_num,max=1.0)).type(dtype).to(device) * still_running
+            new_halted = (halting_probability + p * still_running > int(self.threshold.clamp(min=self.threshold_num,max=1.0))).type(dtype).to(device) * still_running
 
             # Mask of inputs which haven't halted, and didn't halt this step
-            still_running = (halting_probability + p * still_running <= self.threshold.clamp(min=self.threshold_num,max=1.0)).type(dtype).to(device) * still_running
+            still_running = (halting_probability + p * still_running <= int(self.threshold.clamp(min=self.threshold_num,max=1.0))).type(dtype).to(device) * still_running
 
             # Add the halting probability for this step to the halting
             # probabilities for those input which haven't halted yet
@@ -451,7 +412,9 @@ class TransformerBlock(Module):
         else:
             hop_attn = None
             
-        ffd_list = [pkm1,hop_attn,conformer,fno]
+        mlp = gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=dim_ffd_mult//2,seq_len=2**16,window=d_model//2,attn_dim=d_model,prob_survival=1-dropout)
+
+        ffd_list = [pkm1,hop_attn,conformer,fno,mlp]
         ffd1 = nn.Sequential(FFd(dim=d_model,activation=activation,mult=dim_ffd_mult,fn=[i for i in ffd_list if exists(i)]),Dropout(dropout))
 
         self.feed_forward = GRUGating(d_model,ffd1)
@@ -576,8 +539,6 @@ class TransformerBlock(Module):
         
         self.attn = GRUGating(d_model,attn_block,norm=False)
 
-        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=dim_ffd_mult//2,seq_len=2**16,window=d_model//2,attn_dim=d_model,prob_survival=1-dropout),norm=False)
-
         self.decoder = decoder
 
 
@@ -602,11 +563,9 @@ class TransformerBlock(Module):
 
         output = self.dropout1(output)
 
-        output = ckpt(self.mlp,output)
+        output = self.to_out(output)
 
         output = self.dropout2(output)
-
-        output = self.to_out(output)
 
         return output
 
@@ -1420,12 +1379,8 @@ class MultiModalTransformer(Module):
         self.decoder_type_attender: bool =                          config.get('decoder_type_attender',False)
         self.seperate_doer_exists: bool =                           config.get('seperate_doer_exists',True)
         self.decoder_type_doer: bool =                              config.get('decoder_type_doer',False)
-        self.num_attender_layers: int =                             config.get('num_attender_layers',1)
-        self.attender_layers_max_hop: Optional[int] =               config.get('attender_layers_max_hop',None)
-        self.num_thinker_layers: int =                              config.get('num_thinker_layers',1)
-        self.thinker_layers_max_hop: Optional[int] =                config.get('thinker_layers_max_hop',None)
-        self.num_doer_layers: int =                                 config.get('num_doer_layers',1)
-        self.doer_layers_max_hop: Optional[int] =                   config.get('doer_layers_max_hop',None)
+        self.num_layers: int =                                      config.get('num_layers',(1,1,1))
+        self.num_max_hop: Optional[int] =                           config.get('num_max_hop',(None,None,None))
         self.exists_embedding: bool =                               config.get('embedding_encoder',True)
         self.fno_layers: int =                                      config.get("fno_layers",4)
         self.modes: Optional[int] =                                 config.get("modes",None)
@@ -1485,11 +1440,11 @@ class MultiModalTransformer(Module):
         self.trunk_sequence = nn.Parameter(torch.zeros((1,self.trunk_width,self.dim_hidden))) if exist(self.trunk_width) else torch.zeros((1,self.max_seq_len,self.dim_hidden))
         self.trunk_pos_embedding = Positional_Encoding if exists(self.trunk_width) else AbsolutePositionalEmbedding(self.dim_hidden,self.max_seq_len)
 
-        self.thinker = nn.ModuleList([ACT_basic(dim_hidden,Tfn_part(context=True,decoder=True)) for _ in range(num_thinker_layers)])
+        self.thinker = nn.ModuleList([ACT_basic(dim_hidden,Tfn_part(context=True,decoder=True)) for _ in range(num_layers[0])])
 
-        self.attender = nn.ModuleList([ACT_basic(dim_hidden,Tfn_part(context=self.project_to_new_sequence,decoder=self.decoder_type_attender)) for _ in range(num_attender_layers)])
+        self.attender = nn.ModuleList([ACT_basic(dim_hidden,Tfn_part(context=self.project_to_new_sequence,decoder=self.decoder_type_attender)) for _ in range(num_layers[0])])
 
-        self.doer = nn.ModuleList([ACT_basic(dim_hidden,Tfn_part(context=self.project_to_new_sequence,decoder=self.decoder_type_doer)) for _ in range(num_doer_layers)])
+        self.doer = nn.ModuleList([ACT_basic(dim_hidden,Tfn_part(context=self.project_to_new_sequence,decoder=self.decoder_type_doer)) for _ in range(num_layers[0])])
         
 
         # byte_list = [i for i in str.encode("utf-32")]
