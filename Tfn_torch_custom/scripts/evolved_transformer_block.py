@@ -84,9 +84,9 @@ class ScaleNorm(nn.Module):
         return x / norm.clamp(min = self.eps) * self.g
 
 class ET_Encoder_Block(nn.Module):
-    def __init__(self,d_model,num_heads=8,ff_hidden=4,dim_heads=None,num_mem_kv=None,num_prev_state=None,num_prev_mem=None,hop_attn=None,local_heads=0,rotary_pos_emb=True,causal=False,nystrom=True,attend_to_self=True,context=False,use_mask=False,attn = None,ffd = None,pkm=None):
+    def __init__(self,d_model,num_heads=8,ff_hidden=4,dim_heads=None,num_mem_kv=None,num_prev_state=None,num_prev_mem=None,hop_attn=None,local_heads=0,rotary_pos_emb=True,causal=False,attn='h_attn',attend_to_self=True,context=False,use_mask=False,attn_modules = None,ffd = None,pkm=None):
         super(ET_Encoder_Block,self).__init__()
-        if attn == None:
+        if attn_modules == None:
             self.attention = Attention(d_model,
                                     heads=num_head,
                                     dim_head=dim_heads,
@@ -97,21 +97,21 @@ class ET_Encoder_Block(nn.Module):
                                     hop_attn=hop_attn,
                                     rotary_pos_emb=rotary_pos_emb,
                                     causal=causal,
-                                    nystrom=nystrom,
+                                    attn=attn,
                                     attend_to_self=attend_to_self,
                                     context=context,
                                     use_mask=use_mask,
                                 )
         else:False
-            self.attention = attn
+            self.attention = attn_modules
         self.layer_norms = nn.ModuleList([RMSNorm(d_model) for _ in range(5)])
         if ffd == None:
             self.feed_forward = nn.Sequential(
-            Rearrange("... n d -> ... d n"),
+                Rearrange("... n d -> ... d n"),
                 nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,stride=1,padding=0,groups=1),
                 nn.ReLU(),
                 nn.Conv1d(in_channels=d_model*ff_hidden,out_channels=d_model,kernel_size=1,stride=1,padding=0,groups=1),
-            Rearrange("... d n -> ... n d")
+                Rearrange("... d n -> ... n d")
             )
         else:
             self.feed_forward = ffd
@@ -156,10 +156,10 @@ class ET_Encoder_Block(nn.Module):
 
 
 class ET_Decoder_Block(nn.Module):
-    def __init__(self,d_model,num_heads=8,ff_hidden=4,dim_heads=None,num_mem_kv=None,num_prev_state=None,num_prev_mem=None,hop_attn=None,local_heads=0,rotary_pos_emb=True,causal=False,nystrom=True,attend_to_self=True,context=True,use_mask=False,attn = None,ffd = None):
+    def __init__(self,d_model,num_heads=8,ff_hidden=4,dim_heads=None,num_mem_kv=None,num_prev_state=None,num_prev_mem=None,hop_attn=None,local_heads=0,rotary_pos_emb=True,causal=False,attn='h_attn',attend_to_self=True,context=True,use_mask=False,attn_modules = None,ffd = None):
         super(ET_Decoder_Block,self).__init__()
 
-        if attn == None:
+        if attn_modules == None:
             self.attention_self_1 = Attention(d_model,
                                         heads=num_head*2,
                                         dim_head=dim_heads//2,
@@ -170,7 +170,7 @@ class ET_Decoder_Block(nn.Module):
                                         local_heads=local_heads,
                                         rotary_pos_emb=rotary_pos_emb,
                                         causal=causal,
-                                        nystrom=nystrom,
+                                        attn=attn,
                                         attend_to_self=attend_to_self,
                                         context=False,
                                         use_mask=use_mask)
@@ -184,7 +184,7 @@ class ET_Decoder_Block(nn.Module):
                                         local_heads=local_heads,
                                         rotary_pos_emb=rotary_pos_emb,
                                         causal=causal,
-                                        nystrom=nystrom,
+                                        attn=attn,
                                         attend_to_self=False,
                                         context=False,
                                         use_mask=use_mask)
@@ -197,7 +197,7 @@ class ET_Decoder_Block(nn.Module):
                                         hop_attn=dcpy(hop_attn),
                                         local_heads=0 if context else local_heads,
                                         rotary_pos_emb=rotary_pos_emb,
-                                        nystrom=nystrom,
+                                        attn=attn,
                                         attend_to_self=False,
                                         context=True,
                                         use_mask=bool(not context and use_mask))
@@ -210,15 +210,15 @@ class ET_Decoder_Block(nn.Module):
                                         hop_attn=dcpy(hop_attn),
                                         local_heads=0 if context else local_heads,
                                         rotary_pos_emb=rotary_pos_emb,
-                                        nystrom=nystrom,
+                                        attn=attn,
                                         attend_to_self=False,
                                         context=True,
                                         use_mask=bool(not context and use_mask))
         else:
-            self.attention_self_1 = attn['self_1'] 
-            self.attention_self_2 = attn['self_2'] 
-            self.attention_cross_1 = attn['cross_1'] 
-            self.attention_cross_2 = attn['cross_2'] 
+            self.attention_self_1 = attn_modules['self_1'] 
+            self.attention_self_2 = attn_modules['self_2'] 
+            self.attention_cross_1 = attn_modules['cross_1'] 
+            self.attention_cross_2 = attn_modules['cross_2'] 
 
         self.layer_norms = nn.ModuleList([RMSNorm(d_model) for _ in range(6)])
 

@@ -16,13 +16,14 @@ from torch.nn.modules.container import ModuleList, Module
 from torch.nn.modules.dropout import Dropout
 
 from einops import repeat,rearrange,reduce
+from einops.layers.torch import Rearrange
 from mogrifier import Mogrifier
 from functools import partial
 
 from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block, GLU
 from .product_key_memory import PKM
 from .hopfield_modules import HopfieldLayer
-from .attention_layer_s import Attention,ProjectionUpdater,find_modules, RotaryEmbedding
+from .attention_layer_s import Attention,ProjectionUpdater,find_modules, RotaryEmbedding, Dynamic_Memory
 from .conformer import ConformerConvModule
 
 from .fourier_1d import FNO1d
@@ -150,9 +151,7 @@ class GEGLU(Module):
         super().__init__()
         self.proj = nn.Sequential(
             GLU(dim_in,layers),
-            nn.Linear(dim_in, dim_out * 2),
-            )
-
+            nn.Linear(dim_in, dim_out * 2))
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim = -1)
         return x * F.gelu(gate)   
@@ -164,7 +163,7 @@ class GRUGating(nn.Module):
         self.fn = fn if exists(fn) else Identity()
         self.post_norm = post_norm
         self.norm = RMSNorm(dim) if norm else Identity()
-        self.gru = nn.GRUCell(dim, dim) #nBRC(dim, dim)
+        self.gru = nn.GRUCell(dim, dim)
         self.mogrify = Mogrifier(dim, iters = 13, factorize_k = dim // 4) if mogrify else None
 
     def forward(self, x, y=None,*args):
@@ -198,7 +197,7 @@ class FFd(Module):
         self.padding = kernal_size - 1
         self.l_2 = GEGLU(dim*mult,dim,layers)
 
-        self.fn = fn if isinstance(fn,nn.ModuleList) else ((nn.ModuleList(fn) if isinstance(fn,Iterable) else nn.ModuleList([i for i in fn if i != None])) if fn !=None else None)
+        self.fn = fn if isinstance(fn,nn.ModuleList) else ((nn.ModuleList([i for i in fn if i != None]) if isinstance(fn,Iterable) else nn.ModuleList([fn])) if fn !=None else None)
         self.lin = nn.Linear((len(fn)+1)*dim,dim) if exists(self.fn) else None
 
     def forward(self,x,*args):
@@ -343,19 +342,17 @@ class TransformerBlock(Module):
                      dropout=0.1, 
                      activation="sigmoid",
                      mem_kv=None,
-                     pkm_dim=None,
                      pkm_keys=None,
                      decoder=False,
                      encoder_n_decoder=False,
                      hopfield=False,
-                     hop_dim=None,
                      fno_layers=4,
                      modes=None,
                      width=None,
                      rotary_pos_emb=True,
                      causal=False,
                      local_heads=0,
-                     nystrom=False,
+                     attn='h_attn',
                      attend_to_self=True,
                      mlp_layers=1,
                      use_mask=False,
@@ -366,12 +363,9 @@ class TransformerBlock(Module):
                 ):
         super(TransformerBlock, self).__init__()
         
-        self.dropout1 = Dropout(dropout)
-        self.dropout2 = Dropout(dropout)
+        self.dropout = nn.ModuleList([Dropout(dropout) for _ in range(9 if (encoder_n_decoder and decoder) else 7)])
 
-        pkm_dim = default(pkm_dim,d_model//1)
         pkm_keys = default(pkm_keys,64)
-        hop_dim = default(hop_dim,d_model//1)
 
         mem_kv = default(mem_kv,1024)
 
@@ -381,41 +375,30 @@ class TransformerBlock(Module):
         modes = default(modes,nhead)
         width = default(width,nhead)
 
-        pkm1 = nn.Sequential(
-            nn.Linear(d_model,pkm_dim,bias=False),
-            PKM(pkm_dim,num_keys=pkm_keys),
-            nn.Linear(pkm_dim,d_model,bias=False),
-            ) if pkm_dim!=0 else None
+        pkm = PKM(d_model,num_keys=pkm_keys)
 
-        conformer = ConformerConvModule(d_model,expansion_factor=dim_ffd_mult//2,causal=True,dropout=dropout)
+        self.conformer = GRUGating(d_model,ConformerConvModule(d_model,expansion_factor=dim_ffd_mult//2,causal=True,dropout=dropout),norm=False)
 
-        fno = FNO1d(modes,
-                        width,
-                        inp_dim=d_model,
-                        out_dim=d_model,
-                        ffd_dim=dim_ffd_mult*d_model,
-                        num_layers=fno_layers
-                    )
+        self.fno = GRUGating(d_model,FNO1d(modes,
+                                    width,
+                                    inp_dim=d_model,
+                                    out_dim=d_model,
+                                    ffd_dim=dim_ffd_mult*width,
+                                    num_layers=fno_layers
+                                ))
 
         if hopfield:
-            hop_attn = nn.Sequential(
-                                    nn.Linear(d_model,hop_dim,bias=False),
-                                    HopfieldLayer(
-                                                input_size=hop_dim,
-                                                num_heads=hop_heads,
-                                                pattern_size=2**7,
-                                                dropout=dropout,
-                                                quantity=2**7,
-                                            ),
-                                    nn.Linear(hop_dim,d_model,bias=False)
-                                    )
+            self.hopfield = GRUGating(d_model,HopfieldLayer(input_size=d_model,
+                                                            num_heads=hop_heads,
+                                                            pattern_size=2**7,
+                                                            dropout=dropout,
+                                                            quantity=2**7))
         else:
-            hop_attn = None
+            self.hopfield = Identity()
             
-        mlp = gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=dim_ffd_mult//2,seq_len=2**16,window=d_model//2,attn_dim=d_model,prob_survival=1-dropout)
+        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=dim_ffd_mult//2,seq_len=2**16,window=d_model//2,attn_dim=d_model,prob_survival=1-dropout))
 
-        ffd_list = [pkm1,hop_attn,conformer,fno,mlp]
-        ffd1 = nn.Sequential(FFd(dim=d_model,activation=activation,mult=dim_ffd_mult,fn=[i for i in ffd_list if exists(i)]),Dropout(dropout))
+        ffd1 = FFd(dim=d_model,activation=activation,mult=dim_ffd_mult,fn=pkm)
 
         self.feed_forward = GRUGating(d_model,ffd1)
 
@@ -432,7 +415,7 @@ class TransformerBlock(Module):
                                 #hop_attn=hop_attn,
                                 rotary_pos_emb=rotary_pos_emb,
                                 causal=causal,
-                                nystrom=nystrom,
+                                attn=attn,
                                 attend_to_self=attend_to_self,
                                 context=context,
                                 use_mask=use_mask,
@@ -451,7 +434,7 @@ class TransformerBlock(Module):
                                                                 #hop_attn=hop_attn,
                                                                 rotary_pos_emb=rotary_pos_emb,
                                                                 causal=causal,
-                                                                nystrom=nystrom,
+                                                                attn=attn,
                                                                 attend_to_self=attend_to_self,
                                                                 context=context,
                                                                 use_mask=use_mask,
@@ -467,7 +450,7 @@ class TransformerBlock(Module):
                                             #hop_attn=copy.deepcopy(hop_attn),
                                             rotary_pos_emb=rotary_pos_emb,
                                             causal=causal,
-                                            nystrom=nystrom,
+                                            attn=attn,
                                             attend_to_self=False,
                                             context=False,
                                             use_mask=use_mask,
@@ -485,7 +468,7 @@ class TransformerBlock(Module):
                                                                 #hop_attn=hop_attn,
                                                                 rotary_pos_emb=rotary_pos_emb,
                                                                 causal=causal,
-                                                                nystrom=nystrom,
+                                                                attn=attn,
                                                                 attend_to_self=attend_to_self,
                                                                 context=context,
                                                                 use_mask=use_mask,
@@ -501,7 +484,7 @@ class TransformerBlock(Module):
                                             #hop_attn=copy.deepcopy(hop_attn),
                                             rotary_pos_emb=rotary_pos_emb,
                                             causal=causal,
-                                            nystrom=nystrom,
+                                            attn=attn,
                                             attend_to_self=False,
                                             context=False,
                                             use_mask=use_mask,
@@ -518,7 +501,7 @@ class TransformerBlock(Module):
                                 local_heads=local_heads,
                                 rotary_pos_emb=rotary_pos_emb,
                                 causal=causal,
-                                nystrom=nystrom,
+                                attn=attn,
                                 attend_to_self=attend_to_self,
                                 context=context,
                                 use_mask=use_mask,
@@ -532,14 +515,14 @@ class TransformerBlock(Module):
                                                             local_heads=0,
                                                             rotary_pos_emb=rotary_pos_emb,
                                                             causal=causal,
-                                                            nystrom=nystrom,
+                                                            attn=attn,
                                                             attend_to_self=attend_to_self,
                                                             context=context,
                                                             use_mask=bool(not context and use_mask),)
         
         self.attn = GRUGating(d_model,attn_block,norm=False)
 
-        self.decoder = decoder
+        self.decoder_exists = decoder
 
 
     def forward(self, src: Tensor,context: Optional[Tensor] = None, src_mask: Tensor = None) -> Tensor:
@@ -547,25 +530,43 @@ class TransformerBlock(Module):
         output = src
 
         output = ckpt(self.feed_forward,output)
+        output = self.dropout[0](output)
 
-        if self.decoder:
+        output = ckpt(self.hopfield,output)
+        output = self.dropout[1](output)
+
+        if self.decoder_exists:
             ctxt_mask = src_mask if context is None else None
             context = output if context == None else context
-            context = ckpt(self.feed_forward,context)
 
-            output = ckpt(self.self_inp_enc,output,None,src_mask)
-            context = ckpt(self.self_ctxt_enc,context,None,ctxt_mask)
+            context = ckpt(self.feed_forward,context)
+            context = self.dropout[0](context)
+            context = ckpt(self.hopfield,context)
+            context = self.dropout[1](context)
+
+            output = self.dropout[7](ckpt(self.self_inp_enc,output,None,src_mask))
+            context = self.dropout[8](ckpt(self.self_ctxt_enc,context,None,ctxt_mask))
 
         elif exists(context):
             context = ckpt(self.feed_forward,context)
+            context = self.dropout[0](context)
+            context = ckpt(self.hopfield,context)
+            context = self.dropout[1](context)
 
         output = ckpt(self.attn,output,output,context,src_mask)
-
-        output = self.dropout1(output)
+        output = self.dropout[2](output)
 
         output = self.to_out(output)
+        output = self.dropout[3](output)
 
-        output = self.dropout2(output)
+        output = ckpt(self.fno,output)
+        output = self.dropout[4](output)
+
+        output = ckpt(self.conformer,output)
+        output = self.dropout[5](output)
+
+        output = ckpt(self.mlp,output)
+        output = self.dropout[6](output)
 
         return output
 
@@ -583,14 +584,12 @@ class TransformerModule(ModuleList):
                     repeated_deberta_layers=None,
                     max_len=2**17,
                     prev_state_len=8192,
-                    hop_dim=None,
-                    pkm_dim=None,
                     fno_layers=4,
                     modes=None,
                     width=None,
                     full_block_repeat=False,
                     causal=False,
-                    nystrom=False,
+                    attn='h_attn',
                     local_heads=2,
                     attend_to_self=True,
                     prev_state_self_num=32,
@@ -603,7 +602,7 @@ class TransformerModule(ModuleList):
         super(TransformerModule, self).__init__()
 
         # deprecated cross attention config saveing
-        self.config = dict(d_model=d_model, nhead=nhead, dim_ffd_mult=nhid//d_model, dropout=dropout,decoder=True,mem_kv=mem_kv,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dim=pkm_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,ET=ET)
+        self.config = dict(d_model=d_model, nhead=nhead, dim_ffd_mult=nhid//d_model, dropout=dropout,decoder=True,mem_kv=mem_kv,hopfield=True ,fno_layers=fno_layers,modes=modes,width=width,causal=causal,attn=attn  ,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,ET=ET)
 
         self.full_block_repeat = full_block_repeat
         self.enable_encoder=enable_encoder
@@ -612,15 +611,15 @@ class TransformerModule(ModuleList):
 
         if num_layers != 0:
             if not enable_encoder:
-                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dim=pkm_dim,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET)
+                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,hopfield=True ,fno_layers=fno_layers,modes=modes,width=width,causal=causal, attn=attn,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET)
                 self.decoder_self = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
                 self.decoder_cross = Identity()
                 self.encoder = Identity()
             else:
-                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dim=pkm_dim,nystrom=nystrom,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET)
+                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,fno_layers=fno_layers,modes=modes,width=width,causal=causal, attn=attn,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET)
                 self.encoder = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
                 self.decoder_self = nn.ModuleList([copy.deepcopy(block) for _ in range(num_layers)])
-                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,decoder=True,hopfield=True,hop_dim=hop_dim,fno_layers=fno_layers,modes=modes,width=width,causal=causal,nystrom=nystrom,pkm_dim=pkm_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,ET=ET)
+                block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,decoder=True,hopfield=True ,fno_layers=fno_layers,modes=modes,width=width,causal=causal,attn=attn  ,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,ET=ET)
                 self.decoder_cross = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(num_layers-1)])
         else:
             self.encoder = nn.ModuleList([Identity()])
@@ -628,7 +627,7 @@ class TransformerModule(ModuleList):
             self.decoder_cross = nn.ModuleList([Identity()])
             
         self.absolutepositionalembedding = AbsolutePositionalEmbedding(d_model,max_len) if deberta_layers else None
-        block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal,pkm_dim=pkm_dim,nystrom=nystrom,hop_dim=hop_dim,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET) if deberta_layers else None
+        block = TransformerBlock(d_model, nhead, nhid, dropout,mem_kv=mem_kv,decoder=True,encoder_n_decoder=encoder_n_decoder,hopfield=True,fno_layers=fno_layers,modes=modes,width=width,causal=causal , attn=attn ,local_heads=local_heads,attend_to_self=attend_to_self,mlp_layers=mlp_layers,context=False,ET=ET) if deberta_layers else None
         self.deberta_layers = nn.ModuleList([block]+[copy.deepcopy(block) for _ in range(deberta_layers-1)]) if deberta_layers else None
         
         self.prev_state_exists = False
@@ -645,7 +644,7 @@ class TransformerModule(ModuleList):
                                                 dim_head=d_model//nhead,
                                                 num_mem_kv=0,
                                                 rotary_pos_emb=True,
-                                                nystrom=nystrom,)
+                                                attn=attn,)
         else:
             self.prev_state = None
 
@@ -789,7 +788,7 @@ class TransformerModel(Module):
                     causal: bool = True,
                     prev_state_len: int = 8192,
                     prev_state_self_num=32,
-                    nystrom: bool = True,
+                    attn: str = 'h_attn',
                     local_heads: int = 1,
                     attend_to_self=True,
                     fno_layers=4,
@@ -820,7 +819,7 @@ class TransformerModel(Module):
                                                         full_block_repeat=full_block_repeat,
                                                         causal=causal,
                                                         prev_state_len=prev_state_len,
-                                                        nystrom=nystrom,
+                                                        attn=attn,
                                                         local_heads=local_heads,
                                                         attend_to_self=attend_to_self,
                                                         fno_layers=fno_layers,
@@ -1393,21 +1392,20 @@ class MultiModalTransformer(Module):
         self.prev_state_self_attend: int =                          config.get("prev_state_self_attend",32)
         self.max_prev_states: int =                                 config.get('max_prev_states_storage',3)
         self.ET: bool =                                             config.get('ET',True)
-        self.nystrom: bool =                                        config.get('nystrom',True)
+        self.attn: str =                                            config.get('attn','h_attn')
         self.feature_redraw_interval: int =                         config.get('feature_redraw_interval',256)
         self.auto_check_redraw: bool =                              config.get('auto_check_redraw',True)
         self.encoder_decoder: bool =                                config.get('encoder_decoder',False)
         self.causal: bool =                                         config.get('causal',False)
         self.attend_to_self =                                       config.get("attend_to_self",True)
         self.mlp_layers: int =                                      config.get("mlp_layers",1)
-        self.pkm_dim: Optional[int] =                               config.get("pkm_dim",None)
         self.pkm_keys: Optional[int] =                              config.get("pkm_keys",None)
         self.enable_hopfield: bool =                                config.get("enable_hopfield",True)
-        self.hop_dim: Optional[int] =                               config.get("hop_dim",None)
         self.encoder_in_decoder: bool =                             config.get("encoder_in_decoder",True)
         self.mem_kv: Optional[int] =                                config.get("mem_kv",None)
         self.prev_state_kv: Optional[int] =                         config.get("prev_state_kv",None)
         self.num_prev_mem: Optional[int] =                          config.get("num_prev_mem",None)
+        self.init_value: Optional[float] =                          config.get("init_value",0.01)
 
         if not self.attend_in_patches:
             warnings.warn("attend_in_patches is set to False, for very large sequence lengths, the memory requirements will be too large.")
@@ -1421,15 +1419,13 @@ class MultiModalTransformer(Module):
                         mem_kv = self.mem_kv,
                         encoder_n_decoder = self.encoder_in_decoder,
                         fno_layers = self.fno_layers,
-                        pkm_dim = self.pkm_dim,
                         pkm_keys = self.pkm_keys,
                         hopfield = self.enable_hopfield,
-                        hop_dim = self.hop_dim,
                         modes = self.modes,
                         width = self.width,
                         causal = self.causal,
                         local_heads = self.num_local_heads,
-                        nystrom = self.nystrom,
+                        attn = self.attn,
                         attend_to_self = self.attend_to_self,
                         mlp_layers = self.mlp_layers,
                         ET = self.ET,
@@ -1452,21 +1448,37 @@ class MultiModalTransformer(Module):
         # min(byte_list) == 0
         # str_from_bytes = bytes([ try: int_byte_list[i:i+4] for i in range(int_byte_list,4)]).decode("utf-32")
         # str == str_from_bytes --> True
-        self.embedding_encoder = nn.Embedding(256, self.dim_hidden) if self.exists_embedding else Identity()
+        self.embedding_encoder = nn.Sequential(
+                                                nn.Embedding(256, self.dim_hidden),
+                                                nn.Linear(self.dim_hidden,self.dim_hidden),
+                                                Rearrange("... (x l) y -> ... x (l y)",l=4),
+                                                nn.Linear(self.dim_hidden*4,self.dim_hidden),
+                                                ) if self.exists_embedding else Identity()
         
-        self.decoder = nn.Sequential(
-            nn.Linear(self.dim_hidden,256) if not self.discriminator else nn.Linear(self.dim_hidden,self.discriminator_classes),
-            _get_activation_fn(self.final_logits_activation) if exists(self.final_logits_activation) else Identity(),
-            ) if self.exists_head else Identity()
+        if self.exists_head:
+            if not discriminator:
+                self.decoder = nn.Sequential(
+                    nn.Linear(self.dim_hidden,self.dim_hidden*4),
+                    Rearrange("... x (l y) -> ... (x l) y",l=4),
+                    nn.Linear(self.dim_hidden,self.dim_hidden),
+                    nn.Linear(self.dim_hidden,256) if not self.discriminator else nn.Linear(self.dim_hidden,self.discriminator_classes),
+                    _get_activation_fn(self.final_logits_activation) if exists(self.final_logits_activation) else Identity(),
+                    )
+            else:
+                self.decoder = nn.Sequential(
+                    nn.Linear(self.dim_hidden,self.discriminator_classes),
+                    _get_activation_fn(self.final_logits_activation) if exists(self.final_logits_activation) else Identity(),
+                    )
+        else:
+            self.decoder = Identity()
 
         self.ffd1 = FFd(dim=self.dim_hidden,mult=self.dim_ffd_mult,activation=self.activation)
         self.ffd2 = FFd(dim=self.dim_hidden,mult=self.dim_ffd_mult,activation=self.activation)
 
         self.mem_exist = True if self.mem_parameters else False
         self.mem = nn.Parameter(torch.randn(self.mem_parameters,self.dim_hidden)) if self.mem_exist else None
-        
             
-        self.seq_scale_down = max(4,(self.seq_scale_down//4)*4)
+        self.seq_scale_down = self.seq_scale_down
         self.attn_len = (self.seq_scale_down*3 // 2)*2 + 1
 
         self.scale_down_conv = nn.Conv1d(self.dim_hidden,self.dim_hidden,self.seq_scale_down*3,self.seq_scale_down,padding=(self.seq_scale_down*3 - 1)//2,groups=1)
@@ -1482,39 +1494,37 @@ class MultiModalTransformer(Module):
         self.prev_states = []
 
         _ = self.forward(torch.randint(0,255,(1,self.max_seq_len//8),device=self.device))
-        self.init_weights()
+        self.init_weights(self.init_value)
 
     def __len__(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
-    def __repr__(self,*args: any,**kwargs: any) -> any:
-        return self.forward(*args,**kwargs)
-
-    def get_avg_inference_time(self) -> int:
+    def get_avg_inference_time(self) -> float:
         return self.time_[0] / self.time_[1]
 
     def fix_projection_matrices_(self) -> NoReturn :
         self.proj_updater.feature_redraw_interval = None
 
-    def defix_projection_matrices_(self) -> NoReturn :
-        self.proj_updater.feature_redraw_interval = self.feature_redraw_interval
+    def defix_projection_matrices_(self,feature_redraw_interval=None) -> NoReturn :
+        self.proj_updater.feature_redraw_interval = feature_redraw_interval if exists(feature_redraw_interval) else self.feature_redraw_interval
 
-    def init_weights(self) -> NoReturn :
+    def init_weights(self,abs_value=0.01) -> NoReturn :
         for w in self.parameters():
-            w.data.uniform_(-0.01,0.01)
+            w.data.uniform_(-abs_value,abs_value)
    
     def get_prev_state(self) -> List[Tensor]:
-        prev_states = {0:self.prev_state}
+        prev_states = []
         modules = find_modules(self,Attention)
-        for i,attn in enumerate(modules):
-            prev_states[i+1] = attn.prev_state
+        modules.append(find_modules(self,Dynamic_Memory))
+        for i,mod in enumerate(modules):
+            prev_states.append(mod.hidden_state_get())
         return prev_states
 
-    def set_prev_state(self,prev_state:List[Tensor]):
-        self.prev_state = prev_state[0]
+    def set_prev_state(self,prev_state:List[Tensor]) -> NoReturn :
         modules = find_modules(self,Attention)
-        for i,attn in enumerate(modules):
-            attn.prev_state = prev_states[i+1]
+        modules.append(find_modules(self,Dynamic_Memory))
+        for i,mod in enumerate(modules):
+            mod.hidden_state_set(prev_states[i+1])
 
     #@autocast()
     def forward(self,
