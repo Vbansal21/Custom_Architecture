@@ -88,7 +88,7 @@ class ET_Encoder_Block(nn.Module):
         super(ET_Encoder_Block,self).__init__()
         if attn_modules == None:
             self.attention = Attention(d_model,
-                                    heads=num_head,
+                                    heads=num_heads,
                                     dim_head=dim_heads,
                                     num_mem_kv=num_mem_kv,
                                     num_prev_state=num_prev_state,
@@ -102,7 +102,7 @@ class ET_Encoder_Block(nn.Module):
                                     context=context,
                                     use_mask=use_mask,
                                 )
-        else:False
+        else:
             self.attention = attn_modules
         self.layer_norms = nn.ModuleList([RMSNorm(d_model) for _ in range(5)])
         if ffd == None:
@@ -161,7 +161,7 @@ class ET_Decoder_Block(nn.Module):
 
         if attn_modules == None:
             self.attention_self_1 = Attention(d_model,
-                                        heads=num_head*2,
+                                        heads=num_heads*2,
                                         dim_head=dim_heads//2,
                                         num_mem_kv=num_mem_kv,
                                         num_prev_state=num_prev_state,
@@ -175,7 +175,7 @@ class ET_Decoder_Block(nn.Module):
                                         context=False,
                                         use_mask=use_mask)
             self.attention_self_2 = Attention(d_model,
-                                        heads=num_head,
+                                        heads=num_heads,
                                         dim_head=dim_heads,
                                         num_mem_kv=num_mem_kv,
                                         num_prev_state=num_prev_state,
@@ -189,7 +189,7 @@ class ET_Decoder_Block(nn.Module):
                                         context=False,
                                         use_mask=use_mask)
             self.attention_cross_1 = Attention(d_model,
-                                        heads=num_head,
+                                        heads=num_heads,
                                         dim_head=dim_heads,
                                         num_mem_kv=num_mem_kv,
                                         num_prev_state=num_prev_state,
@@ -202,7 +202,7 @@ class ET_Decoder_Block(nn.Module):
                                         context=True,
                                         use_mask=bool(not context and use_mask))
             self.attention_cross_2 = Attention(d_model,
-                                        heads=num_head,
+                                        heads=num_heads,
                                         dim_head=dim_heads,
                                         num_mem_kv=num_mem_kv,
                                         num_prev_state=num_prev_state,

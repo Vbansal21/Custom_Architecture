@@ -8,6 +8,7 @@ from math import log2, ceil
 from torch import nn, einsum, diagonal
 from einops.layers.torch import Rearrange
 import torch.nn.init as init
+from mogrifier import Mogrifier
 
 from functools import partial
 from contextlib import contextmanager
@@ -15,7 +16,6 @@ from contextlib import contextmanager
 from local_attention import LocalAttention
 from .axial_positional_embedding import AxialPositionalEmbedding
 from .reversible import ReversibleSequence, SequentialSequence
-from .evolved_transformer_block import GLU
 
 try:
     from apex import amp
@@ -221,6 +221,17 @@ class ReZero(nn.Module):
     def forward(self, x, **kwargs):
         return self.fn(x, **kwargs) * self.g
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps = 1e-8):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
 class ScaleNorm(nn.Module):
     def __init__(self, dim, eps = 1e-4):
         super().__init__()
@@ -288,6 +299,30 @@ class FeedForward(nn.Module):
         x = self.w2(x)
         return x
 
+class GatedConvolution(nn.Module):
+    def __init__(self,d_model,patch_size=3,padding=1,dim=-1):
+        super(GatedConvolution,self).__init__()
+        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=0,groups=1,bias=True)
+        self.padding = padding*2
+        self.dim = dim
+        #init.xavier_uniform_(self.conv.weight, gain=1)
+
+    def forward(self,x):
+        convoluted = self.conv(F.pad(x.transpose(-1,-2),(self.padding,0),value=0)).transpose(-1,-2)
+        out, gate = convoluted.chunk(2, dim=self.dim)
+        out = out * torch.sigmoid(gate)
+        return out
+
+class GLU(nn.Module):
+    def __init__(self,d_model,num_layers,patch_size=3,padding=1):#Dauphin's m_input= n_input= d_model
+        super(GLU,self).__init__()
+        self.gated_convs = nn.ModuleList([GatedConvolution(d_model,patch_size,padding) for _ in range(num_layers)])
+    
+    def forward(self,x):
+        for convolution in self.gated_convs:
+            x = convolution(x)
+        return x
+        
 # positional embeddings/biases
 class LearnableSinusoidEncoding(nn.Module):
     """Layer converts scalar input to Sinusoid Encoding with learnt scaling."""
@@ -739,7 +774,7 @@ class HAttention1D(nn.Module):
         pad_to_len = 2 ** ceil(log2(max(q.size(-2),k.size(-2))))
         padding = 2 ** ceil(log2(max(q.size(-2),k.size(-2)))) - max(q.size(-2),k.size(-2))
 
-        if bool((2 ** ceil(log2(q.size(-2))) - q.size(-2)) > 0) or bool((2 ** ceil(log2(k.size(-2))) - k.size(-2))) > 0):
+        if bool((2 ** ceil(log2(q.size(-2))) - q.size(-2)) > 0) or bool( ( ( 2 ** ceil( log2(k.size(-2)) ) ) - k.size(-2)) > 0 ):
             q,k,v = map(lambda x: F.pad(x, (0, 0, 0, (2 ** ceil(log2(x.size(-2))) - x.size(-2))), value = 0), (q, k, v))
 
             if exists(mask):
@@ -868,13 +903,13 @@ class CausalHAttention1D(nn.Module):
         self.block_size = block_size
         # derive mask
         self.max_seq_len = max_seq_len
-        self.generate(max_seq_len)
+        self.generate_mask(max_seq_len)
 
 
     def generate_mask(self,max_seq_len=None):
         max_seq_len = default(max_seq_len,self.max_seq_len)
 
-        num_levels = int(log2(max_seq_len // block_size)) - 1
+        num_levels = int(log2(max_seq_len // self.block_size)) - 1
         root_seq = torch.arange(max_seq_len)
         seqs = [root_seq]
         seq = root_seq
@@ -1224,7 +1259,22 @@ class NystromAttention(nn.Module):
             return out
 
 class Dynamic_Memory(nn.Module):
-    def __init__(self,dim,num_mem_static,num_mem_dyn,*args,min_len=None,max_len=None,num_mem_buffer=None,attn='nystrom',nystromer_landmarks=None,heads=8,nb_features=1024,generalized_attention = True, kernel_fn = nn.Sigmoid(), no_projection = False, **kwargs):
+    def __init__(self,
+                    dim,
+                    num_mem_static,
+                    num_mem_dyn,
+                    *args,
+                    max_len=None,
+                    warmup_num=None,
+                    num_mem_buffer=None,
+                    attn='performer',
+                    nystromer_landmarks=None,
+                    heads=8,
+                    nb_features=1024,
+                    generalized_attention = True, 
+                    kernel_fn = nn.Sigmoid(), 
+                    no_projection = False, 
+                    **kwargs):
         super(Dynamic_Memory, self).__init__()
         self.mem_static = nn.Parameter(torch.randn((num_mem_static,dim)))
         self.mem_dyn_len = num_mem_dyn
@@ -1253,10 +1303,9 @@ class Dynamic_Memory(nn.Module):
         self.mem_to_vx = nn.Linear(dim, dim)
         self.x_to_qx = nn.Linear(dim, dim)
 
-        self.min_mem_dyn_len = default(min_len,num_mem_dyn//4)
         self.max_mem_dyn_len = default(max_len,num_mem_dyn*4)
 
-        nystromer_landmarks = default(nystromer_landmarks,512)
+        nystromer_landmarks = default(nystromer_landmarks,32)
         self.heads = heads
 
         if attn == 'nystrom':
@@ -1302,6 +1351,9 @@ class Dynamic_Memory(nn.Module):
         self.gru = nn.GRUCell(dim,dim)
         self.mogrifier = Mogrifier(dim, iters = 13, factorize_k = dim//4)
 
+        self.init_counter = 0
+        self.warmup_num = default(warmup_num,8192)
+
     def hidden_state_set(self,values):
         self.mem_dyn = values['mem_dyn']
         self.mem_buffer = values['mem_buffer']
@@ -1316,44 +1368,40 @@ class Dynamic_Memory(nn.Module):
 
         x = self.x_to_qx(self.norm(x))
         
-        kv = torch.cat((self.compressed_mem_buffer,self.mem_buffer,self.mem_static,self.mem_dyn),dim=-2)
-        k,v = self.mem_to_kx(kv).unsqueeze(0).repeat(x.size(0),1,1),self.mem_to_vx(kv).unsqueeze(0).repeat(x.size(0),1,1)
-
-        x,k,v = map(lambda t: rearange(t,"b n (h d) -> b h n d", h = self.heads,d = x.size(-1)//self.heads),x,k,v)
+        kv = torch.cat((self.compressed_mem_buffer,self.mem_buffer,self.mem_static,self.mem_dyn),dim=-2).unsqueeze(0)
+        k,v = self.mem_to_kx(kv),self.mem_to_vx(kv)
 
         pos_emb_x = self.emb(x)
         pos_emb_k = self.emb(k)
 
-        if exists(pos_emb_q):
+        if exists(pos_emb_x):
             x = apply_rotary_emb(x, pos_emb_x)
             k = apply_rotary_emb(k, pos_emb_k)
 
+        x,k,v = map(lambda t: rearrange(t,"b n (h d) -> b h n d", h = self.heads,d = x.size(-1)//self.heads),(x,k,v))
+        
+        k,v = k.repeat(x.size(0),1,1,1),v.repeat(x.size(0),1,1,1)
         x = ckpt(self.attn,x,k,v)
 
-        p,_ = ckpt(self._p,self.mem_dyn.unsqueeze(0))
+        p,_ = self._p(self.mem_dyn.unsqueeze(0))
         p = self.sigma(ckpt(self.p,p)).squeeze(0)
 
-        min_prob = p > self.barely_filled_threshold
-        anti_min_prob = p <= self.barely_filled_threshold
         prob_aggr = reduce(p,"n d -> d",'mean')
-        
-        rem_mem = self.mem_dyn[anti_min_prob].unsqueeze(0).unsqueeze(0)
-        mem_dyn = self.mem_dyn[min_prob].unsqueeze(0).unsqueeze(0)
+        mem_dyn = self.mem_dyn.unsqueeze(0).unsqueeze(0)
 
-        if mem_dyn.size(-2) < self.min_mem_dyn_len:
-            mem_dyn = self.mem_dyn
-            rem_mem = None
-
-        x = rearange(x,"b h n d -> b n (h d)")
+        x = rearrange(x,"b h n d -> b n (h d)")
 
         if int(prob_aggr) > self.concentration_threshold  and  mem_dyn.size(-2)+(x.size(-2)/256) <= self.max_mem_dyn_len:
-            tokens = ckpt(self.scale_down,x).reshape(1,-1,x.size(-1))
-            tokens, _ = ckpt(self.norm_over_batch,tokens)
-            tokens = self.norm_over_batch_lin(tokens)
+            if self.init_counter > self.warmup_num:
+                tokens = ckpt(self.scale_down,x).reshape(1,-1,x.size(-1))
+                tokens, _ = ckpt(self.norm_over_batch,tokens)
+                tokens = self.norm_over_batch_lin(tokens)
 
-            tokens = tokens.reshape(x.size(0),-1,x.size(-1))
-            tokens = reduce(tokens,"b n d -> n d",'mean').unsqueeze(0).unsqueeze(0)
-            mem_dyn = torch.cat((mem_dyn,tokens),dim=-2)
+                tokens = tokens.reshape(x.size(0),-1,x.size(-1))
+                tokens = reduce(tokens,"b n d -> n d",'mean').unsqueeze(0).unsqueeze(0)
+                mem_dyn = torch.cat((mem_dyn,tokens),dim=-2)
+            
+            self.init_counter += 1
 
         x,src = self.mogrifier(x,src)
 
@@ -1361,18 +1409,18 @@ class Dynamic_Memory(nn.Module):
 
         x = ckpt(self.gru,x.reshape(-1,x.size(-1)),src.reshape(-1,src.size(-1))).reshape(x_shape)
 
-        attn_tok = x.clone().unsqueeze(1)
-        if exists(rem_mem) and rem_mem.size(-2) > 0:
-            attn_tok = torch.cat((attn_tok,rem_mem),dim=-2)
-
-        self.mem_dyn = reduce(ckpt(self.mem_attn,mem_dyn.repeat(x.size(0),1,1,1),self.x_to_kmem(attn_tok),self.x_to_vmem(attn_tok)).squeeze(1),"b n d -> n d",'mean')
+        xk = self.x_to_kmem(x).unsqueeze(1)
+        xv = self.x_to_vmem(x).unsqueeze(1)
+        mem_dyn = mem_dyn.repeat(x.size(0),1,1,1)
+        mem_dyn = ckpt(self.mem_attn,mem_dyn,xk,xv)
+        self.mem_dyn = reduce(mem_dyn,"b h n d -> n d",'mean').clone().detach()
 
         mem_buffer = torch.cat((self.mem_buffer,reduce(ckpt(self.x_to_mem,x),"b n d -> n d",'mean')),dim=-2)
-        self.mem_buffer = mem_buffer[-self.mem_buffer.size(-2):]
+        self.mem_buffer = mem_buffer[-self.mem_buffer.size(-2):].clone().detach()
 
-        self.compressed_mem_buffer = torch.cat((self.compressed_mem_buffer,ckpt(self.x_to_mem,torch.cat((self.compressed_mem_buffer.unsqueeze(0),self.mem_buffer.unsqueeze(0)),dim=-2)).squeeze(0)),dim=-2)[-self.compressed_mem_buffer.size(-2):]
+        self.compressed_mem_buffer = torch.cat((self.compressed_mem_buffer,ckpt(self.x_to_mem,torch.cat((self.compressed_mem_buffer.unsqueeze(0),self.mem_buffer.unsqueeze(0)),dim=-2)).squeeze(0)),dim=-2)[-self.compressed_mem_buffer.size(-2):].clone().detach()
 
-        return x, (p,self.mem_dyn.size(-2),((math.abs(self.mem_dyn.size(-2)**2 - self.mem_dyn_len**2)**0.5) / self.mem_dyn_len))
+        return (x, p,self.mem_dyn.size(-2),((abs(self.mem_dyn.size(-2)**2 - self.mem_dyn_len**2)**0.5) / self.mem_dyn_len))
     
 class Attention(nn.Module):
     def __init__(
@@ -1433,7 +1481,7 @@ class Attention(nn.Module):
         elif attn == 'performer':
             self.fast_attention = FastAttention(dim_head + additional_head_dims, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
         elif 'hierarchical' in attn.lower() or 'h_attn' in attn.lower() or 'hattn' in attn.lower():
-            self.fast_attention = HAttention1D(heads=global_heads) if bool((not causal) and use_mask) else CausalHAttention1D(heads=global_heads)
+            self.fast_attention = HAttention1D(heads=global_heads) if bool((not causal) and (not use_mask)) else CausalHAttention1D(heads=global_heads)
         self.local_attn = LocalAttention(window_size = local_window_size, causal = bool(use_mask or causal), autopad = True, dropout = dropout, look_forward = int(not bool(use_mask or causal)), rel_pos_emb_config = (dim_head, local_heads)) if local_heads > 0 else None
 
         self.fixed_emb = fixed_emb
@@ -1475,7 +1523,7 @@ class Attention(nn.Module):
         self.attn_to_self = None
         if attend_to_self:
             self_head_dim = 1
-            self.features = 17
+            self.features = 5
             scale = 2
             self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,kernel_size=self.features,padding=self.features//2,padding_mode="replicate",groups=1)
             self.project_down = nn.Linear(inner_dim*scale, inner_dim)
@@ -1490,6 +1538,8 @@ class Attention(nn.Module):
         num_prev_state = default(num_prev_state,num_mem_kv)
         num_prev_mem = default(num_prev_mem,min(64,num_mem_kv))
         
+        attn = 'performer'
+
         if num_mem_kv > 0:
             self.mem_k = nn.Parameter(torch.randn(self.heads, num_mem_kv, dim_head))
             self.mem_v = nn.Parameter(torch.randn(self.heads, num_mem_kv, dim_head))

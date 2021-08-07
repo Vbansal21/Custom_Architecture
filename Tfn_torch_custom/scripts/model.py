@@ -11,6 +11,8 @@ import copy
 import typing
 from typing import Tuple, Optional, Any, NoReturn, Union, List, Dict, Iterable
 
+import numpy as np
+
 from torch import Tensor
 from torch.nn.modules.container import ModuleList, Module
 from torch.nn.modules.dropout import Dropout
@@ -51,10 +53,8 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
-def ckpt(f,*args,checkpointed = checkpointed):
-    if not exist(checkpointed):
-        global checkpointed
-    if checkpointed:
+def ckpt(f,*args,checkpointing = checkpointed):
+    if checkpointing:
         return checkpoint(f,*args)
     else:
         return f(*args)
@@ -161,7 +161,6 @@ class GRUGating(nn.Module):
         super().__init__()
         self.dim = dim
         self.fn = fn if exists(fn) else Identity()
-        self.post_norm = post_norm
         self.norm = RMSNorm(dim) if norm else Identity()
         self.gru = nn.GRUCell(dim, dim)
         self.mogrify = Mogrifier(dim, iters = 13, factorize_k = dim // 4) if mogrify else None
@@ -197,8 +196,8 @@ class FFd(Module):
         self.padding = kernal_size - 1
         self.l_2 = GEGLU(dim*mult,dim,layers)
 
-        self.fn = fn if isinstance(fn,nn.ModuleList) else ((nn.ModuleList([i for i in fn if i != None]) if isinstance(fn,Iterable) else nn.ModuleList([fn])) if fn !=None else None)
-        self.lin = nn.Linear((len(fn)+1)*dim,dim) if exists(self.fn) else None
+        self.fn = fn if isinstance(fn,nn.ModuleList) else ((nn.ModuleList([i for i in fn if i != None]) if isinstance(fn,Iterable) else nn.ModuleList((fn,))) if fn !=None else None)
+        self.lin = (nn.Linear((len(fn)+1)*dim,dim) if isinstance(fn,nn.ModuleList) else nn.Linear(2*dim,dim)) if exists(self.fn) else None
 
     def forward(self,x,*args):
         out = ckpt(self.l_1,F.pad(x.transpose(1,2),(self.padding,0),value=0)).transpose(1,2)
@@ -238,9 +237,10 @@ class AbsolutePositionalEmbedding(Module):
             return tmp
 
 class ACT_basic(nn.Module):
-    def __init__(self,hidden_size,function,threshold=0.2,factor=3,checkpointed=checkpointed):
+    def __init__(self,hidden_size,function,threshold=0.2,factor=3,max_hop=None,checkpointed=checkpointed):
         super(ACT_basic, self).__init__()
         self.sigma = nn.Sigmoid()
+        self.max_hop = max_hop
         self.num_layers = 2
         self.lstm_hs = hidden_size
         self.bidirectional = True
@@ -250,10 +250,6 @@ class ACT_basic(nn.Module):
         self.threshold_num = 1 - threshold
         self.threshold = nn.Parameter(torch.tensor((self.threshold_num,)))
         self.factor = factor
-        if exists(checkpointed):
-            pass
-        else:
-            global checkpointed
         self.checkpointed = checkpointed
 
     def forward(self, state, time_enc=None, pos_enc=None, max_hop=None, encoder_output=None):
@@ -272,7 +268,7 @@ class ACT_basic(nn.Module):
         step = 0
         # set time_enc, pos_enc and max_hop if None
         time_enc = default(time_enc,_gen_timing_signal(l,d)).to(dtype).to(device)
-        max_hop = default(max_hop,max(2,int((l**(1/self.factor) + default(encoder_output,state).size(-2)**(1/self.factor))/2) + 1))
+        max_hop = default(default(self.max_hop,max_hop),max(2,int((l**(1/self.factor) + default(encoder_output,state).size(-2)**(1/self.factor))/2) + 1))
         pos_enc = default(pos_enc,_gen_timing_signal(max_hop,d)).to(dtype).to(device)
         # initialise hidden state, cell state
         h = torch.zeros( (1+int(self.bidirectional)) *self.num_layers, state.size(0), 1)
@@ -326,7 +322,7 @@ class ACT_basic(nn.Module):
             ## to save a line I assigned to previous_state so in the next 
             ## iteration is correct. Notice that indeed we return previous_state
             step+=1
-        return previous_state, (remainders,n_updates)
+        return (previous_state, remainders,n_updates)
         #
         #    p_t = remainders + n_updates
         #    avg_p_t = torch.sum(torch.sum(p_t,dim=1)/p_t.size(1))/p_t.size(0)
@@ -369,9 +365,6 @@ class TransformerBlock(Module):
 
         mem_kv = default(mem_kv,1024)
 
-        #pkm_heads = max((nhead * pkm_dim) // d_model,1)
-        hop_heads = max((nhead * hop_dim) // d_model,1)
-
         modes = default(modes,nhead)
         width = default(width,nhead)
 
@@ -389,7 +382,7 @@ class TransformerBlock(Module):
 
         if hopfield:
             self.hopfield = GRUGating(d_model,HopfieldLayer(input_size=d_model,
-                                                            num_heads=hop_heads,
+                                                            num_heads=nhead,
                                                             pattern_size=2**7,
                                                             dropout=dropout,
                                                             quantity=2**7))
@@ -1354,11 +1347,280 @@ class TransformerModel(Module):
             return out
 
 
+class TransformerX(Module):
+
+    @profile
+    def __init__(self, **config: dict) -> NoReturn :
+        super(TransformerX, self).__init__()
+
+        self.time_: Union[float,int] =                              [(1,1)]
+        self.model_type: str =                                      config.get("Project Name", "Transformer-X")
+        self.dim_hidden: int =                                      config.get('dim_hidden')
+        self.vocab: int =                                           config.get('vocab',256)
+        self.dim_ffd_mult: int =                                    config.get('dim_ffd_mult',4)
+        self.num_heads: int =                                       config.get('num_heads',8)
+        self.num_local_heads: int =                                 config.get('num_local_heads',2)
+        self.dropout: Union[float,int] =                            config.get('dropout',math.pi/10)
+        self.max_seq_len: int =                                     config.get('max_seq_len',2**17)
+        self.activation: str =                                      config.get('activation','Lrelu')
+        self.discriminator: bool =                                  config.get('discriminator',False)
+        self.discriminator_classes: int =                           config.get('discriminator_classes',2)
+        self.num_layers: int =                                      config.get('num_layers',12)
+        self.num_max_hop: Optional[int] =                           config.get('num_max_hop',None)
+        self.exists_embedding: bool =                               config.get('embedding_encoder',True)
+        self.fno_layers: int =                                      config.get("fno_layers",4)
+        self.modes: Optional[int] =                                 config.get("modes",None)
+        self.width: Optional[int] =                                 config.get("width",None)
+        self.exists_head: bool =                                    config.get('logits_head',True)
+        self.final_logits_activation: Optional[str] =               config.get('final_logits_activation',None)
+        self.seq_scale_down: int =                                  config.get('seq_scale_down',1)
+        self.mem_parameters: int =                                  config.get('mem_parameters',128)
+        self.num_mem_static: int =                                  config.get("num_mem_static",1024)
+        self.num_mem_dyn: int =                                     config.get("num_mem_dyn",1024)
+        self.max_prev_states: int =                                 config.get('max_prev_states_storage',3)
+        self.ET: bool =                                             config.get('ET',True)
+        self.attn: str =                                            config.get('attn','h_attn')
+        self.feature_redraw_interval: int =                         config.get('feature_redraw_interval',256)
+        self.auto_check_redraw: bool =                              config.get('auto_check_redraw',True)
+        self.causal: bool =                                         config.get('causal',False)
+        self.attend_to_self =                                       config.get("attend_to_self",True)
+        self.mlp_layers: int =                                      config.get("mlp_layers",1)
+        self.pkm_keys: Optional[int] =                              config.get("pkm_keys",None)
+        self.enable_hopfield: bool =                                config.get("enable_hopfield",True)
+        self.mem_kv: Optional[int] =                                config.get("mem_kv",None)
+        self.prev_state_kv: Optional[int] =                         config.get("prev_state_kv",None)
+        self.num_prev_mem: Optional[int] =                          config.get("num_prev_mem",None)
+        self.init_value: Optional[float] =                          config.get("init_value",0.01)
+
+        Tfn_part = partial(TransformerBlock,
+                        d_model = self.dim_hidden,
+                        nhead = self.num_heads,
+                        dim_ffd_mult = self.dim_ffd_mult,
+                        dropout = self.dropout,
+                        activation = self.activation,
+                        mem_kv = self.mem_kv,
+                        fno_layers = self.fno_layers,
+                        pkm_keys = self.pkm_keys,
+                        hopfield = self.enable_hopfield,
+                        modes = self.modes,
+                        width = self.width,
+                        causal = self.causal,
+                        local_heads = self.num_local_heads,
+                        attn = self.attn,
+                        attend_to_self = self.attend_to_self,
+                        mlp_layers = self.mlp_layers,
+                        ET = self.ET,
+                        prev_state_kv = self.prev_state_kv,
+                        num_prev_mem = self.num_prev_mem,
+                        )
+        
+        self.transformer_layers = nn.ModuleList([ACT_basic(self.dim_hidden,Tfn_part(context=False,decoder=False)) for _ in range(self.num_layers)])
+        self.dynamic_memory = nn.ModuleList([Dynamic_Memory(dim=self.dim_hidden,num_mem_static=self.num_mem_static,num_mem_dyn=self.num_mem_dyn) for _ in range(self.num_layers)])
+        
+        # byte_list = [i for i in str.encode("utf-32")]
+        # max(byte_list) == 255
+        # min(byte_list) == 0
+        # str_from_bytes = bytes([ try: int_byte_list[i:i+4] for i in range(int_byte_list,4)]).decode("utf-32")
+        # str == str_from_bytes --> True
+        self.embedding_encoder = nn.Sequential(
+                                                nn.Embedding(self.vocab, self.dim_hidden),
+                                                #nn.Linear(self.dim_hidden,self.dim_hidden),
+                                                #Rearrange("... (x l) y -> ... x (l y)",l=4),
+                                                #nn.Linear(self.dim_hidden*4,self.dim_hidden),
+                                                ) if self.exists_embedding else Identity()
+        
+        if self.exists_head:
+            if not self.discriminator:
+                self.decoder = nn.Sequential(
+                    #nn.Linear(self.dim_hidden,self.dim_hidden*4),
+                    #Rearrange("... x (l y) -> ... (x l) y",l=4),
+                    #nn.Linear(self.dim_hidden,self.dim_hidden),
+                    nn.Linear(self.dim_hidden,self.vocab) if not self.discriminator else nn.Linear(self.dim_hidden,self.discriminator_classes),
+                    _get_activation_fn(self.final_logits_activation) if exists(self.final_logits_activation) else Identity(),
+                    )
+            else:
+                self.decoder = nn.Sequential(
+                    nn.Linear(self.dim_hidden,self.discriminator_classes),
+                    _get_activation_fn(self.final_logits_activation) if exists(self.final_logits_activation) else Identity(),
+                    )
+        else:
+            self.decoder = Identity()
+
+        self.ffd1 = FFd(dim=self.dim_hidden,mult=self.dim_ffd_mult,activation=self.activation)
+        self.ffd2 = FFd(dim=self.dim_hidden,mult=self.dim_ffd_mult,activation=self.activation)
+
+        self.mem_exist = True if self.mem_parameters else False
+        self.mem = nn.Parameter(torch.randn(self.mem_parameters,self.dim_hidden)) if self.mem_exist else None
+            
+        self.seq_scale_down = self.seq_scale_down
+        self.attn_len = (self.seq_scale_down*3 // 2)*2 + 1
+
+        self.scale_down_conv = nn.Conv1d(self.dim_hidden,self.dim_hidden,self.seq_scale_down*3,self.seq_scale_down,groups=1)
+
+        self.scale_up_conv = nn.ConvTranspose1d(self.dim_hidden,self.dim_hidden,self.seq_scale_down*3,self.seq_scale_down,groups=1)
+
+        self.proj_updater = ProjectionUpdater(nn.ModuleList([self.transformer_layers,self.dynamic_memory]), self.feature_redraw_interval)
+
+        self.optimizer = None
+        self.scheduler = None
+        self.scheduler_lambda = None
+
+        self.prev_states = []
+
+        self.init_weights(self.init_value)
+
+    def __len__(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
+    def get_avg_inference_time(self) -> float:
+        sum_ = 0
+        for (tp,ln) in self.time_:
+            sum_ = (tp/ln)*1024
+        return sum_/len(self.time_)
+
+    def fix_projection_matrices_(self) -> NoReturn :
+        self.proj_updater.feature_redraw_interval = None
+
+    def defix_projection_matrices_(self,feature_redraw_interval=None) -> NoReturn :
+        self.proj_updater.feature_redraw_interval = feature_redraw_interval if exists(feature_redraw_interval) else self.feature_redraw_interval
+
+    def init_weights(self,abs_value=0.01) -> NoReturn :
+        for w in self.parameters():
+            w.data.uniform_(-abs_value,abs_value)
+   
+    def get_prev_state(self) -> List[Tensor]:
+        prev_states = []
+        modules = find_modules(self.transformer_layers,Attention)
+        modules.extend(find_modules(self.dynamic_memory,Dynamic_Memory))
+        for i,mod in enumerate(modules):
+            prev_states.append(mod.hidden_state_get())
+        return prev_states
+
+    def set_prev_state(self,prev_state:List[Tensor]) -> NoReturn :
+        modules = find_modules(self.transformer_layers,Attention)
+        modules.extend(find_modules(self.dynamic_memory,Dynamic_Memory))
+        for i,mod in enumerate(modules):
+            mod.hidden_state_set(prev_states[i+1])
+
+    def training_step(self,
+                    data,
+                    targets,
+                    loss_criterion,
+                    opt=None,
+                    grad_clip=0.5,
+                    deepspeed_enabled=False,
+                    autocast_enabled=False,
+                    trainable_index=None,
+                    mini_batch_size=None,
+                    batch=None,
+                ):
+
+        self.train()
+        step_start_time = time.time()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+
+        optimizer = opt
+        torch.cuda.empty_cache()
+
+        def step_optimizer(input_data=data,output_targets=targets):
+            outputs = {}
+            losses = {}
+            labels = {}
+            output,misc_losses = self.forward(input_data)
+            torch.cuda.empty_cache()
+            if trainable_index != None:
+                trainable_output = torch.cat([output[:,i:i+1] for i in trainable_index],dim=1)
+                trainable_output_targets = torch.cat([output_targets[:,i:i+1] for i in trainable_index],dim=1)
+            else:
+                trainable_output = output
+                trainable_output_targets = output_targets
+                
+            loss = loss_criterion(trainable_output.permute(1,2,0).contiguous(), trainable_output_targets.permute(1,0).contiguous())
+
+            extra_loss = 0
+            for r,nu,probs,m_l,m_l_loss in misc_losses:
+                p_t = r + nu
+                extra_loss += 0.001 * reduce(r + nu,'b (n o) -> o','mean',o=1).item()
+                extra_loss += reduce(probs,'b (n o) -> o','mean',o=1).item() * m_l_loss * 0.005
+            loss = loss + extra_loss
+            loss.backward(retain_graph=True)
+            torch.cuda.empty_cache()
+            if mini_batch_size != None and batch != None and batch%mini_batch_size == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+            outputs['output'] = output
+
+            losses['loss'] = loss.item()
+            return outputs,losses,labels
+        
+        if deepspeed_enabled or autocast_enabled:
+            with autocast():
+                outputs,losses,labels = step_optimizer(data,targets)
+        else:
+            outputs,losses,labels = step_optimizer(data,targets)
+
+        acc = ((torch.argmax(outputs['output'],dim=-1)) == targets).sum().item()/outputs['output'].size(1)
+        loss = losses['loss']
+
+        return outputs,losses,loss,acc,(step_start_time-time.time())
+        
+    #@autocast()
+    def forward(self,
+                    src:Tensor,
+                    return_logits: bool = False,
+                    seq_scale_down: bool = True,
+                ) -> Union[Tuple[Tensor,List[List]],Tuple[Tensor,Tensor,List[List]]]:
+
+        start_time = time.time()
+
+        self.prev_states.append(self.get_prev_state())
+        while len(self.prev_states) > self.max_prev_states:
+            tmp = self.prev_states.pop(0)
+            del(tmp)
+
+        (b,s) = src.shape
+        
+        if self.auto_check_redraw:
+            self.proj_updater.redraw_projections()
+
+        output = self.embedding_encoder(src)
+        output = output * math.sqrt(self.dim_hidden)
+        output = ckpt(self.ffd1,output)
+
+        output = Positional_Encoding(output)
+
+        if seq_scale_down:
+            output = ckpt(self.scale_down_conv,F.pad(output.transpose(-1,-2),((self.seq_scale_down*3 - 1),0),value=0)).transpose(-1,-2)
+                
+        output = torch.cat((Positional_Encoding(repeat(self.mem, 'n d -> b n d', b = output.size(0))),output),dim=-2)
+
+        misc_losses = []
+        for attn,mem in zip(self.transformer_layers,self.dynamic_memory):
+            (output,r,nu) = attn(output)
+            (output,probs,m_l,m_l_loss) = mem(output)
+
+            misc_losses.append([r,nu,probs,m_l,m_l_loss])
+
+        output = output[:,self.mem.size(0):]
+
+        if seq_scale_down:
+            output = ckpt(self.scale_up_conv,output.transpose(-1,-2)).transpose(-1,-2)
+            output = output[:,-s:]
+
+        output = ckpt(self.ffd2,output)
+        out = ckpt(self.decoder,output)
+        
+        self.time_.append((time.time()-start_time,out.size(-2)))
+
+        out = out if not return_logits else [out,output]
+        
+        return out,misc_losses
+
 class MultiModalTransformer(Module):
 
     @profile
     def __init__(self, **config: dict) -> NoReturn :
-        super(TransformerModel, self).__init__()
+        super(MultiModalTransformer, self).__init__()
 
         self.time_: Union[float,int] =                              [0,0]
         self.model_type: str =                                      config.get("Project Name", "Multi Modal Transformer-X")

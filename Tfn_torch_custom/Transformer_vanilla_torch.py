@@ -186,35 +186,20 @@ import sys,select
 def isdata():
     return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
     
-class bcolors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-
 batch_size: int = 1
 eval_batch_size: int = batch_size
 mini_batch_size: int = 1
 
 ET: bool = True
 ntokens: int = tokenizer.vocab_size # None
-emsize: int = 128*3
-nhid: int = emsize * 4
+emsize: int = 128*4
+dim_ffd_mult: int = 4
 nlayers: int = 2
-repeated_main_layers: int = 24//nlayers
-deberta_layers: int = 1
-repeated_deberta_layers: int = 24//deberta_layers
-full_block_repeat: bool = False
+repeated_main_layers: int = 32
 nhead: int = 8 if ET else 16
 dropout: float = (math.pi/10) # 0 <= dropout < ; pi/10 --> 0.3141592653589 : recommended
-mem_kv: int = None
 mem_tokens: int = 1024
-bptt: int = (1024*2) #- mem_tokens
+bptt: int = (1024*4) #- mem_tokens
 bptt_deviation: int = 64
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
@@ -223,11 +208,12 @@ fno_layers: int = 4
 modes: int = 4096
 width: int = 32
 causal: bool = True
-nystrom: bool = True
+attn: str = 'h_attn'
 attend_to_self: bool = True
 feature_redraw_interval: int = 1024
-prev_state_len: int = 1024
-prev_state_self_num: int = 128
+num_mem_static: int = 2048
+num_mem_dyn: int = max(bptt,2048)
+mem_kv: int = max(bptt,2048)
 local_heads: int = 2
 local_heads: int = min(local_heads,nhead)
 
@@ -425,7 +411,7 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
     seq_len = min(bptt, source.size(1) - j)
     rnd_shuffle = random.randint(0,1000000)/1000000 if shuffle else 0
     rnd_mask = random.randint(0,1500000000)/100000000
-    rnd_mask_together = random.randint(0,min(min(4,seq_scale_down)**2 // 2,rnd_mask))
+    rnd_mask_together = random.randint(0,int(min(min(4,seq_scale_down)**2 // 2,rnd_mask)))
     rnd = random.randint(0,min((seq_len-1),(bptt//8),(min(8,seq_scale_down)*2)**2))
 
     if (j+bptt) > source.size(1) and (j_0 != -1 and (not prefer_source_over_generator and generator != None)):
@@ -556,7 +542,7 @@ except Exception as e:
     torch.save(processed_test_data,"models/data_"+str(vocab_size)+"/"+file+"_test.tar")
     torch.save(processed_val_data,"models/data_"+str(vocab_size)+"/"+file+"_val.tar")
 
-from scripts.model import TransformerModel, Trainer
+from scripts.model import TransformerX, Trainer
 torch.cuda.empty_cache()
 
 deepspeed_args = {
@@ -651,34 +637,29 @@ if use_deepspeed:
                                 mem_kv=mem_kv,
                         ).half()
 else:
-    model = TransformerModel(
-                            ninp=emsize, 
-                            nhead=nhead, 
-                            nhid=nhid, 
-                            nlayers=nlayers, 
-                            ntoken=ntokens, 
+    model = TransformerX(
+                            dim_hidden=emsize, 
+                            num_heads=nhead, 
+                            dim_ffd_mult=dim_ffd_mult, 
+                            num_layers=nlayers, 
+                            vocab=ntokens, 
                             dropout=dropout,
-                            mem_token=mem_tokens,
-                            deberta_layers=deberta_layers,
-                            repeated_deberta_layers=repeated_deberta_layers,
+                            mem_parameters=mem_tokens,
                             max_seq_len=max_seq_len,
                             #discriminator=discriminator,
                             seq_scale_down=seq_scale_down,
-                            full_block_repeat=full_block_repeat,
                             causal=causal,
-                            device=device,
-                            nystrom=nystrom,
+                            attn=attn,
                             attend_to_self=attend_to_self,
                             fno_layers=fno_layers,
                             modes=modes,
                             width=width,
                             feature_redraw_interval=feature_redraw_interval,
-                            prev_state_len=prev_state_len,
-                            prev_state_self_num=prev_state_self_num,
-                            local_heads=local_heads,
+                            num_mem_static=num_mem_static,
+                            num_mem_dyn=num_mem_dyn,
+                            num_local_heads=local_heads,
                             mlp_layers=mlp_layers,
-                            encoder_n_decoder=encoder_n_decoder,
-                            repeated_main_layers=repeated_main_layers,
+                            num_max_hop=repeated_main_layers,
                             ET=ET,
                             mem_kv=mem_kv,
                     ).to(device)
@@ -693,14 +674,14 @@ if use_deepspeed:
     with autocast():
         out,mem,mem_ctxt = model(inp)
 else:
-    out,mem,mem_ctxt = model(inp)
+    out,misc_losses = model(inp)
 print("raw in:",inp,"\vin size:",inp.size(),"\nraw out:",torch.argmax((out.reshape(-1,ntokens)),dim=-1),"\vout size:",out.size())
 print(model.get_avg_inference_time()," seconds.\n")
-del(out,mem,mem_ctxt,inp)
+del(out,misc_losses,inp)
 
 #print(sum(p.numel() for p in model.parameters()))
 date_time = str(time.asctime().replace(" ","_")).replace(":","_")
-path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(deberta_layers)+"_"+str(repeated_deberta_layers)+"_"+str(nhead)+"_"+str(seq_scale_down)+".tar"
+path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
 lr = 1
@@ -750,15 +731,6 @@ def lambda_lr(step_):
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_lr) if discriminator else None
 
-model.tokenzier = tokenizer
-model.vocab = vocab
-model.optimizer = optimizer
-#model.optimizer_disc = optimizer_disc
-model.scheduler = scheduler
-#model.scheduler_disc = scheduler_disc
-model.scheduler_lambda = lambda_lr
-#model.scheduler_disc_lambda = lambda_lr
-
 load_optimizer = True
 load_scheduler = bool(True and load_optimizer)
 load_step_number = True
@@ -792,11 +764,9 @@ def wandb_init():
     wandb.init(project=project_name,config={
         "ntokens":ntokens,
         "d_model":emsize,
-        "ffd":nhid,
+        "dim_ffd_mult":dim_ffd_mult,
         "layers":nlayers,
         "heads":nhead,
-        "deberta_layers":deberta_layers,
-        "repeated_deberta_layers":repeated_deberta_layers,
         "dropout":dropout,
         "memory_tokens":mem_tokens,
         "total_epochs":epochs,
@@ -807,18 +777,17 @@ def wandb_init():
         "Number of Parameters":len(model),
         "Progressive generation training":progressive_generation,
         "use_sgd":use_sgd,
-        "full_block_repeat":full_block_repeat,
         "causal":causal,
-        "nystromer":nystrom,
+        "attn":attn,
         "attend_to_self":attend_to_self,
         "fno_layers":fno_layers,
         "modes":modes,
         "width":width,
         "feature_redraw_intervel":feature_redraw_interval,
-        "prev_state_len":prev_state_len,
         "local_heads":local_heads,
-        "prev_state_self_num":prev_state_self_num,
         "mlp_layers":mlp_layers,
+        'num_mem_static':num_mem_static,
+        'num_mem_dyn':num_mem_dyn,
     },
     resume=True,
     force=False,
@@ -915,7 +884,7 @@ model.to(device)
 
 # TODO: Setup 'curses' module to print colored text for inference output
 #import curses
-def inference(text,size=128,eval_model = model,reccurent_mem=None,reccurent_mem_ctxt=None,return_mem=True,append_eos_at_end=False,append_sos_at_start=True):
+def inference(text,*args,size=128,eval_model = model,append_eos_at_end=False,append_sos_at_start=True,**kwargs):
     eval_model.eval()
     eval_model = eval_model.to(device)
     torch.cuda.empty_cache()
@@ -934,20 +903,19 @@ def inference(text,size=128,eval_model = model,reccurent_mem=None,reccurent_mem_
         text_input = replace_with_reserved_tokens(text_input,tok_num=i)
     if use_deepspeed:
         with autocast():
-            out,mem,mem_ctxt = eval_model(text_input,mem=reccurent_mem,context_mem=reccurent_mem_ctxt)
+            out,_ = eval_model(text_input)
     else:
-        out,mem,mem_ctxt = eval_model(text_input,mem=reccurent_mem,context_mem=reccurent_mem_ctxt)
+        out,_ = eval_model(text_input)
     out = torch.argmax(out.reshape(-1, ntokens),dim=-1).to(torch.device('cpu'))
     result = tokenizer.decode(out)
     print("Your input:\v",tokenizer.decode(text_input.reshape(-1).to(torch.device('cpu'))))
     print("Model's Output:\v",result)
     print('')
     torch.cuda.empty_cache()
-    if return_mem:
-        return str(result),mem,mem_ctxt
+    return str(result)
 
 
-inference("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new",return_mem=False)
+_ = inference("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new")
 
 def evaluate(eval_model, data_source, print_val_loss=False,generator=None):
     eval_model.eval()
@@ -970,11 +938,11 @@ def evaluate(eval_model, data_source, print_val_loss=False,generator=None):
                 data, targets, trainable_index,data_stream_ended,j_1 = get_batch(data_source, i,generator=generator,prefer_source_over_generator=False,j_0 = j_1)
                 if use_deepspeed:
                     with autocast():
-                        output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
+                        output,_ = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
                         total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
                         total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
                 else:
-                    output,single_pass_mem,single_pass_mem_ctxt = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
+                    output,_ = eval_model(data,mem = single_pass_mem,context_mem=single_pass_mem_ctxt)
                     total_loss += data.size(1) * criterion(rearrange(output,'b n c -> n c b'), rearrange(targets,'b n -> n b')).item()
                     total_acc += ((torch.argmax(output,dim=-1)) == targets).sum().item()
             except Exception as e:
@@ -994,15 +962,6 @@ def save_model(batch):
     global step
     model.eval()
     best_model.eval()
-
-    model.tokenzier = tokenizer
-    model.vocab = vocab
-    model.optimizer = optimizer
-    #model.optimizer_disc = optimizer_disc
-    model.scheduler = scheduler
-    #model.scheduler_disc = scheduler_disc
-    model.scheduler_lambda = lambda_lr
-    #model.scheduler_disc_lambda = lambda_lr
 
     if discriminator:
         torch.save(
@@ -1098,8 +1057,6 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
     total_time_per_step = 0.
     start_time = time.time()
     intermediate_save_time = time.time()
-    single_pass_mem = None
-    single_pass_mem_ctxt = None
     acc = 0
     acc_d = 0
     total_acc = 0
@@ -1121,15 +1078,12 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
             if batch < resume_batch:
                 continue
         """
-        if ((batch + epoch)%2==1):
-            single_pass_mem = None
-            single_pass_mem_ctxt = None
         data, targets, trainable_index, data_stream_ended,j_0 = get_batch(processed_train_data, i,progressive=progressive_generation,batch_size_=batch_size,generator=zst_gen,prefer_source_over_generator=False,j_0=j_0) #Indexed Selective training broken
         trainable_index = None
         torch.cuda.empty_cache()
 
         if not discriminator:
-            outputs,losses,loss,acc,time_,single_pass_mem,single_pass_mem_ctxt = model.training_step(data,targets,criterion,single_pass_mem,opt=optimizer,trainable_index=trainable_index,mem_ctxt=single_pass_mem_ctxt,mini_batch_size=mini_batch_size,batch=batch)
+            outputs,losses,loss,acc,time_ = model.training_step(data,targets,criterion,opt=optimizer,trainable_index=trainable_index,mini_batch_size=mini_batch_size,batch=batch)
         else:
             pass
 
@@ -1214,11 +1168,10 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                     except Exception as e:
                         inp = "0"
                     if inp.lower() in ['yes','1']:
-                        tmp_mem = tmp_mem_ctxt = None
                         result = ''
                         while True:
                             try:
-                                i = int(inpt("Enter 2 for reccurent inference,enter 1 for static inference, 0 for exiting:",timeout=30))
+                                i = int(inpt("Enter 1 for static inference, 0 for exiting:",timeout=30))
                             except:
                                 continue
                             print("")
@@ -1239,9 +1192,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
                                 except:
                                     continue
                             inp += tmp
-                            tmp_mem = None if i==1 else tmp_mem
-                            tmp_mem_ctxt = None if i==1 else tmp_mem_ctxt
-                            result,tmp_mem, tmp_mem_ctxt = inference(inp,reccurent_mem=tmp_mem,reccurent_mem_ctxt=tmp_mem_ctxt,append_sos_at_start=bool(tmp_mem==None))
+                            result = inference(inp)
                     
 
         total_loss += loss
@@ -1263,7 +1214,7 @@ def train(resume_batch=0,step_scheduler=1,save_intermediate_intervel=8192,save_i
         torch.cuda.empty_cache()
 
         if ((batch % save_intermediate_intervel == 0 and batch > 0) or ((time.time()-intermediate_save_time) > save_intermediate_intervel_time_s) and batch>(resume_batch + 10)):
-            inference("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new",eval_model=model,return_mem=False)
+            _ = inference("Hello World!!! This is inference function on the currently trained deep learning model based on the same architecture used by GPT-3 by OpenAI and GPT-J by EleutherAI, namely -> Tranformer Architecture published in 2017 in the paper 'Attention Is All You Need' by Vaswani et. al. which propsed a new")
             save_model(batch)
             intermediate_save_time = time.time()
             model.train()
