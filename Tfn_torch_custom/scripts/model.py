@@ -1353,7 +1353,7 @@ class TransformerX(Module):
     def __init__(self, **config: dict) -> NoReturn :
         super(TransformerX, self).__init__()
 
-        self.time_: Union[float,int] =                              [(1,1)]
+        self.time_: Union[float,int] =                              [(0,1)]
         self.model_type: str =                                      config.get("Project Name", "Transformer-X")
         self.dim_hidden: int =                                      config.get('dim_hidden')
         self.vocab: int =                                           config.get('vocab',256)
@@ -1471,7 +1471,7 @@ class TransformerX(Module):
     def get_avg_inference_time(self) -> float:
         sum_ = 0
         for (tp,ln) in self.time_:
-            sum_ += 1024*(tp/ln)
+            sum_ += tp/(ln/1024)
         return sum_/len(self.time_)
 
     def fix_projection_matrices_(self) -> NoReturn :
