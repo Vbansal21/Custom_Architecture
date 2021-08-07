@@ -1461,10 +1461,6 @@ class TransformerX(Module):
 
         self.proj_updater = ProjectionUpdater(nn.ModuleList([self.transformer_layers,self.dynamic_memory]), self.feature_redraw_interval)
 
-        self.optimizer = None
-        self.scheduler = None
-        self.scheduler_lambda = None
-
         self.prev_states = []
 
         self.init_weights(self.init_value)
@@ -1475,7 +1471,7 @@ class TransformerX(Module):
     def get_avg_inference_time(self) -> float:
         sum_ = 0
         for (tp,ln) in self.time_:
-            sum_ = (tp/ln)*1024
+            sum_ += 1024*(tp/ln)
         return sum_/len(self.time_)
 
     def fix_projection_matrices_(self) -> NoReturn :
@@ -1541,7 +1537,7 @@ class TransformerX(Module):
             for r,nu,probs,m_l,m_l_loss in misc_losses:
                 p_t = r + nu
                 extra_loss += 0.001 * reduce(r + nu,'b (n o) -> o','mean',o=1).item()
-                extra_loss += reduce(probs,'b (n o) -> o','mean',o=1).item() * m_l_loss * 0.005
+                extra_loss += reduce(probs,'b (n o) -> o','mean',o=1).item() * 0.005 + m_l_loss * 0.05
             loss = loss + extra_loss
             loss.backward(retain_graph=True)
             torch.cuda.empty_cache()

@@ -1523,7 +1523,7 @@ class Attention(nn.Module):
         self.attn_to_self = None
         if attend_to_self:
             self_head_dim = 1
-            self.features = 5
+            self.features = 17
             scale = 2
             self.feat_prep = nn.Conv1d(inner_dim,inner_dim*scale,kernel_size=self.features,padding=self.features//2,padding_mode="replicate",groups=1)
             self.project_down = nn.Linear(inner_dim*scale, inner_dim)
@@ -1536,7 +1536,7 @@ class Attention(nn.Module):
                 self.attn_to_self = HAttention1D(heads=1)
         self.num_mem_kv = num_mem_kv
         num_prev_state = default(num_prev_state,num_mem_kv)
-        num_prev_mem = default(num_prev_mem,min(64,num_mem_kv))
+        num_prev_mem = default(num_prev_mem,min(dim,num_mem_kv))
         
         attn = 'performer'
 
@@ -1552,6 +1552,17 @@ class Attention(nn.Module):
                                 name='prev_mem',
                                 tensor=torch.zeros((self.heads, num_prev_mem, dim_head))
                                 )
+            if num_prev_mem > 0:
+                self.scale_down = nn.Sequential(
+                    Rearrange("... x y -> ... y x"),
+                    nn.Conv1d(dim,dim,12,4,6),
+                    nn.Conv1d(dim,dim,12,4,6),
+                    nn.Conv1d(dim,dim,12,4,6),
+                    nn.Conv1d(dim,dim,12,4,6),
+                    Rearrange("... x y -> ... y x"),
+                )
+            else:
+                self.scale_down = nn.Identity()
             #self.register_buffer(name='prev_state_supplementary',tensor=torch.eye(dim_head*self.heads))
             #self.prev_state_parameter = nn.Parameter(torch.randn((dim_head*self.heads,dim_head*self.heads)))
             self.hop_attn = hop_attn
@@ -1697,7 +1708,7 @@ class Attention(nn.Module):
 
             out = ckpt(self.mem_attn,out,mem_k,mem_v)
             out = ckpt(self.out_mem,out)
-            self.prev_mem = reduce(torch.cat((prev_mem,out),dim=-2)[:,:,self.prev_mem.size(-2)],'b h n d -> h n d','mean').reshape(self.prev_mem.shape)
+            self.prev_mem = reduce(torch.cat((prev_mem,self.scale_down(torch.cat((prev_mem,out),dim=-2))),dim=-2)[:,:,self.prev_mem.size(-2)],'b h n d -> h n d','mean').reshape(self.prev_mem.shape)
 
             out_k = self.out_k(out)
             out_v = self.out_v(out)
