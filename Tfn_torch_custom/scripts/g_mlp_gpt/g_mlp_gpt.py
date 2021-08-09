@@ -198,7 +198,7 @@ class CausalLocalSGU(nn.Module):
     def __init__(
         self,
         dim,
-        dim_seq,
+        dim_seq = None,
         init_eps = 1e-3,
         heads = 4,
         window = 128,

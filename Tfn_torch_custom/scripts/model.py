@@ -355,7 +355,7 @@ class TransformerBlock(Module):
                 ):
         super(TransformerBlock, self).__init__()
         
-        self.dropout = nn.ModuleList([Dropout(dropout) for _ in range(9 if (encoder_n_decoder and decoder) else 7)])
+        self.dropout = nn.ModuleList([Dropout(dropout) for _ in range(6 if (encoder_n_decoder and decoder) else 4)])
 
         pkm_keys = default(pkm_keys,32)
 
@@ -366,26 +366,26 @@ class TransformerBlock(Module):
 
         pkm = PKM(d_model,heads=1,num_keys=pkm_keys,topk=min(pkm_keys,nhead))
 
-        self.conformer = GRUGating(d_model,fn=ConformerConvModule(d_model,expansion_factor=dim_ffd_mult//2,causal=True,dropout=dropout),norm=False)
+        conformer = ConformerConvModule(d_model,expansion_factor=dim_ffd_mult//2,causal=True,dropout=dropout)
 
-        self.fno = GRUGating(d_model,fn=FNO1d(modes,
-                                    width,
-                                    inp_dim=d_model,
-                                    out_dim=d_model,
-                                    ffd_dim=dim_ffd_mult*width,
-                                    num_layers=fno_layers
-                                ))
+        fno = FNO1d(modes,
+                        width,
+                        inp_dim=d_model,
+                        out_dim=d_model,
+                        ffd_dim=dim_ffd_mult*width,
+                        num_layers=fno_layers
+                    )
 
         if hopfield:
-            self.hopfield = GRUGating(d_model,fn=HopfieldLayer(input_size=d_model,
-                                                            update_steps_max=-1,
-                                                            dropout=dropout))
+            hopfield = HopfieldLayer(input_size=d_model,
+                                                    update_steps_max=-1,
+                                                    dropout=dropout)
         else:
-            self.hopfield = Identity()
+            hopfield = None
             
-        self.mlp = GRUGating(d_model,fn=gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=dim_ffd_mult//2,seq_len=2**16,window=d_model//2,attn_dim=d_model,prob_survival=1-dropout))
+        self.mlp = GRUGating(d_model,fn=gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=2,seq_len=2**16,window=d_model//2,attn_dim=None,prob_survival=1-dropout))
 
-        ffd1 = FFd(dim=d_model,activation=activation,mult=dim_ffd_mult,fn=pkm)
+        ffd1 = FFd(dim=d_model,activation=activation,mult=dim_ffd_mult//2,fn=nn.ModuleList([pkm,conformer,fno,hopfield]))
 
         self.feed_forward = GRUGating(d_model,fn=ffd1)
 
@@ -533,41 +533,28 @@ class TransformerBlock(Module):
         output = ckpt(self.feed_forward,output)
         output = self.dropout[0](output)
 
-        output = ckpt(self.hopfield,output)
-        output = self.dropout[1](output)
-
         if self.decoder_exists:
             ctxt_mask = src_mask if context is None else None
             context = output if context == None else context
 
             context = ckpt(self.feed_forward,context)
             context = self.dropout[0](context)
-            context = ckpt(self.hopfield,context)
-            context = self.dropout[1](context)
 
-            output = self.dropout[7](ckpt(self.self_inp_enc,output,None,src_mask))
-            context = self.dropout[8](ckpt(self.self_ctxt_enc,context,None,ctxt_mask))
+            output = self.dropout[4](ckpt(self.self_inp_enc,output,None,src_mask))
+            context = self.dropout[5](ckpt(self.self_ctxt_enc,context,None,ctxt_mask))
 
         elif exists(context):
             context = ckpt(self.feed_forward,context)
             context = self.dropout[0](context)
-            context = ckpt(self.hopfield,context)
-            context = self.dropout[1](context)
 
         output = ckpt(self.attn,output,output,context,src_mask)
-        output = self.dropout[2](output)
+        output = self.dropout[1](output)
 
         output = ckpt(self.to_out,output)
-        output = self.dropout[3](output)
-
-        output = ckpt(self.fno,output)
-        output = self.dropout[4](output)
-
-        output = ckpt(self.conformer,output)
-        output = self.dropout[5](output)
-
+        output = self.dropout[2](output)
+        
         output = ckpt(self.mlp,output)
-        output = self.dropout[6](output)
+        output = self.dropout[3](output)
 
         return output
 
@@ -1456,8 +1443,8 @@ class TransformerX(Module):
         else:
             self.decoder = Identity()
 
-        self.ffd1 = FFd(dim=self.dim_hidden,mult=self.dim_ffd_mult,activation=self.activation)
-        self.ffd2 = FFd(dim=self.dim_hidden,mult=self.dim_ffd_mult,activation=self.activation)
+        self.ffd1 = FFd(dim=self.dim_hidden,mult=1,activation=self.activation)
+        self.ffd2 = FFd(dim=self.dim_hidden,mult=1,activation=self.activation)
 
         self.mem_exist = True if self.mem_parameters else False
         self.mem = nn.Parameter(torch.randn(self.mem_parameters,self.dim_hidden)) if self.mem_exist else None
