@@ -237,18 +237,13 @@ class AbsolutePositionalEmbedding(Module):
             return tmp
 
 class ACT_basic(nn.Module):
-    def __init__(self,hidden_size,function,threshold=0.2,factor=3,max_hop=None,checkpointed=checkpointed):
+    def __init__(self,hidden_size,function,threshold=0.1,factor=3,max_hop=None,checkpointed=False):
         super(ACT_basic, self).__init__()
         self.sigma = nn.Sigmoid()
         self.max_hop = max_hop
-        self.num_layers = 2
-        self.lstm_hs = hidden_size
-        self.bidirectional = True
-        self._p = nn.LSTM(hidden_size,self.lstm_hs,self.num_layers,batch_first=True,bidirectional=self.bidirectional,proj_size=1)
-        self.p = nn.Linear(2,1)
+        self.p = nn.Linear(hidden_size,1)
         self.fn = function
-        self.threshold_num = 1 - threshold
-        self.threshold = nn.Parameter(torch.tensor((self.threshold_num,)))
+        self.threshold = 1 - threshold
         self.factor = factor
         self.checkpointed = checkpointed
 
@@ -268,28 +263,24 @@ class ACT_basic(nn.Module):
         step = 0
         # set time_enc, pos_enc and max_hop if None
         time_enc = default(time_enc,_gen_timing_signal(l,d)).to(dtype).to(device)
-        max_hop = default(default(self.max_hop,max_hop),max(2,int((l**(1/self.factor) + default(encoder_output,state).size(-2)**(1/self.factor))/2) + 1))
+        max_hop = default(default(max_hop,self.max_hop),max(2,int((l**(1/self.factor) + default(encoder_output,state).size(-2)**(1/self.factor))/2) + 1))
         pos_enc = default(pos_enc,_gen_timing_signal(max_hop,d)).to(dtype).to(device)
-        # initialise hidden state, cell state
-        h = torch.zeros( (1+int(self.bidirectional)) *self.num_layers, state.size(0), 1)
-        c = torch.zeros( (1+int(self.bidirectional)) *self.num_layers, state.size(0), self.lstm_hs)
         # initiating adaptive computation:
-        while( ((halting_probability<int(self.threshold.clamp(min=self.threshold_num,max=1.0))) & (n_updates < max_hop)).byte().any()):
+        while( ((halting_probability<self.threshold) & (n_updates < max_hop)).byte().any()):
             # Add timing signal
             state = state + time_enc[:, :l, :].type(dtype).to(device)
             state = state + pos_enc[:, step, :].unsqueeze(1).repeat(1,l,1).type(dtype).to(device)
 
-            _p, (h,c) = self._p(state,(h,c))
-            p = self.sigma(self.p(_p)).squeeze(-1)
+            p = self.sigma(self.p(state)).squeeze(-1)
 
             # Mask for inputs which have not halted yet
             still_running = (halting_probability < 1.0).type(dtype).to(device)
 
             # Mask of inputs which halted at this step
-            new_halted = (halting_probability + p * still_running > int(self.threshold.clamp(min=self.threshold_num,max=1.0))).type(dtype).to(device) * still_running
+            new_halted = (halting_probability + p * still_running > self.threshold).type(dtype).to(device) * still_running
 
             # Mask of inputs which haven't halted, and didn't halt this step
-            still_running = (halting_probability + p * still_running <= int(self.threshold.clamp(min=self.threshold_num,max=1.0))).type(dtype).to(device) * still_running
+            still_running = (halting_probability + p * still_running <= self.threshold).type(dtype).to(device) * still_running
 
             # Add the halting probability for this step to the halting
             # probabilities for those input which haven't halted yet
@@ -311,10 +302,10 @@ class ACT_basic(nn.Module):
             update_weights = p * still_running + new_halted * remainders
 
             if isinstance(self.fn,nn.Module):
-                state = ckpt(self.fn,state,encoder_output,checkpointed=self.checkpointed)
+                state = ckpt(self.fn,state,encoder_output,checkpointing=self.checkpointed)
             elif isinstance(self.fn,nn.ModuleList):
                 for layer in self.fn:
-                    state = ckpt(layer,state,encoder_output,checkpointed=self.checkpointed)
+                    state = ckpt(layer,state,encoder_output,checkpointing=self.checkpointed)
 
             # update running part in the weighted state and keep the rest
             previous_state = ((state * update_weights.unsqueeze(-1)) + (previous_state * (1 - update_weights.unsqueeze(-1))))
@@ -370,9 +361,9 @@ class TransformerBlock(Module):
 
         pkm = PKM(d_model,num_keys=pkm_keys)
 
-        self.conformer = GRUGating(d_model,ConformerConvModule(d_model,expansion_factor=dim_ffd_mult//2,causal=True,dropout=dropout),norm=False)
+        self.conformer = GRUGating(d_model,fn=ConformerConvModule(d_model,expansion_factor=dim_ffd_mult//2,causal=True,dropout=dropout),norm=False)
 
-        self.fno = GRUGating(d_model,FNO1d(modes,
+        self.fno = GRUGating(d_model,fn=FNO1d(modes,
                                     width,
                                     inp_dim=d_model,
                                     out_dim=d_model,
@@ -381,19 +372,16 @@ class TransformerBlock(Module):
                                 ))
 
         if hopfield:
-            self.hopfield = GRUGating(d_model,HopfieldLayer(input_size=d_model,
-                                                            num_heads=nhead,
-                                                            pattern_size=2**7,
-                                                            dropout=dropout,
-                                                            quantity=2**7))
+            self.hopfield = GRUGating(d_model,fn=HopfieldLayer(input_size=d_model,
+                                                            dropout=dropout))
         else:
             self.hopfield = Identity()
             
-        self.mlp = GRUGating(d_model,gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=dim_ffd_mult//2,seq_len=2**16,window=d_model//2,attn_dim=d_model,prob_survival=1-dropout))
+        self.mlp = GRUGating(d_model,fn=gMLPGPT(dim=d_model,depth=mlp_layers,heads=nhead,ff_mult=dim_ffd_mult//2,seq_len=2**16,window=d_model//2,attn_dim=d_model,prob_survival=1-dropout))
 
         ffd1 = FFd(dim=d_model,activation=activation,mult=dim_ffd_mult,fn=pkm)
 
-        self.feed_forward = GRUGating(d_model,ffd1)
+        self.feed_forward = GRUGating(d_model,fn=ffd1)
 
         self.to_out = copy.deepcopy(self.feed_forward)
 
@@ -417,7 +405,7 @@ class TransformerBlock(Module):
         else:
             self.self_inp_enc = (GRUGating(
                                             d_model,
-                                            ET_Encoder_Block(d_model,
+                                            fn = ET_Encoder_Block(d_model,
                                                                 num_heads=nhead,
                                                                 dim_heads=d_model//nhead,
                                                                 num_mem_kv=mem_kv,
@@ -433,7 +421,7 @@ class TransformerBlock(Module):
                                                                 use_mask=use_mask,
                                                                 ff_hidden=dim_ffd_mult,
                                                                 ),
-                                    norm=False) if ET else GRUGating(d_model,Attention(d_model,
+                                    norm=False) if ET else GRUGating(d_model,fn = Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=mem_kv,
@@ -451,7 +439,7 @@ class TransformerBlock(Module):
 
             self.self_ctxt_enc = (GRUGating(
                                             d_model,
-                                            ET_Encoder_Block(d_model,
+                                            fn = ET_Encoder_Block(d_model,
                                                                 num_heads=nhead,
                                                                 dim_heads=d_model//nhead,
                                                                 num_mem_kv=mem_kv,
@@ -467,7 +455,7 @@ class TransformerBlock(Module):
                                                                 use_mask=use_mask,
                                                                 ff_hidden=dim_ffd_mult,
                                                                 ),
-                                    norm=False) if ET else GRUGating(d_model,Attention(d_model,
+                                    norm=False) if ET else GRUGating(d_model,fn = Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
                                             num_mem_kv=mem_kv,
@@ -513,7 +501,7 @@ class TransformerBlock(Module):
                                                             context=context,
                                                             use_mask=bool(not context and use_mask),)
         
-        self.attn = GRUGating(d_model,attn_block,norm=False)
+        self.attn = GRUGating(d_model,fn = attn_block,norm=False)
 
         self.decoder_exists = decoder
 
@@ -549,7 +537,7 @@ class TransformerBlock(Module):
         output = ckpt(self.attn,output,output,context,src_mask)
         output = self.dropout[2](output)
 
-        output = self.to_out(output)
+        output = ckpt(self.to_out,output)
         output = self.dropout[3](output)
 
         output = ckpt(self.fno,output)
@@ -1412,9 +1400,11 @@ class TransformerX(Module):
                         ET = self.ET,
                         prev_state_kv = self.prev_state_kv,
                         num_prev_mem = self.num_prev_mem,
+                        context=False,
+                        decoder=False,
                         )
         
-        self.transformer_layers = nn.ModuleList([ACT_basic(self.dim_hidden,Tfn_part(context=False,decoder=False)) for _ in range(self.num_layers)])
+        self.transformer_layers = nn.ModuleList([ACT_basic(self.dim_hidden,Tfn_part()) for _ in range(self.num_layers)])
         self.dynamic_memory = nn.ModuleList([Dynamic_Memory(dim=self.dim_hidden,num_mem_static=self.num_mem_static,num_mem_dyn=self.num_mem_dyn) for _ in range(self.num_layers)])
         
         # byte_list = [i for i in str.encode("utf-32")]
@@ -1472,7 +1462,7 @@ class TransformerX(Module):
         sum_ = 0
         for (tp,ln) in self.time_:
             sum_ += tp/(ln/1024)
-        return sum_/len(self.time_)
+        return sum_/(len(self.time_)-1)
 
     def fix_projection_matrices_(self) -> NoReturn :
         self.proj_updater.feature_redraw_interval = None

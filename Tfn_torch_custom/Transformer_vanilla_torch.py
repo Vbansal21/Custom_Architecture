@@ -192,9 +192,9 @@ mini_batch_size: int = 1
 
 ET: bool = True
 ntokens: int = tokenizer.vocab_size # None
-emsize: int = 128*4
+emsize: int = 128*2
 dim_ffd_mult: int = 4
-nlayers: int = 2
+nlayers: int = 1
 repeated_main_layers: int = 32
 nhead: int = 8 if ET else 16
 dropout: float = (math.pi/10) # 0 <= dropout < ; pi/10 --> 0.3141592653589 : recommended
@@ -207,14 +207,14 @@ mlp_layers: int = 1
 fno_layers: int = 4
 modes: int = 4096
 width: int = 32
-causal: bool = True
-attn: str = 'h_attn'
-attend_to_self: bool = True
+causal: bool = False
+attn: str = 'nystrom'
+attend_to_self: bool = False
 feature_redraw_interval: int = 1024
 num_mem_static: int = 2048
-num_mem_dyn: int = max(bptt,2048)
-mem_kv: int = max(bptt,2048)
-local_heads: int = 2
+num_mem_dyn: int = max(bptt,8096)
+mem_kv: int = max(bptt,8096)
+local_heads: int = 0
 local_heads: int = min(local_heads,nhead)
 
 discriminator: bool = False #INTEGRATED DISCRIMINATOR: DISABLED
@@ -378,6 +378,8 @@ def get_batch(source,j,bptt=bptt,progressive=True,shuffle=True,batch_size_=batch
         step = 0
         tmp = ''
         for i in generator:
+            if len(tmp) > 0 and i=='[sos]':
+                tmp += '[segment_seperator]'
             tmp += i
             step += 1 
             if len(tmp) >= bptt*batch_size_ and step >= batch_size_*bptt_deviation:
@@ -674,7 +676,7 @@ if use_deepspeed:
     with autocast():
         out,mem,mem_ctxt = model(inp)
 else:
-    out,misc_losses = model(inp)
+    out,misc_losses = model.forward(inp)
 print("raw in:",inp,"\vin size:",inp.size(),"\nraw out:",torch.argmax((out.reshape(-1,ntokens)),dim=-1),"\vout size:",out.size())
 print(model.get_avg_inference_time()," seconds.\n")
 del(out,misc_losses,inp)
@@ -707,7 +709,7 @@ else:
 
 step = 0
 def lambda_lr(step_):
-    a = 5000000
+    a = 50000000
     b = 1000
     c = 0.0
     multiplier = (bptt/2048)*batch_size

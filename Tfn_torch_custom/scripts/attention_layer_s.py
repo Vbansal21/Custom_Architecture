@@ -924,7 +924,7 @@ class CausalHAttention1D(nn.Module):
         mask = seq_keys > rearrange(root_seq, 'n -> () n')
         self.register_buffer('mask', mask)
 
-    def forward(self, q,k,v, **kwargs):
+    def forward(self, q,k,v,mask=None, **kwargs):
         b, n, h, device, bsz, eps = q.size(0), q.size(-2), self.heads, q.device, self.block_size, self.eps
 
         # pad sequence length to power of 2
@@ -1067,7 +1067,7 @@ class CausalHAttention1D(nn.Module):
 
         # combine out
 
-        return out[:, :n]
+        return out[:, :, :n]
 
 class NystromAttention(nn.Module):
     def __init__(
@@ -1076,7 +1076,7 @@ class NystromAttention(nn.Module):
         dim_head = 64,
         heads = 8,
         num_landmarks = 256,
-        pinv_iterations = 6,
+        pinv_iterations = 17,
         residual = True,
         context = False,
         residual_conv_kernel = 33,
@@ -1137,7 +1137,7 @@ class NystromAttention(nn.Module):
     def forward(self, q, k, v, src_mask = None, mask = None, return_attn = False):
         b, _, n, __, h, m, iters, eps = *q.shape, self.heads, self.num_landmarks, self.pinv_iterations, self.eps
 
-        factor = 2
+        factor = 3
         m = max(12,min(self.num_landmarks,int((k.size(-2)**(1/factor) + q.size(-2)**(1/factor))//2)))
 
         q_shape = q.shape
@@ -1282,7 +1282,7 @@ class Dynamic_Memory(nn.Module):
                             name='mem_dyn',
                             tensor=torch.zeros((num_mem_dyn, dim))
                             )
-        num_mem_buffer = default(num_mem_buffer,min(num_mem_dyn,num_mem_static,64))
+        num_mem_buffer = default(num_mem_buffer,min(num_mem_dyn,num_mem_static,dim))
         self.register_buffer(
                             name='mem_buffer',
                             tensor=torch.zeros((num_mem_buffer, dim))
@@ -1335,24 +1335,18 @@ class Dynamic_Memory(nn.Module):
         )
 
         self.sigma = nn.Sigmoid()
-        self.num_layers = 2
-        self.lstm_hs = dim
-        self.bidirectional = True
-        self._p = nn.LSTM(dim,self.lstm_hs,self.num_layers,batch_first=True,bidirectional=self.bidirectional,proj_size=1)
-        self.p = nn.Linear(2,1)
+        self.p = nn.Linear(dim,1)
 
-        self.concentration_threshold = 0.8
-        self.barely_filled_threshold = 0.2
+        self.concentration_threshold = 0.95
 
-        self.norm_over_batch = nn.LSTM(dim,dim,batch_first=True,bidirectional=True)
-        self.norm_over_batch_lin = nn.Linear(dim*2, dim)
+        self.batch_norm = nn.BatchNorm1d(dim)
 
         self.norm = RMSNorm(dim)
         self.gru = nn.GRUCell(dim,dim)
         self.mogrifier = Mogrifier(dim, iters = 13, factorize_k = dim//4)
 
         self.init_counter = 0
-        self.warmup_num = default(warmup_num,8192)
+        self.warmup_num = default(warmup_num,1024)
 
     def hidden_state_set(self,values):
         self.mem_dyn = values['mem_dyn']
@@ -1382,22 +1376,18 @@ class Dynamic_Memory(nn.Module):
         
         k,v = k.repeat(x.size(0),1,1,1),v.repeat(x.size(0),1,1,1)
         x = ckpt(self.attn,x,k,v)
+        
+        p = self.sigma(ckpt(self.p,self.mem_dyn.unsqueeze(0))).squeeze(0)
 
-        p,_ = self._p(self.mem_dyn.unsqueeze(0))
-        p = self.sigma(ckpt(self.p,p)).squeeze(0)
-
-        prob_aggr = reduce(p,"n d -> d",'mean')
+        prob_aggr = reduce(p,"n (d o) -> o",'mean',o=1)
         mem_dyn = self.mem_dyn.unsqueeze(0).unsqueeze(0)
 
         x = rearrange(x,"b h n d -> b n (h d)")
 
         if int(prob_aggr) > self.concentration_threshold  and  mem_dyn.size(-2)+(x.size(-2)/256) <= self.max_mem_dyn_len:
             if self.init_counter > self.warmup_num:
-                tokens = ckpt(self.scale_down,x).reshape(1,-1,x.size(-1))
-                tokens, _ = ckpt(self.norm_over_batch,tokens)
-                tokens = self.norm_over_batch_lin(tokens)
-
-                tokens = tokens.reshape(x.size(0),-1,x.size(-1))
+                tokens = ckpt(self.scale_down,x)
+                tokens = self.batch_norm(tokens)
                 tokens = reduce(tokens,"b n d -> n d",'mean').unsqueeze(0).unsqueeze(0)
                 mem_dyn = torch.cat((mem_dyn,tokens),dim=-2)
             
@@ -1441,7 +1431,7 @@ class Attention(nn.Module):
         qkv_bias = False,
         attn_out_bias = True,
         max_seq_len = 2**17,
-        pos_scales = 0,
+        pos_scales = None,
         content_rel_attn = True,
         rotary_pos_emb = True,
         fixed_emb = False,
@@ -1536,21 +1526,21 @@ class Attention(nn.Module):
                 self.attn_to_self = HAttention1D(heads=1)
         self.num_mem_kv = num_mem_kv
         num_prev_state = default(num_prev_state,num_mem_kv)
-        num_prev_mem = default(num_prev_mem,min(dim,num_mem_kv))
+        num_prev_mem = default(num_prev_mem,min(512,num_mem_kv))
         
         attn = 'performer'
 
-        if num_mem_kv > 0:
-            self.mem_k = nn.Parameter(torch.randn(self.heads, num_mem_kv, dim_head))
-            self.mem_v = nn.Parameter(torch.randn(self.heads, num_mem_kv, dim_head))
+        if exists(num_mem_kv) and num_mem_kv > 0:
+            self.mem_k = nn.Parameter(torch.randn( num_mem_kv, dim))
+            self.mem_v = nn.Parameter(torch.randn( num_mem_kv, dim))
             self.register_buffer(
                                 name='prev_state',
-                                tensor=torch.zeros((self.heads, num_prev_state, dim_head))
+                                tensor=torch.zeros(( num_prev_state, dim))
                                 )
             
             self.register_buffer(
                                 name='prev_mem',
-                                tensor=torch.zeros((self.heads, num_prev_mem, dim_head))
+                                tensor=torch.zeros(( num_prev_mem, dim))
                                 )
             if num_prev_mem > 0:
                 self.scale_down = nn.Sequential(
@@ -1566,9 +1556,9 @@ class Attention(nn.Module):
             #self.register_buffer(name='prev_state_supplementary',tensor=torch.eye(dim_head*self.heads))
             #self.prev_state_parameter = nn.Parameter(torch.randn((dim_head*self.heads,dim_head*self.heads)))
             self.hop_attn = hop_attn
-            self.mem_lin_k = nn.Linear(dim_head,dim_head)
-            self.mem_lin_v = nn.Linear(dim_head,dim_head)
-            self.out_mem = nn.Linear(dim_head,dim_head)
+            self.mem_lin_k = nn.Linear(dim,dim)
+            self.mem_lin_v = nn.Linear(dim,dim)
+            self.out_mem = nn.Linear(dim,dim)
             
             if attn == 'nystrom':
                 conv_in = dim_head + additional_head_dims if pos_scales and pos_scales!=None else heads
@@ -1582,8 +1572,8 @@ class Attention(nn.Module):
                 self.mem_attn = HAttention1D(heads=self.heads)
                 self.prev_state_attn = HAttention1D(heads=self.heads)
                 
-            self.out_k = nn.Linear(dim_head,dim_head)
-            self.out_v = nn.Linear(dim_head,dim_head)
+            self.out_k = nn.Linear(dim,dim)
+            self.out_v = nn.Linear(dim,dim)
 
             if pos_scales>0:
                 self.q_rel_pos_emb_mem = ConstrainedLinear(
@@ -1608,7 +1598,7 @@ class Attention(nn.Module):
 
     def hidden_state_set(self,values):
         self.prev_state = values['prev_state']
-        self.prev_emm = values['prev_mem']
+        self.prev_mem = values['prev_mem']
 
     def hidden_state_get(self):
         return {'prev_state':self.prev_state,'prev_mem':self.prev_mem}
@@ -1674,12 +1664,12 @@ class Attention(nn.Module):
 
         out = torch.cat(attn_outs, dim = 1)
 
-        if self.num_mem_kv > 0:
-            mem_k, mem_v, prev_state, prev_mem = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v, self.prev_state,self.prev_mem))
+        if self.mem_k.size(-2) > 0:
+            mem_k, mem_v, prev_state, prev_mem = map(lambda t: repeat(t, 'n d -> b n d', b = b), (self.mem_k, self.mem_v, self.prev_state,self.prev_mem))
 
             if exists(self.hop_attn):
-                hop_k = ckpt(self.hop_attn,tmp_k).reshape(b,self.heads,-1,d//h)
-                hop_v = ckpt(self.hop_attn,tmp_v).reshape(b,self.heads,-1,d//h)
+                hop_k = ckpt(self.hop_attn,tmp_k)
+                hop_v = ckpt(self.hop_attn,tmp_v)
                 mem_k = torch.cat((mem_k,hop_k),dim=-2)
                 mem_v = torch.cat((mem_v,hop_v),dim=-2)
 
@@ -1689,16 +1679,17 @@ class Attention(nn.Module):
             mem_v = self.mem_lin_v(mem_v) 
 
             if exists(self.pos_emb):
-                mem_k = mem_k + self.pos_emb(mem_k.reshape(b,-1,d)).reshape(b,h,-1,d//h)
+                mem_k = mem_k + self.pos_emb(mem_k)
 
             if exists(self.layer_pos_emb):
-                mem_pos_emb_mem_k = self.layer_pos_emb(mem_k.reshape(b,-1,d))
+                mem_pos_emb_mem_k = self.layer_pos_emb(mem_k)
             else:
                 mem_pos_emb_mem_k = None
 
             if exists(mem_pos_emb_mem_k):
-                mem_k = apply_rotary_emb(mem_k.reshape(b,-1,d), mem_pos_emb_mem_k).reshape(b,h,-1,d//h)
+                mem_k = apply_rotary_emb(mem_k, mem_pos_emb_mem_k)
 
+            mem_k, mem_v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h),(mem_k, mem_v))
             if self.pos_scales>0:
                 mem_pos_q = rearrange(self.rel_pos_emb_q_mem(torch.arange(out.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
                 mem_pos_k = rearrange(self.rel_pos_emb_k_mem(torch.arange(mem_k.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
@@ -1707,201 +1698,26 @@ class Attention(nn.Module):
                 mem_k = ckpt(self.k_rel_pos_emb_mem,mem_k,mem_pos_k)
 
             out = ckpt(self.mem_attn,out,mem_k,mem_v)
+            out = rearrange(out, 'b h n d -> b n (h d)')
             out = ckpt(self.out_mem,out)
-            self.prev_mem = reduce(torch.cat((prev_mem,self.scale_down(torch.cat((prev_mem,out),dim=-2))),dim=-2)[:,:,self.prev_mem.size(-2)],'b h n d -> h n d','mean').reshape(self.prev_mem.shape)
-
+            tmp = reduce(out,'b n d -> n d','mean')
+            tmp = torch.cat((self.prev_mem,tmp),dim=-2)
+            tmp = self.scale_down(tmp.unsqueeze(0)).squeeze(0)
+            self.prev_mem = torch.cat((self.prev_mem,tmp),dim=-2)[-self.prev_mem.size(-2):].reshape(self.prev_mem.shape)
+            
             out_k = self.out_k(out)
             out_v = self.out_v(out)
             #mat = torch.einsum("b n d, b n e -> b d e",rearrange(out_k,"b h n d -> b n (h d)"),rearrange(out_v,"b h n d -> b n (h d)"))
             #mat = torch.einsum("... i j, ... j k, b ... k l -> b i l",self.prev_state_supplementary,self.prev_state_parameter,mat)
             #prev_state = rearrange(torch.einsum("b n d, b d k -> b n k",rearrange(prev_state,"b h n d -> b n (h d)"),mat),"b n (h d) -> b h n d",h=h,d=d//h)
-            prev_state = ckpt(self.prev_state_attn,prev_state,out_k,out_v)
-            self.prev_state = reduce(prev_state,"b h n d -> h n d",'mean').reshape(self.prev_state.shape)
+            prev_state = ckpt(self.prev_state_attn,*map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h),(prev_state,out_k,out_v)))
+            self.prev_state = reduce(prev_state,"b h n d -> n (h d)",'mean').reshape(self.prev_state.shape)
             #self.prev_state_supplementary = reduce(mat,"b x y -> x y",'mean')
 
-
-        out = rearrange(out, 'b h n d -> b n (h d)')
-        out =  self.to_out(out)
         torch.cuda.empty_cache()
+
+        #out = rearrange(out, 'b h n d -> b n (h d)')
+        out =  self.to_out(out)
         out = self.dropout(out)
 
         return out
-
-class SelfAttention(Attention):
-    def forward(self, *args, context = None, **kwargs):
-        assert not exists(context), 'self attention should not receive context'
-        return super().forward(*args, **kwargs)
-
-class CrossAttention(Attention):
-    def forward(self, *args, context = None, **kwargs):
-        assert exists(context), 'cross attention should receive context'
-        return super().forward(*args, context = context, **kwargs)
-
-# performer
-
-class Performer(nn.Module):
-    def __init__(
-        self,
-        dim,
-        depth,
-        heads,
-        dim_head,
-        local_attn_heads = 0,
-        local_window_size = 256,
-        causal = False,
-        ff_mult = 4,
-        nb_features = None,
-        feature_redraw_interval = 1000,
-        reversible = False,
-        ff_chunks = 1,
-        generalized_attention = False,
-        kernel_fn = nn.ReLU(),
-        use_scalenorm = False,
-        use_rezero = False,
-        ff_glu = False,
-        ff_dropout = 0.,
-        attn_dropout = 0.,
-        cross_attend = False,
-        no_projection = False,
-        auto_check_redraw = True,
-        qkv_bias = True,
-        attn_out_bias = True
-    ):
-        super().__init__()
-        layers = nn.ModuleList([])
-        local_attn_heads = cast_tuple(local_attn_heads)
-        local_attn_heads = local_attn_heads * depth if len(local_attn_heads) == 1 else local_attn_heads
-        assert len(local_attn_heads) == depth, 'tuple specifying number of local attention heads per depth must be equal to the total depth'
-        assert all(map(lambda n: n >= 0 and n <= heads, local_attn_heads)), 'local attention head value must be less than the total number of heads'
-
-        if use_scalenorm:
-            wrapper_fn = partial(PreScaleNorm, dim)
-        elif use_rezero:
-            wrapper_fn = ReZero
-        else:
-            wrapper_fn = partial(PreLayerNorm, dim)
-
-        for _, local_heads in zip(range(depth), local_attn_heads):
-            layers.append(nn.ModuleList([
-                wrapper_fn(SelfAttention(dim, causal = causal, heads = heads, dim_head = dim_head, local_heads = local_heads, local_window_size = local_window_size, nb_features = nb_features, generalized_attention = generalized_attention, kernel_fn = kernel_fn, dropout = attn_dropout, no_projection = no_projection, qkv_bias = qkv_bias, attn_out_bias = attn_out_bias)),
-                wrapper_fn(Chunk(ff_chunks, FeedForward(dim, mult = ff_mult, dropout = ff_dropout, glu = ff_glu), along_dim = 1))
-            ]))
-
-            if not cross_attend:
-                continue
-
-            layers.append(nn.ModuleList([
-                wrapper_fn(CrossAttention(dim, heads = heads, dim_head = dim_head, nb_features = nb_features, generalized_attention = generalized_attention, kernel_fn = kernel_fn, dropout = attn_dropout, no_projection = no_projection, qkv_bias = qkv_bias, attn_out_bias = attn_out_bias)),
-                wrapper_fn(Chunk(ff_chunks, FeedForward(dim, mult = ff_mult, dropout = ff_dropout, glu = ff_glu), along_dim = 1))
-            ]))
-
-        execute_type = ReversibleSequence if reversible else SequentialSequence
-
-        route_attn = ((True, False),) * depth * (2 if cross_attend else 1)
-        route_context = ((False, False), (True, False)) * depth
-        attn_route_map = {'mask': route_attn, 'pos_emb': route_attn}
-        context_route_map = {'context': route_context, 'context_mask': route_context} if cross_attend else {}
-        self.net = execute_type(layers, args_route = {**attn_route_map, **context_route_map})
-
-        # keeping track of when to redraw projections for all attention layers
-        self.auto_check_redraw = auto_check_redraw
-        self.proj_updater = ProjectionUpdater(self.net, feature_redraw_interval)
-
-    def fix_projection_matrices_(self):
-        self.proj_updater.feature_redraw_interval = None
-
-    def forward(self, x, **kwargs):
-        if self.auto_check_redraw:
-            self.proj_updater.redraw_projections()
-        return self.net(x, **kwargs)
-
-class PerformerLM(nn.Module):
-    def __init__(
-        self,
-        *,
-        num_tokens,
-        max_seq_len,
-        dim,
-        depth,
-        heads,
-        dim_head = 64,
-        local_attn_heads = 0,
-        local_window_size = 256,
-        causal = False,
-        ff_mult = 4,
-        nb_features = None,
-        feature_redraw_interval = 1000,
-        reversible = False,
-        ff_chunks = 1,
-        ff_glu = False,
-        emb_dropout = 0.,
-        ff_dropout = 0.,
-        attn_dropout = 0.,
-        generalized_attention = False,
-        kernel_fn = nn.ReLU(),
-        use_scalenorm = False,
-        use_rezero = False,
-        cross_attend = False,
-        no_projection = False,
-        tie_embed = False,
-        rotary_position_emb = True,
-        axial_position_emb = False,
-        axial_position_shape = None,
-        auto_check_redraw = True,
-        qkv_bias = False,
-        attn_out_bias = False
-    ):
-        super().__init__()
-        local_attn_heads = cast_tuple(local_attn_heads)
-
-        self.max_seq_len = max_seq_len
-        self.token_emb = nn.Embedding(num_tokens, dim)
-
-        if rotary_position_emb:
-            self.pos_emb = FixedPositionalEmbedding(dim, max_seq_len)
-            self.layer_pos_emb = FixedPositionalEmbedding(dim_head, max_seq_len)
-        elif axial_position_emb:
-            axial_position_shape = default(axial_position_shape, (math.ceil(max_seq_len / 64), 64))
-            self.pos_emb = AxialPositionalEmbedding(dim, axial_position_shape)
-            self.layer_pos_emb = Always(None)
-        else:
-            self.pos_emb = AbsolutePositionalEmbedding(dim, max_seq_len)
-            self.layer_pos_emb = Always(None)
-
-        self.dropout = nn.Dropout(emb_dropout)
-
-        self.performer = Performer(dim, depth, heads, dim_head, local_attn_heads, local_window_size, causal, ff_mult, nb_features, feature_redraw_interval, reversible, ff_chunks, generalized_attention, kernel_fn, use_scalenorm, use_rezero, ff_glu, ff_dropout, attn_dropout, cross_attend, no_projection, auto_check_redraw, qkv_bias, attn_out_bias)
-        self.norm = ScaleNorm(dim)
-        self.to_out = nn.Linear(dim, num_tokens) if not tie_embed else None
-
-    def check_redraw_projections(self):
-        self.performer.check_redraw_projections()
-
-    def fix_projection_matrices_(self):
-        self.performer.fix_projection_matrices_()
-
-    def forward(self, x, return_encodings = False, **kwargs):
-        b, n, device = *x.shape, x.device
-        assert n <= self.max_seq_len, f'sequence length {n} must be less than the max sequence length {self.max_seq_len}'
-
-        # token and positional embeddings
-        x = self.token_emb(x)
-        x += self.pos_emb(x)
-
-        x = self.dropout(x)
-
-        # performer layers
-
-        layer_pos_emb = self.layer_pos_emb(x)
-        x = self.performer(x, pos_emb = layer_pos_emb, **kwargs)
-
-        # norm and to logits
-        x = self.norm(x)
-
-        if return_encodings:
-            return x
-
-        if exists(self.to_out):
-            return self.to_out(x)
-
-        return x @ self.token_emb.weight.t()
