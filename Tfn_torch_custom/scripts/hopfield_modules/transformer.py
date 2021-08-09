@@ -9,30 +9,7 @@ from typing import Optional, Tuple, Union
 from . import Hopfield
 
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-8):
-        super().__init__()
-        self.scale = dim ** -0.5
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
-        return x / norm.clamp(min = self.eps) * self.g
-
-class ScaleNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-4):
-        super().__init__()
-        self.scale = dim ** -0.5
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(1))
-
-    def forward(self, x):
-        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
-        return x / norm.clamp(min = self.eps) * self.g
-
-
-class HopfieldEncoderLayer(nn.Module):
+class HopfieldEncoderLayer(Module):
     """
     Module with underlying Hopfield association to be used as an encoder in transformer-like architectures.
     """
@@ -58,8 +35,8 @@ class HopfieldEncoderLayer(nn.Module):
         self.dropout_residual = nn.Dropout(dropout)
         self.linear_output = nn.Linear(dim_feedforward, self.hopfield_association.state_pattern_dim)
 
-        self.norm_residual = ScaleNorm(self.hopfield_association.state_pattern_dim)
-        self.norm_output = ScaleNorm(self.hopfield_association.state_pattern_dim)
+        self.norm_residual = nn.LayerNorm(self.hopfield_association.state_pattern_dim)
+        self.norm_output = nn.LayerNorm(self.hopfield_association.state_pattern_dim)
         self.dropout_hopfield_association = nn.Dropout(dropout)
         self.dropout_output = nn.Dropout(dropout)
 
@@ -121,7 +98,7 @@ class HopfieldEncoderLayer(nn.Module):
         return self.linear_output.out_features
 
 
-class HopfieldDecoderLayer(nn.Module):
+class HopfieldDecoderLayer(Module):
 
     def __init__(self,
                  hopfield_association_self: Hopfield,
@@ -147,9 +124,9 @@ class HopfieldDecoderLayer(nn.Module):
         self.dropout_residual = nn.Dropout(dropout)
         self.linear_output = nn.Linear(dim_feedforward, self.hopfield_association_self.state_pattern_dim)
 
-        self.norm_residual_self = ScaleNorm(self.hopfield_association_self.state_pattern_dim)
-        self.norm_residual_cross = ScaleNorm(self.hopfield_association_self.state_pattern_dim)
-        self.norm_output = ScaleNorm(self.hopfield_association_self.state_pattern_dim)
+        self.norm_residual_self = nn.LayerNorm(self.hopfield_association_self.state_pattern_dim)
+        self.norm_residual_cross = nn.LayerNorm(self.hopfield_association_self.state_pattern_dim)
+        self.norm_output = nn.LayerNorm(self.hopfield_association_self.state_pattern_dim)
         self.dropout_hopfield_association_self = nn.Dropout(dropout)
         self.dropout_hopfield_association_cross = nn.Dropout(dropout)
         self.dropout_output = nn.Dropout(dropout)

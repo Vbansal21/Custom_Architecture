@@ -22,7 +22,7 @@ def ckpt(f,*arg,checkpointed = checkpointed):
 class GatedConvolution(nn.Module):
     def __init__(self,d_model,patch_size=3,padding=1,dim=-1):
         super(GatedConvolution,self).__init__()
-        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=0,groups=1,bias=True)
+        self.conv = nn.Conv1d(in_channels=d_model, out_channels=2 * d_model,kernel_size=patch_size,padding=0,groups=d_model,bias=True)
         self.padding = padding*2
         self.dim = dim
         #init.xavier_uniform_(self.conv.weight, gain=1)
@@ -43,6 +43,18 @@ class GLU(nn.Module):
             x = convolution(x)
         return x
         
+class GEGLU(nn.Module):
+    def __init__(self, dim_in, dim_out=None,layers=1):
+        super().__init__()
+        if dim_out == None:
+            dim_out = dim_in
+        self.proj = nn.Sequential(
+            #GLU(dim_in,layers),
+            nn.Linear(dim_in, dim_out * 2))
+    def forward(self, x):
+        x, gate = self.proj(x).chunk(2, dim = -1)
+        return x * F.gelu(gate)   
+
 class SeparableConv1D(nn.Module):
     """ Input: (batch_size, in_channel, length)
         Output: (batch_size, out_channel, length)
@@ -116,7 +128,7 @@ class ET_Encoder_Block(nn.Module):
         else:
             self.feed_forward = ffd
         self.pkm = pkm
-        self.glu = GLU(d_model,1)
+        self.glu = GEGLU(d_model,1)
         self.left_net = nn.Sequential(
             nn.Conv1d(in_channels=d_model,out_channels=d_model*ff_hidden,kernel_size=1,padding=0,groups=1),
             nn.ReLU(),

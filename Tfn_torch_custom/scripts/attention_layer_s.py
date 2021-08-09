@@ -323,6 +323,18 @@ class GLU(nn.Module):
             x = convolution(x)
         return x
         
+class GEGLU(nn.Module):
+    def __init__(self, dim_in, dim_out=None,layers=1):
+        super().__init__()
+        if dim_out == None:
+            dim_out = dim_in
+        self.proj = nn.Sequential(
+            #GLU(dim_in,layers),
+            nn.Linear(dim_in, dim_out * 2))
+    def forward(self, x):
+        x, gate = self.proj(x).chunk(2, dim = -1)
+        return x * F.gelu(gate)   
+
 # positional embeddings/biases
 class LearnableSinusoidEncoding(nn.Module):
     """Layer converts scalar input to Sinusoid Encoding with learnt scaling."""
@@ -1076,7 +1088,7 @@ class NystromAttention(nn.Module):
         dim_head = 64,
         heads = 8,
         num_landmarks = 256,
-        pinv_iterations = 17,
+        pinv_iterations = 6,
         residual = True,
         context = False,
         residual_conv_kernel = 33,
@@ -1267,7 +1279,7 @@ class Dynamic_Memory(nn.Module):
                     max_len=None,
                     warmup_num=None,
                     num_mem_buffer=None,
-                    attn='performer',
+                    attn='nystrom',
                     nystromer_landmarks=None,
                     heads=8,
                     nb_features=1024,
@@ -1292,20 +1304,18 @@ class Dynamic_Memory(nn.Module):
                             tensor=torch.zeros((num_mem_buffer, dim))
                             )
         self.x_to_mem = nn.Sequential(
-            Rearrange("... x y -> ... y x"),
-            nn.Conv1d(dim,dim,12,4,6),
-            nn.Conv1d(dim,dim,12,4,6),
-            nn.Conv1d(dim,dim,12,4,6),
-            nn.Conv1d(dim,dim,12,4,6),
-            Rearrange("... x y -> ... y x"),
-        )
+                    Rearrange("... (l x) y -> ... l x y",l=1),
+                    nn.Conv2d(1,1,((256*3) + 1,1),(256,1),((256*3)//2,0)),
+                    Rearrange("... l x y -> ... (l x) y"),
+                )
+
         self.mem_to_kx = nn.Linear(dim, dim)
         self.mem_to_vx = nn.Linear(dim, dim)
         self.x_to_qx = nn.Linear(dim, dim)
 
         self.max_mem_dyn_len = default(max_len,num_mem_dyn*4)
 
-        nystromer_landmarks = default(nystromer_landmarks,32)
+        nystromer_landmarks = default(nystromer_landmarks,64)
         self.heads = heads
 
         if attn == 'nystrom':
@@ -1326,13 +1336,10 @@ class Dynamic_Memory(nn.Module):
         self.emb = RotaryEmbedding(dim)
 
         self.scale_down = nn.Sequential(
-            Rearrange("... x y -> ... y x"),
-            nn.Conv1d(dim,dim,12,4,6),
-            nn.Conv1d(dim,dim,12,4,6),
-            nn.Conv1d(dim,dim,12,4,6),
-            nn.Conv1d(dim,dim,12,4,6),
-            Rearrange("... x y -> ... y x"),
-        )
+                    Rearrange("... (l x) y -> ... l x y",l=1),
+                    nn.Conv2d(1,1,((256*3) + 1,1),(256,1),((256*3)//2,0)),
+                    Rearrange("... l x y -> ... (l x) y"),
+                )
 
         self.sigma = nn.Sigmoid()
         self.p = nn.Linear(dim,1)
@@ -1343,7 +1350,7 @@ class Dynamic_Memory(nn.Module):
 
         self.norm = RMSNorm(dim)
         self.gru = nn.GRUCell(dim,dim)
-        self.mogrifier = Mogrifier(dim, iters = 13, factorize_k = dim//4)
+        #self.mogrifier = Mogrifier(dim, iters = 13, factorize_k = dim//4)
 
         self.init_counter = 0
         self.warmup_num = default(warmup_num,1024)
@@ -1360,10 +1367,10 @@ class Dynamic_Memory(nn.Module):
             
         src = x.clone()
 
-        x = self.x_to_qx(self.norm(x))
+        x = Positional_Encoding(self.x_to_qx(self.norm(x)))
         
         kv = torch.cat((self.compressed_mem_buffer,self.mem_buffer,self.mem_static,self.mem_dyn),dim=-2).unsqueeze(0)
-        k,v = self.mem_to_kx(kv),self.mem_to_vx(kv)
+        k,v = Positional_Encoding(self.mem_to_kx(kv)),self.mem_to_vx(kv)
 
         pos_emb_x = self.emb(x)
         pos_emb_k = self.emb(k)
@@ -1377,7 +1384,7 @@ class Dynamic_Memory(nn.Module):
         k,v = k.repeat(x.size(0),1,1,1),v.repeat(x.size(0),1,1,1)
         x = ckpt(self.attn,x,k,v)
         
-        p = self.sigma(ckpt(self.p,self.mem_dyn.unsqueeze(0))).squeeze(0)
+        p = self.sigma(self.p(self.mem_dyn.unsqueeze(0))).squeeze(0)
 
         prob_aggr = reduce(p,"n (d o) -> o",'mean',o=1)
         mem_dyn = self.mem_dyn.unsqueeze(0).unsqueeze(0)
@@ -1393,7 +1400,7 @@ class Dynamic_Memory(nn.Module):
             
             self.init_counter += 1
 
-        x,src = self.mogrifier(x,src)
+        #x,src = self.mogrifier(x,src)
 
         x_shape = x.shape
 
@@ -1412,7 +1419,10 @@ class Dynamic_Memory(nn.Module):
 
         return (x, p,self.mem_dyn.size(-2),((abs(self.mem_dyn.size(-2)**2 - self.mem_dyn_len**2)**0.5) / self.mem_dyn_len))
     
+
+from memory_profiler import profile
 class Attention(nn.Module):
+    @profile
     def __init__(
         self,
         dim,
@@ -1463,7 +1473,7 @@ class Attention(nn.Module):
         self.heads = heads
         self.global_heads = global_heads = heads - local_heads
 
-        nystromer_landmarks = default(nystromer_landmarks,512)
+        nystromer_landmarks = default(nystromer_landmarks,128)
         if attn == 'nystrom':
             conv_in = dim_head + additional_head_dims if pos_scales and pos_scales!=None else global_heads
             conv_out = dim_headif if pos_scales and pos_scales!=None else global_heads
@@ -1528,7 +1538,7 @@ class Attention(nn.Module):
         num_prev_state = default(num_prev_state,num_mem_kv)
         num_prev_mem = default(num_prev_mem,min(512,num_mem_kv))
         
-        attn = 'performer'
+        attn = 'nystrom'
 
         if exists(num_mem_kv) and num_mem_kv > 0:
             self.mem_k = nn.Parameter(torch.randn( num_mem_kv, dim))
@@ -1544,12 +1554,9 @@ class Attention(nn.Module):
                                 )
             if num_prev_mem > 0:
                 self.scale_down = nn.Sequential(
-                    Rearrange("... x y -> ... y x"),
-                    nn.Conv1d(dim,dim,12,4,6),
-                    nn.Conv1d(dim,dim,12,4,6),
-                    nn.Conv1d(dim,dim,12,4,6),
-                    nn.Conv1d(dim,dim,12,4,6),
-                    Rearrange("... x y -> ... y x"),
+                    Rearrange("... (l x) y -> ... l x y",l=1),
+                    nn.Conv2d(1,1,((256*3) + 1,1),(256,1),((256*3)//2,0)),
+                    Rearrange("... l x y -> ... (l x) y"),
                 )
             else:
                 self.scale_down = nn.Identity()
@@ -1614,7 +1621,7 @@ class Attention(nn.Module):
         context = default(context, x)
         context_mask = default(context_mask, mask) if not cross_attend else context_mask
 
-        q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
+        q, k, v = Positional_Encoding(self.to_q(x)), Positional_Encoding(self.to_k(context)), self.to_v(context)
 
         pos_emb_q = self.layer_pos_emb(q) if exists(self.layer_pos_emb) else None
         pos_emb_k = self.layer_pos_emb(k) if exists(self.layer_pos_emb) else None
@@ -1689,7 +1696,7 @@ class Attention(nn.Module):
             if exists(mem_pos_emb_mem_k):
                 mem_k = apply_rotary_emb(mem_k, mem_pos_emb_mem_k)
 
-            mem_k, mem_v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h),(mem_k, mem_v))
+            mem_k, mem_v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h),(Positional_Encoding(mem_k), mem_v))
             if self.pos_scales>0:
                 mem_pos_q = rearrange(self.rel_pos_emb_q_mem(torch.arange(out.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')
                 mem_pos_k = rearrange(self.rel_pos_emb_k_mem(torch.arange(mem_k.size(-2), dtype=torch.float32,device=x.device)[None, :, None]),'b n p d -> b n (p d)')

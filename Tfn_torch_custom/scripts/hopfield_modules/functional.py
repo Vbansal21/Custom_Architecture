@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from torch.tensor import Tensor
+from torch import Tensor
 from typing import Optional, Tuple, Union
 
 
@@ -329,15 +329,15 @@ def hopfield_core_forward(query,                           # type: Tensor
                     weight=p_norm_weight, bias=p_norm_bias).reshape(shape=k.shape)
 
         else:
-            active_xi = xi.masked_select(mask=update_active_heads).reshape(-1, *xi.shape[1:])
-            active_k = k.masked_select(mask=update_active_heads).reshape(-1, *k.shape[1:])
+            active_xi = xi.masked_select(mask=update_active_heads).view(size=(-1, *xi.shape[1:]))
+            active_k = k.masked_select(mask=update_active_heads).view(size=(-1, *k.shape[1:]))
             q = torch.masked_scatter(input=q, mask=update_active_heads, source=torch.bmm(active_xi, active_k))
 
         # Optionally scale association heads (each head separately).
         if type(scaling) == float:
             q = q * scaling
         elif type(scaling) == torch.Tensor:
-            q = q * scaling.reshape(1, 1, -1).repeat(repeats=(1, 1, q.shape[2] // scaling.shape[0]))
+            q = q * scaling.view(1, 1, -1).repeat(repeats=(1, 1, q.shape[2] // scaling.shape[0]))
 
         if update_step == 0:
             # convert ByteTensor key_padding_mask to bool
@@ -363,11 +363,11 @@ def hopfield_core_forward(query,                           # type: Tensor
                 assert bias_k is None
                 assert bias_v is None
 
-            q = q.contiguous().reshape(tgt_len, -1, head_dim).transpose(0, 1)
+            q = q.contiguous().view(tgt_len, -1, head_dim).transpose(0, 1)
             if k is not None:
-                k = k.contiguous().reshape(-1, bsz * num_heads, head_dim).transpose(0, 1)
+                k = k.contiguous().view(-1, bsz * num_heads, head_dim).transpose(0, 1)
             if v is not None:
-                v = v.contiguous().reshape(v.shape[0], bsz * num_heads, -1).transpose(0, 1)
+                v = v.contiguous().view(v.shape[0], bsz * num_heads, -1).transpose(0, 1)
 
             if static_k is not None:
                 assert static_k.size(0) == bsz * num_heads
@@ -404,23 +404,23 @@ def hopfield_core_forward(query,                           # type: Tensor
                 attn_output_weights += attn_mask
 
         if key_padding_mask is not None:
-            attn_output_weights = attn_output_weights.reshape(bsz, num_heads, tgt_len, src_len)
+            attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
             attn_output_weights = attn_output_weights.masked_fill(
                 key_padding_mask.unsqueeze(1).unsqueeze(2),
                 float('-inf'),
             )
-            attn_output_weights = attn_output_weights.reshape(bsz * num_heads, tgt_len, src_len)
+            attn_output_weights = attn_output_weights.view(bsz * num_heads, tgt_len, src_len)
 
         # Compute new xi for Hopfield retrieve iterations.
         if xi is None:
             xi = nn.functional.softmax(attn_output_weights, dim=-1)
         else:
             xi = torch.masked_scatter(input=xi, mask=update_active_heads, source=nn.functional.softmax(
-                attn_output_weights.masked_select(mask=update_active_heads).reshape(-1, *xi.shape[1:])), dim=-1)
+                attn_output_weights.masked_select(mask=update_active_heads).view(size=(-1, *xi.shape[1:])), dim=-1))
 
         # Compute threshold-based stopping criterion for Hopfield retrieve iterations.
         with torch.no_grad():
-            xi_active = xi.reshape(bsz, num_heads, tgt_len, src_len)
+            xi_active = xi.view(size=(bsz, num_heads, tgt_len, src_len))
             update_active_heads = (update_step < update_steps_max) | (update_steps_max < 0)
             if xi_old is not None:
                 update_active_heads &= ((xi_old - xi_active).norm(p=2, dim=(2, 3)).max(axis=0)[0]) > update_steps_eps
@@ -435,16 +435,16 @@ def hopfield_core_forward(query,                           # type: Tensor
     attn_output_weights = nn.functional.dropout(xi, p=dropout_p, training=training)
     attn_output = torch.bmm(attn_output_weights, v)
     assert list(attn_output.shape[:2]) == [bsz * num_heads, tgt_len]
-    attn_output = attn_output.transpose(0, 1).contiguous().reshape(tgt_len, bsz, -1)
+    attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len, bsz, -1)
     if out_proj_weight is not None:
         assert attn_output.shape[2] == num_heads * pattern_dim
         attn_output = nn.functional.linear(attn_output, out_proj_weight, out_proj_bias)
 
-    xi = xi.reshape(bsz, num_heads, tgt_len, src_len) if return_raw_associations else None
-    v = v.reshape(bsz, num_heads, src_len, -1) if return_projected_patterns else None
+    xi = xi.view(bsz, num_heads, tgt_len, src_len) if return_raw_associations else None
+    v = v.view(bsz, num_heads, src_len, -1) if return_projected_patterns else None
     if need_weights:
         # average attention weights over heads
-        attn_output_weights = attn_output_weights.reshape(bsz, num_heads, tgt_len, src_len)
+        attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
         return attn_output, attn_output_weights.sum(dim=1) / num_heads, xi, v
     else:
         return attn_output, None, xi, v

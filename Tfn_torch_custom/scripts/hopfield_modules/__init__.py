@@ -8,30 +8,8 @@ from typing import Optional, Tuple, Union
 
 from .activation import HopfieldCore
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-8):
-        super().__init__()
-        self.scale = dim ** -0.5
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(dim))
 
-    def forward(self, x):
-        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
-        return x / norm.clamp(min = self.eps) * self.g
-
-class ScaleNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-4):
-        super().__init__()
-        self.scale = dim ** -0.5
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(1))
-
-    def forward(self, x):
-        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
-        return x / norm.clamp(min = self.eps) * self.g
-
-
-class Hopfield(nn.Module):
+class Hopfield(Module):
     """
     Module with underlying Hopfield association.
     """
@@ -370,7 +348,7 @@ class Hopfield(nn.Module):
         return self.hopfield.normalize_hopfield_space_affine
 
 
-class HopfieldPooling(nn.Module):
+class HopfieldPooling(Module):
     """
     Wrapper class encapsulating a trainable but fixed state pattern and "Hopfield" in
     one combined module to be used as a Hopfield-based pooling layer.
@@ -638,7 +616,7 @@ class HopfieldPooling(nn.Module):
         return self.hopfield.normalize_pattern_projection_affine
 
 
-class HopfieldLayer(nn.Module):
+class HopfieldLayer(Module):
     """
     Wrapper class encapsulating a trainable but fixed stored pattern, pattern projection and "Hopfield" in
     one combined module to be used as a Hopfield-based pooling layer.
@@ -652,7 +630,7 @@ class HopfieldLayer(nn.Module):
                  num_heads: int = 1,
                  scaling: Optional[Union[float, Tensor]] = None,
                  update_steps_max: Optional[Union[int, Tensor]] = 0,
-                 update_steps_eps: Union[float, Tensor] = 1e-7,
+                 update_steps_eps: Union[float, Tensor] = 1e-4,
                  lookup_weights_as_separated: bool = False,
                  lookup_targets_as_trainable: bool = True,
 

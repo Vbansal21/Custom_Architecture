@@ -45,7 +45,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #device = torch.device("cpu")
 
 if torch.cuda.is_available():
-    torch.backends.cudnn.deterministic = True
+    pass
+    #torch.backends.cudnn.deterministic = True
 
 def exists(val):
     return val is not None
@@ -89,8 +90,8 @@ def fetch_rotary_parameters(module,module_to_find=nn.Linear):
     return params, rest
 
 def Positional_Encoding(x: Tensor) -> Tensor :
-    max_len = x.size(1)
-    d_model = x.size(2)
+    max_len = x.size(-2)
+    d_model = x.size(-1)
     pe = torch.zeros(max_len, d_model)
     position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
     div_term = torch.exp(torch.arange(0, d_model, 2).to(x.dtype) * (-math.log(10000.0) / d_model))
@@ -150,14 +151,14 @@ class GEGLU(Module):
     def __init__(self, dim_in, dim_out,layers=1):
         super().__init__()
         self.proj = nn.Sequential(
-            GLU(dim_in,layers),
+            #GLU(dim_in,layers),
             nn.Linear(dim_in, dim_out * 2))
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim = -1)
         return x * F.gelu(gate)   
 
 class GRUGating(nn.Module):
-    def __init__(self, dim, fn=None, mogrify = True, norm = True):
+    def __init__(self, dim, fn=None, mogrify = False, norm = True):
         super().__init__()
         self.dim = dim
         self.fn = fn if exists(fn) else Identity()
@@ -186,21 +187,25 @@ class GRUGating(nn.Module):
         return out
 
 class FFd(Module):
-    def __init__(self,dim,activation="sigmoid",layers=1,kernal_size=3,mult=4,fn=None,):
+    def __init__(self,dim,activation="lrelu",layers=1,kernal_size=1,mult=4,fn=None,):
         super(FFd,self).__init__()
         kernal_size = (kernal_size//2)*2 + 1
-        self.l_1 = nn.Sequential(
-            nn.Conv1d(dim,dim*mult,kernal_size,1,padding=0,groups=1),
+        self.l_1 = GEGLU(dim,dim*mult,layers) 
+        self.padding = kernal_size - 1
+        self.l_2 = nn.Sequential(
+            #Rearrange("... (l x) y -> ... l x y",l=1),
+            #nn.ZeroPad2d(((dim*mult*3)//2,(dim*mult*3)//2,self.padding,0)),
+            #nn.Conv2d(1,1,(kernal_size,dim*mult*3 + 1),stride=(1,mult),padding=(0,0),groups=1),
+            #Rearrange("... l x y -> ... (l x) y"),
+            nn.Linear(dim*mult,dim),
             _get_activation_fn(activation),
         )
-        self.padding = kernal_size - 1
-        self.l_2 = GEGLU(dim*mult,dim,layers)
 
         self.fn = fn if isinstance(fn,nn.ModuleList) else ((nn.ModuleList([i for i in fn if i != None]) if isinstance(fn,Iterable) else nn.ModuleList((fn,))) if fn !=None else None)
         self.lin = (nn.Linear((len(fn)+1)*dim,dim) if isinstance(fn,nn.ModuleList) else nn.Linear(2*dim,dim)) if exists(self.fn) else None
 
     def forward(self,x,*args):
-        out = ckpt(self.l_1,F.pad(x.transpose(1,2),(self.padding,0),value=0)).transpose(1,2)
+        out = ckpt(self.l_1,x)
         out = ckpt(self.l_2,out)
         if self.fn != None:
             for fn in self.fn:
@@ -321,7 +326,7 @@ class ACT_basic(nn.Module):
 
 class TransformerBlock(Module):
 
-    #@profile
+    @profile
     def __init__(self,
                      d_model=256,
                      nhead=8, 
@@ -352,14 +357,14 @@ class TransformerBlock(Module):
         
         self.dropout = nn.ModuleList([Dropout(dropout) for _ in range(9 if (encoder_n_decoder and decoder) else 7)])
 
-        pkm_keys = default(pkm_keys,64)
+        pkm_keys = default(pkm_keys,32)
 
         mem_kv = default(mem_kv,1024)
 
         modes = default(modes,nhead)
         width = default(width,nhead)
 
-        pkm = PKM(d_model,num_keys=pkm_keys)
+        pkm = PKM(d_model,heads=1,num_keys=pkm_keys,topk=min(pkm_keys,nhead))
 
         self.conformer = GRUGating(d_model,fn=ConformerConvModule(d_model,expansion_factor=dim_ffd_mult//2,causal=True,dropout=dropout),norm=False)
 
@@ -373,6 +378,7 @@ class TransformerBlock(Module):
 
         if hopfield:
             self.hopfield = GRUGating(d_model,fn=HopfieldLayer(input_size=d_model,
+                                                            update_steps_max=-1,
                                                             dropout=dropout))
         else:
             self.hopfield = Identity()
@@ -401,7 +407,21 @@ class TransformerBlock(Module):
                                 context=context,
                                 use_mask=use_mask,
                                 ff_hidden=dim_ffd_mult,
-                                ) if ET else attn
+                                ) if ET else Attention(d_model,
+                                            heads=nhead,
+                                            dim_head=d_model//nhead,
+                                            num_mem_kv=mem_kv,
+                                            num_prev_state=prev_state_kv,
+                                            num_prev_mem=num_prev_mem,
+                                            local_heads=local_heads,
+                                            #hop_attn=copy.deepcopy(hop_attn),
+                                            rotary_pos_emb=rotary_pos_emb,
+                                            causal=causal,
+                                            attn=attn,
+                                            attend_to_self=False,
+                                            context=False,
+                                            use_mask=use_mask,
+                                        )
         else:
             self.self_inp_enc = (GRUGating(
                                             d_model,
@@ -1442,12 +1462,9 @@ class TransformerX(Module):
         self.mem_exist = True if self.mem_parameters else False
         self.mem = nn.Parameter(torch.randn(self.mem_parameters,self.dim_hidden)) if self.mem_exist else None
             
-        self.seq_scale_down = self.seq_scale_down
         self.attn_len = (self.seq_scale_down*3 // 2)*2 + 1
-
-        self.scale_down_conv = nn.Conv1d(self.dim_hidden,self.dim_hidden,self.seq_scale_down*3,self.seq_scale_down,groups=1)
-
-        self.scale_up_conv = nn.ConvTranspose1d(self.dim_hidden,self.dim_hidden,self.seq_scale_down*3,self.seq_scale_down,groups=1)
+        self.scale_down_conv = nn.Conv1d(self.dim_hidden,self.dim_hidden,self.seq_scale_down*3,self.seq_scale_down,groups=1) if self.seq_scale_down > 1 else None
+        self.scale_up_conv = nn.ConvTranspose1d(self.dim_hidden,self.dim_hidden,self.seq_scale_down*3,self.seq_scale_down,groups=1) if self.seq_scale_down > 1 else None
 
         self.proj_updater = ProjectionUpdater(nn.ModuleList([self.transformer_layers,self.dynamic_memory]), self.feature_redraw_interval)
 
@@ -1559,6 +1576,8 @@ class TransformerX(Module):
 
         start_time = time.time()
 
+        seq_scale_down = False if not exists(self.scale_down_conv) else seq_scale_down
+
         self.prev_states.append(self.get_prev_state())
         while len(self.prev_states) > self.max_prev_states:
             tmp = self.prev_states.pop(0)
@@ -1571,9 +1590,9 @@ class TransformerX(Module):
 
         output = self.embedding_encoder(src)
         output = output * math.sqrt(self.dim_hidden)
-        output = ckpt(self.ffd1,output)
 
         output = Positional_Encoding(output)
+        output = ckpt(self.ffd1,output)
 
         if seq_scale_down:
             output = ckpt(self.scale_down_conv,F.pad(output.transpose(-1,-2),((self.seq_scale_down*3 - 1),0),value=0)).transpose(-1,-2)
