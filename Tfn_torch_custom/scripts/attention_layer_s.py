@@ -1353,7 +1353,7 @@ class Dynamic_Memory(nn.Module):
         #self.mogrifier = Mogrifier(dim, iters = 13, factorize_k = dim//4)
 
         self.init_counter = 0
-        self.warmup_num = default(warmup_num,1024)
+        self.warmup_num = default(warmup_num,128)
 
     def hidden_state_set(self,values):
         self.mem_dyn = values['mem_dyn']

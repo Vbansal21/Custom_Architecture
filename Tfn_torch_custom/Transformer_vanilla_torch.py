@@ -199,7 +199,7 @@ repeated_main_layers: int = 32
 nhead: int = 8 if ET else 16
 dropout: float = (math.pi/10) # 0 <= dropout < ; pi/10 --> 0.3141592653589 : recommended
 mem_tokens: int = 1024
-bptt: int = (1024*4) #- mem_tokens
+bptt: int = (1000*4) #- mem_tokens
 bptt_deviation: int = 64
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
@@ -222,7 +222,7 @@ progressive_generation: bool = True
 use_deepspeed: bool = False
 encoder_n_decoder: bool = True
 
-use_sgd: bool = True
+use_sgd: bool = False
 
 
 def batchify(data, bsz,dim=0):
@@ -544,7 +544,7 @@ except Exception as e:
     torch.save(processed_test_data,"models/data_"+str(vocab_size)+"/"+file+"_test.tar")
     torch.save(processed_val_data,"models/data_"+str(vocab_size)+"/"+file+"_val.tar")
 
-from scripts.model import TransformerX, Trainer
+from scripts.model import TransformerX, Trainer,fetch_optimizer_parameters
 torch.cuda.empty_cache()
 
 deepspeed_args = {
@@ -686,22 +686,22 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 1
+lr = 0.0005
 
 if not use_deepspeed:
     if use_sgd:
         if discriminator:
-            optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-            optimizer_disc = torch.optim.SGD(discriminator_model.parameters(), lr=lr)
+            optimizer = torch.optim.SGD(fetch_optimizer_parameters(model), lr=lr)
+            optimizer_disc = torch.optim.SGD(fetch_optimizer_parameters(discriminator_model), lr=lr)
         else:
-            optimizer = torch.optim.SGD(model.parameters(),lr=lr)
+            optimizer = torch.optim.SGD(fetch_optimizer_parameters(model),lr=lr)
             optimizer_disc = None
     else:
         if discriminator:
-            optimizer = torch.optim.Adadelta(model.parameters(), lr=lr)
-            optimizer_disc = torch.optim.Adadelta(discriminator_model.parameters(), lr=lr)
+            optimizer = torch.optim.Adadelta(fetch_optimizer_parameters(model), lr=lr)
+            optimizer_disc = torch.optim.Adadelta(fetch_optimizer_parameters(discriminator_model), lr=lr)
         else:
-            optimizer = torch.optim.Adadelta(model.parameters(),lr=lr)
+            optimizer = torch.optim.Adadelta(fetch_optimizer_parameters(model),lr=lr)
             optimizer_disc = None
 
 else:
@@ -719,7 +719,10 @@ def lambda_lr(step_):
     def sub_func(step):
         return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 
-    return sub_func(step_)
+    if step_ < 256:
+        return 2 - step_/384
+    else:
+        return sub_func(step_)
 
     if step_<(1024*(1/lr)/(lr*multiplier**(math.pi*2/10))):
         return sub_func(step_)
@@ -746,10 +749,14 @@ epochs = 2
 
 import matplotlib.pyplot as plt
 plt.ion()
+plt.plot([lambda_lr(i)*lr for i in range(max(2000,int((processed_train_data.size(1)*epochs) / (bptt*batch_size))))])
+plt.draw()
+plt.pause(20.0)
+plt.close()
 plt.plot([lambda_lr(i)*lr for i in range(max(100000,int((processed_train_data.size(1)*epochs) / (bptt*batch_size))))])
 #plt.show(block=False)
 plt.draw()
-plt.pause(15.0)
+plt.pause(20.0)
 plt.close()
 del(plt)
 

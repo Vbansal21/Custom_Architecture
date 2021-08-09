@@ -23,7 +23,7 @@ from mogrifier import Mogrifier
 from functools import partial
 
 from .evolved_transformer_block import ET_Encoder_Block,ET_Decoder_Block, GLU
-from .product_key_memory import PKM
+from .product_key_memory import PKM,fetch_optimizer_parameters
 from .hopfield_modules import HopfieldLayer
 from .attention_layer_s import Attention,ProjectionUpdater,find_modules, RotaryEmbedding, Dynamic_Memory
 from .conformer import ConformerConvModule
