@@ -720,7 +720,7 @@ def lambda_lr(step_):
         return (((a/b * (multiplier*step) + 1) / ((multiplier*step)**2 + a)) + c)/((step*(multiplier/200))**0.1+1)
 
     if step_ < 256:
-        return 2 - step_/384
+        return (2 - step_/128)*(1/lr)
     else:
         return sub_func(step_)
 
@@ -753,7 +753,7 @@ plt.plot([lambda_lr(i)*lr for i in range(max(2000,int((processed_train_data.size
 plt.draw()
 plt.pause(20.0)
 plt.close()
-plt.plot([lambda_lr(i)*lr for i in range(max(100000,int((processed_train_data.size(1)*epochs) / (bptt*batch_size))))])
+plt.plot([lambda_lr(i)*lr for i in range(255,255+max(100000,int((processed_train_data.size(1)*epochs) / (bptt*batch_size))))])
 #plt.show(block=False)
 plt.draw()
 plt.pause(20.0)
