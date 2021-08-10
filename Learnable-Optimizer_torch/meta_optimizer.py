@@ -100,7 +100,7 @@ class FastMetaOptimizer(nn.Module):
 
     def forward(self, x):
         # Gradients preprocessing
-        x = F.sigmoid(self.linear1(x))
+        x = torch.sigmoid(self.linear1(x))
         return x.split(1, 1)
 
     def reset_lstm(self, keep_states=False, model=None, use_cuda=False):

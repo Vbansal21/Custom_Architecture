@@ -74,11 +74,11 @@ def discretized_mix_logistic_loss(
     cdf_min = torch.sigmoid(min_in)
 
     # log probability for edge case of 0 (before scaling)
-    # equivalent: torch.log(F.sigmoid(plus_in))
+    # equivalent: torch.log(torch.sigmoid(plus_in))
     log_cdf_plus = plus_in - F.softplus(plus_in)
 
     # log probability for edge case of 255 (before scaling)
-    # equivalent: (1 - F.sigmoid(min_in)).log()
+    # equivalent: (1 - torch.sigmoid(min_in)).log()
     log_one_minus_cdf_min = -F.softplus(min_in)
 
     # probability for all other cases

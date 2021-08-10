@@ -242,7 +242,7 @@ class AbsolutePositionalEmbedding(Module):
             return tmp
 
 class ACT_basic(nn.Module):
-    def __init__(self,hidden_size,function,threshold=0.1,factor=3,max_hop=None,checkpointed=False):
+    def __init__(self,hidden_size,function,threshold=0.1,factor=3,max_hop=None,checkpointed=checkpointed):
         super(ACT_basic, self).__init__()
         self.sigma = nn.Sigmoid()
         self.max_hop = max_hop
@@ -355,7 +355,7 @@ class TransformerBlock(Module):
                 ):
         super(TransformerBlock, self).__init__()
         
-        self.dropout = nn.ModuleList([Dropout(dropout) for _ in range(6 if (encoder_n_decoder and decoder) else 4)])
+        self.dropout = nn.ModuleList([Dropout(dropout) for _ in range((6 if (encoder_n_decoder and decoder) else 4) - int(not ET))])
 
         pkm_keys = default(pkm_keys,32)
 
@@ -389,7 +389,10 @@ class TransformerBlock(Module):
 
         self.feed_forward = GRUGating(d_model,fn=ffd1)
 
-        self.to_out = copy.deepcopy(self.feed_forward)
+        if not ET:
+            self.to_out = copy.deepcopy(self.feed_forward)
+        else:   
+            self.to_out = None
 
         if not decoder:
             attn_block = ET_Encoder_Block(d_model,
@@ -407,6 +410,7 @@ class TransformerBlock(Module):
                                 context=context,
                                 use_mask=use_mask,
                                 ff_hidden=dim_ffd_mult,
+                                ffd = copy.deepcopy(ffd1),
                                 ) if ET else Attention(d_model,
                                             heads=nhead,
                                             dim_head=d_model//nhead,
@@ -439,7 +443,7 @@ class TransformerBlock(Module):
                                                                 attend_to_self=attend_to_self,
                                                                 context=context,
                                                                 use_mask=use_mask,
-                                                                ff_hidden=dim_ffd_mult,
+                                                                ff_hidden=1,
                                                                 ),
                                     norm=False) if ET else GRUGating(d_model,fn = Attention(d_model,
                                             heads=nhead,
@@ -473,7 +477,7 @@ class TransformerBlock(Module):
                                                                 attend_to_self=attend_to_self,
                                                                 context=context,
                                                                 use_mask=use_mask,
-                                                                ff_hidden=dim_ffd_mult,
+                                                                ff_hidden=1,
                                                                 ),
                                     norm=False) if ET else GRUGating(d_model,fn = Attention(d_model,
                                             heads=nhead,
@@ -506,6 +510,7 @@ class TransformerBlock(Module):
                                 attend_to_self=attend_to_self,
                                 context=context,
                                 use_mask=use_mask,
+                                ffd = copy.deepcopy(ffd1),
                                 ) if ET else Attention(d_model,
                                                             heads=nhead,
                                                             dim_head=d_model//nhead,
@@ -550,11 +555,12 @@ class TransformerBlock(Module):
         output = ckpt(self.attn,output,output,context,src_mask)
         output = self.dropout[1](output)
 
-        output = ckpt(self.to_out,output)
-        output = self.dropout[2](output)
+        if exists(self.to_out):
+            output = ckpt(self.to_out,output)
+            output = self.dropout[3](output)
         
         output = ckpt(self.mlp,output)
-        output = self.dropout[3](output)
+        output = self.dropout[2](output)
 
         return output
 

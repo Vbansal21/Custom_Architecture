@@ -64,7 +64,7 @@ class PreNorm(nn.Module):
 class GEGLU(nn.Module):
     def forward(self, x):
         x, gates = x.chunk(2, dim = -1)
-        return x * F.gelu(gates)
+        return x * F.gelu(gate)
 
 class ScaleNorm(nn.Module):
     def __init__(self, dim, eps = 1e-4):

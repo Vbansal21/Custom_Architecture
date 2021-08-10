@@ -333,7 +333,7 @@ class GEGLU(nn.Module):
             nn.Linear(dim_in, dim_out * 2))
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim = -1)
-        return x * F.gelu(gate)   
+        return x * F.gelu(gate)
 
 # positional embeddings/biases
 class LearnableSinusoidEncoding(nn.Module):
@@ -1261,7 +1261,7 @@ class NystromAttention(nn.Module):
 
         #out = rearrange(out, 'b h n d -> b n (h d)', h = h)
         #out = self.to_out(out)
-        out = out[:, :, -n:].reshape(q_shape)
+        out = out[:, :, -n:]
 
         if return_attn:
             #attn = (attn1.to(torch.device('cpu')) @ attn2_inv.to(torch.device('cpu')) @ attn3.to(torch.device('cpu'))).to(torch.device(q.device))
@@ -1315,7 +1315,7 @@ class Dynamic_Memory(nn.Module):
 
         self.max_mem_dyn_len = default(max_len,num_mem_dyn*4)
 
-        nystromer_landmarks = default(nystromer_landmarks,64)
+        nystromer_landmarks = default(nystromer_landmarks,16)
         self.heads = heads
 
         if attn == 'nystrom':
@@ -1344,7 +1344,7 @@ class Dynamic_Memory(nn.Module):
         self.sigma = nn.Sigmoid()
         self.p = nn.Linear(dim,1)
 
-        self.concentration_threshold = 0.95
+        self.concentration_threshold = 0.90
 
         self.batch_norm = nn.BatchNorm1d(dim)
 
@@ -1353,7 +1353,7 @@ class Dynamic_Memory(nn.Module):
         #self.mogrifier = Mogrifier(dim, iters = 13, factorize_k = dim//4)
 
         self.init_counter = 0
-        self.warmup_num = default(warmup_num,128)
+        self.warmup_num = default(warmup_num,48)
 
     def hidden_state_set(self,values):
         self.mem_dyn = values['mem_dyn']
@@ -1441,7 +1441,7 @@ class Attention(nn.Module):
         qkv_bias = False,
         attn_out_bias = True,
         max_seq_len = 2**17,
-        pos_scales = None,
+        pos_scales = -1,
         content_rel_attn = True,
         rotary_pos_emb = True,
         fixed_emb = False,
@@ -1464,7 +1464,10 @@ class Attention(nn.Module):
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
         inner_dim = dim_head * heads
-        self.pos_scales = pos_scales = int(default(pos_scales,2 * math.log(2,dim)))
+        if pos_scales == -1:
+            pos_scales = dim_head
+        pos_scales = int(default(pos_scales,2 * math.log(2,dim)))
+        self.pos_scales = pos_scales
         #dim_head += 2*pos_scales
         additional_head_dims = 2*pos_scales if not content_rel_attn else 4*pos_scales
 
@@ -1475,8 +1478,8 @@ class Attention(nn.Module):
 
         nystromer_landmarks = default(nystromer_landmarks,128)
         if attn == 'nystrom':
-            conv_in = dim_head + additional_head_dims if pos_scales and pos_scales!=None else global_heads
-            conv_out = dim_headif if pos_scales and pos_scales!=None else global_heads
+            conv_in = (dim_head + additional_head_dims if context else dim_head) if pos_scales and pos_scales!=None else global_heads
+            conv_out = dim_head if pos_scales and pos_scales!=None else global_heads
             self.fast_attention = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,heads=global_heads,num_landmarks=nystromer_landmarks,context=context,transpose_heads_n_dims=bool(pos_scales and pos_scales!=None),conv_in=conv_in,conv_out=conv_out,use_mask=use_mask)
         elif attn == 'performer':
             self.fast_attention = FastAttention(dim_head + additional_head_dims, nb_features, causal = causal, generalized_attention = generalized_attention, kernel_fn = kernel_fn, no_projection = no_projection)
@@ -1569,7 +1572,7 @@ class Attention(nn.Module):
             
             if attn == 'nystrom':
                 conv_in = dim_head + additional_head_dims if pos_scales and pos_scales!=None else heads
-                conv_out = dim_headif if pos_scales and pos_scales!=None else heads
+                conv_out = dim_head if pos_scales and pos_scales!=None else heads
                 self.mem_attn = NystromAttention(dim=dim,dim_head=dim_head + additional_head_dims,context=True,heads=self.heads,num_landmarks=nystromer_landmarks,transpose_heads_n_dims=bool(pos_scales and pos_scales!=None),conv_in=conv_in,conv_out=conv_out)
                 self.prev_state_attn = NystromAttention(dim=dim,dim_head=dim_head,context=True,heads=self.heads,num_landmarks=nystromer_landmarks)
             elif attn == 'performer':

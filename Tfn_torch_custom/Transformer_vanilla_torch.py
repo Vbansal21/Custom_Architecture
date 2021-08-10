@@ -199,7 +199,7 @@ repeated_main_layers: int = 32
 nhead: int = 8 if ET else 16
 dropout: float = (math.pi/10) # 0 <= dropout < ; pi/10 --> 0.3141592653589 : recommended
 mem_tokens: int = 1024
-bptt: int = (1000*4) #- mem_tokens
+bptt: int = (512*8) #- mem_tokens
 bptt_deviation: int = 64
 seq_scale_down: int = 1#max(2**(int(math.log(2,math.log(2,emsize)))),8)
 max_seq_len: int = max(2**14,2**17 // seq_scale_down)
@@ -212,9 +212,9 @@ attn: str = 'nystrom'
 attend_to_self: bool = False
 feature_redraw_interval: int = 1024
 num_mem_static: int = 1024
-num_mem_dyn: int = 1024
+num_mem_dyn: int = 2048
 mem_kv: int = 1024
-local_heads: int = 0
+local_heads: int = 1
 local_heads: int = min(local_heads,nhead)
 
 discriminator: bool = False #INTEGRATED DISCRIMINATOR: DISABLED
@@ -222,7 +222,7 @@ progressive_generation: bool = True
 use_deepspeed: bool = False
 encoder_n_decoder: bool = True
 
-use_sgd: bool = False
+use_sgd: bool = True
 
 
 def batchify(data, bsz,dim=0):
@@ -686,7 +686,7 @@ date_time = str(time.asctime().replace(" ","_")).replace(":","_")
 path = "models"+"/model_"+str(emsize)+"_"+str(nlayers)+"_"+str(nhead)+".tar"
 
 criterion = nn.CrossEntropyLoss()
-lr = 0.0005
+lr = 0.001
 
 if not use_deepspeed:
     if use_sgd:
@@ -708,8 +708,8 @@ else:
     optimizer = torch.optim.Adam(model.parameters(),lr=lr,betas=(0.8,0.999),weight_decay=3e-7,eps=1e-8)
 
 step = 0
-def lambda_lr(step_):
-    a = 50000000
+def lambda_lr(step_,bptt=4096):
+    a = 5000000
     b = 1000
     c = 0.0
     multiplier = (bptt/2048)*batch_size
@@ -736,7 +736,7 @@ def lambda_lr(step_):
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer,lr_lambda=lambda_lr)
 scheduler_disc = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer_disc,lr_lambda=lambda_lr) if discriminator else None
 
-load_optimizer = True
+load_optimizer = bool(use_sgd and True)
 load_scheduler = bool(True and load_optimizer)
 load_step_number = True
 load_tokenizer = True

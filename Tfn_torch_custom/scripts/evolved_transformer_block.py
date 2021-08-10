@@ -53,7 +53,7 @@ class GEGLU(nn.Module):
             nn.Linear(dim_in, dim_out * 2))
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim = -1)
-        return x * F.gelu(gate)   
+        return x * F.gelu(gate)
 
 class SeparableConv1D(nn.Module):
     """ Input: (batch_size, in_channel, length)

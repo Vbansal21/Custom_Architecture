@@ -27,9 +27,9 @@ class LayerNormLSTMCell(nn.Module):
         x = self.ln_i2h(i2h) + self.ln_h2h(h2h)
         gates = x.split(self.num_hidden, 1)
 
-        in_gate = F.sigmoid(gates[0])
-        forget_gate = F.sigmoid(gates[1] + self.forget_gate_bias)
-        out_gate = F.sigmoid(gates[2])
+        in_gate = torch.sigmoid(gates[0])
+        forget_gate = torch.sigmoid(gates[1] + self.forget_gate_bias)
+        out_gate = torch.sigmoid(gates[2])
         in_transform = F.tanh(gates[3])
 
         cx = forget_gate * cx + in_gate * in_transform
